@@ -258,10 +258,57 @@ RvSocket RvServiceRegister(const char* relay_host, unsigned short port,
     return (RvSocket)s;
 }
 
-bool RvServiceWaitPaired(RvSocket s)
+bool RvServiceWaitPaired(RvSocket s, int nTimeoutSecs)
 {
+    // A registration socket is idle on purpose -- we announce ourselves and
+    // wait, possibly for a long time, for someone to dial. ConnectTo() clears
+    // the socket timeout for exactly that reason, and with no timeout at all
+    // this recv() has no way to end when the path dies without either side
+    // saying so: a NAT drops the idle mapping, a relay restarts, a route
+    // changes. No FIN arrives, nothing is readable, and the call never
+    // returns. The thread stays alive and asleep, so ThreadBtfAccept never
+    // reaches the `continue` that would register again, and the node goes deaf
+    // while every outward sign says it is healthy.
+    //
+    // Seen in production on the bootstrap seed: 27 minutes without a block,
+    // eight behind the network, relay reachable throughout, fixed instantly by
+    // a restart.
+    //
+    // TCP keepalive is the obvious answer and it does not work here -- I
+    // measured it. With probes every 5s and a 2-probe limit, a socket whose
+    // replies were being dropped was still ESTAB after four minutes, the probe
+    // counter stuck at zero. So the timeout is ours to enforce, at the one
+    // place that knows what waiting means.
+    //
+    // Expiring is not a failure. It costs one reconnect per interval and
+    // returns the loop to a known state.
+    if (nTimeoutSecs > 0)
+    {
+#ifdef _WIN32
+        DWORD tv = (DWORD)nTimeoutSecs * 1000;
+        setsockopt((SOCKET)s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+#else
+        struct timeval tv; tv.tv_sec = nTimeoutSecs; tv.tv_usec = 0;
+        setsockopt((SOCKET)s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    }
+
     unsigned char paired = 0;
-    return ReadN((SOCKET)s, &paired, 1) && paired == 0x01;
+    bool fOk = ReadN((SOCKET)s, &paired, 1) && paired == 0x01;
+
+    // Hand back a socket that blocks again: from here it is a data tunnel, and
+    // a tunnel legitimately sits quiet between messages.
+    if (fOk && nTimeoutSecs > 0)
+    {
+#ifdef _WIN32
+        DWORD tvOff = 0;
+        setsockopt((SOCKET)s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tvOff, sizeof(tvOff));
+#else
+        struct timeval tvOff; tvOff.tv_sec = 0; tvOff.tv_usec = 0;
+        setsockopt((SOCKET)s, SOL_SOCKET, SO_RCVTIMEO, &tvOff, sizeof(tvOff));
+#endif
+    }
+    return fOk;
 }
 
 RvSocket RvClientConnect(const char* relay_host, unsigned short port,

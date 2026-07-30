@@ -783,12 +783,17 @@ void ThreadBtfAccept(void* parg)
         LogPrint("net", "rendezvous: registered at %s, waiting for a dial\n",
                  strMeeting.c_str());
 
-        // Now block for someone to arrive.
-        if (!btf::RvServiceWaitPaired(rv))
+        // Now wait for someone to arrive -- but not forever. This used to have
+        // no bound, and a registration whose path died quietly left the thread
+        // parked in recv() with nothing to wake it: the loop never came back
+        // here, the node stopped being reachable, and nothing in the log said
+        // so. Re-registering every few minutes when nobody has dialled costs
+        // one reconnect and removes the whole failure mode.
+        if (!btf::RvServiceWaitPaired(rv, BTF_RENDEZVOUS_WAIT_SECS))
         {
             btf::RvClose(rv);
-            LogPrint("net", "rendezvous: %s dropped us before any dial, re-registering\n",
-                     strMeeting.c_str());
+            LogPrint("net", "rendezvous: no dial at %s within %ds (or it dropped us), "
+                     "re-registering\n", strMeeting.c_str(), BTF_RENDEZVOUS_WAIT_SECS);
             continue;
         }
 

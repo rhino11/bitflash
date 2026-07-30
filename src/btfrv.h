@@ -49,7 +49,12 @@ RvSocket RvServiceRegister(const char* relay_host, unsigned short port,
 // Block on a registered service socket until a client is paired to us. Returns
 // false if the relay drops us or errors, in which case the caller should close
 // the socket and register again.
-bool RvServiceWaitPaired(RvSocket s);
+// Blocks until a client is paired with us. Give it a timeout, in seconds, and
+// it returns false once that passes with nobody arriving -- which the caller
+// should treat as "register again", not as an error. Zero means wait forever,
+// which is what this used to do unconditionally and must not be used for a
+// registration socket: see the note on the implementation.
+bool RvServiceWaitPaired(RvSocket s, int nTimeoutSecs = 0);
 
 // ---- client side (the node dialing a .btf address) ----
 // Connect through the relay to the service registered under `target_pubkey`.

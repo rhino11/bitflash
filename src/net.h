@@ -43,6 +43,14 @@ static const unsigned int MAX_PEX_DESCRIPTOR_BYTES = 1024;
 // connection is the intended traffic; anything faster is someone else's idea.
 static const int64        PEX_MIN_INTERVAL         = 60;
 
+// How long to sit registered at a rendezvous relay before giving up on this
+// attempt and registering again. Bounded because a registration socket that
+// goes quiet is indistinguishable, from inside recv(), from one whose path has
+// died -- and the second kind never wakes up. Five minutes is short enough
+// that a node is unreachable only briefly and long enough that the reconnect
+// traffic is nothing: one per relay per five minutes.
+static const int          BTF_RENDEZVOUS_WAIT_SECS = 300;
+
 // Descriptors to hand a peer: ours first, then peers that answered us.
 void BtfPexCollect(std::vector<std::string>& vDescOut);
 // Verify descriptors a peer sent and remember the good ones. Returns how many.
