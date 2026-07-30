@@ -51,6 +51,7 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
     vector<bool> vfExec;
     vector<valtype> stack;
     vector<valtype> altstack;
+    unsigned int nOpCount = 0;
     if (pvStackRet)
         pvStackRet->clear();
 
@@ -83,6 +84,13 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
             opcode == OP_OR    || opcode == OP_XOR    || opcode == OP_2MUL  ||
             opcode == OP_2DIV  || opcode == OP_MUL    || opcode == OP_DIV   ||
             opcode == OP_MOD   || opcode == OP_LSHIFT || opcode == OP_RSHIFT)
+            return false;
+
+        // Counted outside fExec for the same reason: the cost of a script must
+        // not depend on which branch a signature happens to take. Pushes are
+        // exempt because their cost is already bounded by the script's own
+        // length and by MAX_SCRIPT_ELEMENT_SIZE.
+        if (opcode > OP_16 && ++nOpCount > MAX_OPS_PER_SCRIPT)
             return false;
 
         if (fExec && opcode <= OP_PUSHDATA4)
@@ -824,6 +832,11 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
             default:
                 return false;
         }
+
+        // Both stacks together, because OP_TOALTSTACK would otherwise move the
+        // problem rather than solve it.
+        if (stack.size() + altstack.size() > MAX_STACK_SIZE)
+            return false;
     }
 
 

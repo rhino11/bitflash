@@ -8,6 +8,15 @@ class CTransaction;
 // script evaluation allocates whatever the transaction asks it to.
 static const unsigned int MAX_SCRIPT_ELEMENT_SIZE = 520;
 
+// Bounds on what one script may do while being evaluated. The element cap
+// above limits how big a single item is; these limit how many there can be and
+// how much work producing them costs. Without them, a script pays for itself
+// once, in bytes, and then multiplies: 520 bytes per stack entry means a
+// script of N bytes made almost entirely of OP_DUP occupies roughly 520N in
+// memory, and every node that validates it pays.
+static const unsigned int MAX_OPS_PER_SCRIPT     = 201;
+static const unsigned int MAX_STACK_SIZE         = 1000;
+
 enum
 {
     SIGHASH_ALL = 1,
