@@ -409,6 +409,13 @@ bool LoadWallet();
 // address created after this call are not spendable from the file it writes.
 bool BackupWallet(const string& strDest);
 
+// Plain-text key export/import: no Berkeley DB, no environment, no version
+// coupling. What you fall back on when wallet.dat itself will not cooperate.
+// DumpWallet refuses to overwrite an existing file and writes owner-only on
+// POSIX -- the output holds private keys in the clear.
+bool DumpWallet(const string& strDest);
+bool ImportWallet(const string& strSrc, int& nAddedRet, int& nSkippedRet);
+
 inline bool SetAddressBookName(const string& strAddress, const string& strName)
 {
     return CWalletDB().WriteName(strAddress, strName);

@@ -98,6 +98,30 @@ The second point is the pre-BIP32 problem that deterministic wallets were
 invented to solve; see [#47](https://github.com/Bitflash-sh/bitflash/issues/47).
 Until that lands, repetition is the only defence.
 
+### When wallet.dat itself will not open
+
+Everything above still runs through Berkeley DB. If the database is the thing
+that is broken — a build that will not read it, a file truncated by a bad copy,
+an environment beyond recovery — the keys are usually still fine, and you can
+take them out as text:
+
+```
+bitflash -dumpwallet=/path/to/keys.txt
+bitflash -importwallet=/path/to/keys.txt   # into any wallet, on any machine
+```
+
+One key per line with its address and label, no database and no environment.
+Importing skips keys the wallet already holds, so running it twice is safe, and
+an unreadable line is reported and stepped over rather than abandoning the rest.
+Restart the node afterwards so it scans the chain for transactions belonging to
+the new keys.
+
+**The dump is your private keys in the clear.** Anyone who reads that file can
+spend those coins. It is written owner-only on Linux and macOS; on Windows it
+inherits whatever the containing folder allows, so choose the folder carefully.
+Move it somewhere safe and delete the copy. `-dumpwallet` will not overwrite an
+existing file.
+
 ---
 
 ## Mining

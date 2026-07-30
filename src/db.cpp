@@ -708,3 +708,194 @@ bool BackupWallet(const string& strDest)
     printf("BackupWallet() : wrote %s\n", strDest.c_str());
     return true;
 }
+
+
+// ---- plain-text key export/import ------------------------------------------
+//
+// The last door out. Everything else in this file assumes Berkeley DB will
+// cooperate; these two do not. A wallet.dat can be unreadable for reasons that
+// have nothing to do with your keys being gone -- a version this build does not
+// understand, a file truncated by a bad copy, an environment that cannot be
+// recovered -- and until now that meant the coins were unreachable even though
+// the secrets were sitting right there. Issue #40 is one person's account of
+// exactly that.
+//
+// The format is deliberately dull: a text file, one key per line, no database,
+// no environment, no framing. Anything that can read a line can recover from it.
+
+static int HexDigitValue(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static bool ParseHexInto(const string& str, vector<unsigned char>& vchRet)
+{
+    vchRet.clear();
+    if (str.empty() || (str.size() % 2) != 0)
+        return false;
+    for (size_t i = 0; i < str.size(); i += 2)
+    {
+        int hi = HexDigitValue(str[i]);
+        int lo = HexDigitValue(str[i + 1]);
+        if (hi < 0 || lo < 0)
+            return false;
+        vchRet.push_back((unsigned char)((hi << 4) | lo));
+    }
+    return true;
+}
+
+bool DumpWallet(const string& strDest)
+{
+    if (strDest.empty())
+        return error("DumpWallet() : no destination given\n");
+
+    // Never over an existing file. The whole point is to hold the only copy of
+    // something irreplaceable, and a mistyped path must not eat one.
+    if (FileExists(strDest.c_str()))
+        return error("DumpWallet() : %s already exists -- refusing to overwrite\n",
+                     strDest.c_str());
+
+    FILE* pf = fopen(strDest.c_str(), "w");
+    if (!pf)
+        return error("DumpWallet() : cannot write %s\n", strDest.c_str());
+#ifndef _WIN32
+    // Before a single key reaches it.
+    chmod(strDest.c_str(), S_IRUSR | S_IWUSR);
+#endif
+
+    fprintf(pf, "# Bitflash wallet key dump\n");
+    fprintf(pf, "# %s\n", DateTimeStr(GetTime()).c_str());
+    fprintf(pf, "#\n");
+    fprintf(pf, "# THIS FILE CONTAINS PRIVATE KEYS IN PLAIN TEXT.\n");
+    fprintf(pf, "# Anyone who reads it can spend these coins. Treat it as cash.\n");
+    fprintf(pf, "#\n");
+    fprintf(pf, "# One key per line:  <private-key-hex> <address> [label]\n");
+    fprintf(pf, "# The key is the DER encoding, hex; restore with -importwallet=FILE.\n");
+    fprintf(pf, "#\n");
+
+    int nKeys = 0;
+    bool fOk = true;
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        for (map<vector<unsigned char>, CPrivKey>::iterator mi = mapKeys.begin();
+             mi != mapKeys.end(); ++mi)
+        {
+            const vector<unsigned char>& vchPubKey = (*mi).first;
+            const CPrivKey& vchPrivKey = (*mi).second;
+
+            string strAddress = PubKeyToAddress(vchPubKey);
+            string strLabel;
+            map<string, string>::iterator mia = mapAddressBook.find(strAddress);
+            if (mia != mapAddressBook.end())
+                strLabel = (*mia).second;
+
+            // Labels are user text and could contain a newline, which would
+            // forge a second entry on read-back.
+            for (size_t i = 0; i < strLabel.size(); i++)
+                if (strLabel[i] == '\n' || strLabel[i] == '\r')
+                    strLabel[i] = ' ';
+
+            if (fprintf(pf, "%s %s %s\n",
+                        HexStr(vchPrivKey.begin(), vchPrivKey.end(), false).c_str(),
+                        strAddress.c_str(),
+                        strLabel.c_str()) < 0)
+            { fOk = false; break; }
+            nKeys++;
+        }
+    }
+
+    if (fclose(pf) != 0)
+        fOk = false;
+    if (!fOk)
+    {
+        remove(strDest.c_str());
+        return error("DumpWallet() : writing %s failed\n", strDest.c_str());
+    }
+
+    printf("DumpWallet() : wrote %d key(s) to %s\n", nKeys, strDest.c_str());
+    return true;
+}
+
+bool ImportWallet(const string& strSrc, int& nAddedRet, int& nSkippedRet)
+{
+    nAddedRet = 0;
+    nSkippedRet = 0;
+
+    FILE* pf = fopen(strSrc.c_str(), "r");
+    if (!pf)
+        return error("ImportWallet() : cannot read %s\n", strSrc.c_str());
+
+    char buf[8192];
+    int nLine = 0;
+    int nBad = 0;
+    while (fgets(buf, sizeof(buf), pf))
+    {
+        nLine++;
+        string strLine = buf;
+        while (!strLine.empty() && (strLine[strLine.size()-1] == '\n' ||
+                                    strLine[strLine.size()-1] == '\r'))
+            strLine.resize(strLine.size() - 1);
+        if (strLine.empty() || strLine[0] == '#')
+            continue;
+
+        string strHex = strLine.substr(0, strLine.find(' '));
+        vector<unsigned char> vchPrivKey;
+        if (!ParseHexInto(strHex, vchPrivKey))
+        {
+            printf("ImportWallet() : line %d is not a hex key, skipped\n", nLine);
+            nBad++;
+            continue;
+        }
+
+        CKey key;
+        // A key this build cannot load is reported and stepped over rather than
+        // aborting the run: one damaged line in a salvage file must not cost
+        // the reader every other key in it.
+        try
+        {
+            CPrivKey vchSecure(vchPrivKey.begin(), vchPrivKey.end());
+            if (!key.SetPrivKey(vchSecure))
+            {
+                printf("ImportWallet() : line %d is not a usable key, skipped\n", nLine);
+                nBad++;
+                continue;
+            }
+        }
+        catch (const std::exception& e)
+        {
+            printf("ImportWallet() : line %d rejected (%s), skipped\n", nLine, e.what());
+            nBad++;
+            continue;
+        }
+
+        bool fHave = false;
+        CRITICAL_BLOCK(cs_mapKeys)
+            fHave = mapKeys.count(key.GetPubKey()) > 0;
+        if (fHave)
+        {
+            nSkippedRet++;   // already ours; importing twice is not an error
+            continue;
+        }
+
+        if (!AddKey(key))
+        {
+            fclose(pf);
+            return error("ImportWallet() : failed to store key from line %d\n", nLine);
+        }
+        nAddedRet++;
+    }
+    fclose(pf);
+
+    printf("ImportWallet() : %d added, %d already present, %d unreadable\n",
+           nAddedRet, nSkippedRet, nBad);
+
+    // Imported keys are only useful once their transactions are noticed, and
+    // that scan is a full pass over the chain the node does at startup.
+    if (nAddedRet > 0)
+        printf("ImportWallet() : restart the node so it can find transactions "
+               "belonging to the new keys\n");
+    return true;
+}

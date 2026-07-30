@@ -70,6 +70,9 @@ static void PrintUsage()
     printf("Wallet:\n");
     printf("  /backupwallet=FILE         (write a wallet.dat that opens on its own,\n");
     printf("                              then exit; run it again after new addresses)\n");
+    printf("  /dumpwallet=FILE           (export private keys as text -- readable by\n");
+    printf("                              anyone, so guard it like cash)\n");
+    printf("  /importwallet=FILE         (load keys from such a file back in)\n");
     printf("\n");
     printf("Each option also accepts '-' instead of '/'.\n");
 }
@@ -241,6 +244,36 @@ int main(int argc, char* argv[])
         }
         else
             fprintf(stderr, "Backup failed -- nothing was written.\n");
+        DBFlush(true);
+        return fOk ? 0 : 1;
+    }
+
+    string strDump = argval2(argc, argv, "/dumpwallet", "-dumpwallet");
+    if (!strDump.empty())
+    {
+        bool fOk = DumpWallet(strDump);
+        if (fOk)
+        {
+            printf("Wrote %s\n", strDump.c_str());
+            printf("It holds your private keys as readable text. Anyone with the file "
+                   "can spend these coins -- keep it off shared storage and delete it "
+                   "once you have it somewhere safe.\n");
+        }
+        else
+            fprintf(stderr, "Export failed -- nothing was written.\n");
+        DBFlush(true);
+        return fOk ? 0 : 1;
+    }
+
+    string strImport = argval2(argc, argv, "/importwallet", "-importwallet");
+    if (!strImport.empty())
+    {
+        int nAdded = 0, nSkipped = 0;
+        bool fOk = ImportWallet(strImport, nAdded, nSkipped);
+        if (fOk)
+            printf("Imported %d key(s); %d were already here.\n", nAdded, nSkipped);
+        else
+            fprintf(stderr, "Import failed.\n");
         DBFlush(true);
         return fOk ? 0 : 1;
     }
