@@ -10,6 +10,7 @@
 #undef snprintf
 #endif
 #include "headers.h"
+#include <thread>          // hardware_concurrency, for the miner thread count
 #ifdef _WIN32
 #include <winsock2.h>
 #endif
@@ -1224,18 +1225,63 @@ void ThreadMessageHandler2(void* parg)
 
 
 
-//// todo: start one thread per processor, use getenv("NUMBER_OF_PROCESSORS")
+// Satoshi's "todo: start one thread per processor" stood here since 2009 and is
+// what MinerThreadCount() and StartMinerThreads() below finally do -- by way of
+// std::thread::hardware_concurrency rather than NUMBER_OF_PROCESSORS, which only
+// ever existed on Windows.
+//
+// Miners share slot 3 of vfThreadRunning, and StopNode waits for every slot to
+// go false before the node tears the database down. With one miner that was the
+// same thing as "the miner finished"; with several, the first one out would
+// announce that everybody had finished while the rest were still hashing and
+// still calling ProcessBlock. So count them, and let only the last one leaving
+// clear the flag.
+static CCriticalSection cs_nMinersRunning;
+static int nMinersRunning = 0;
+
 void ThreadBitcoinMiner(void* parg)
 {
-    vfThreadRunning[3] = true;
-    CheckForShutdown(3);
+    int nThreadId = (int)(intptr_t)parg;
+    CRITICAL_BLOCK(cs_nMinersRunning)
+    {
+        nMinersRunning++;
+        vfThreadRunning[3] = true;
+    }
     try
     {
-        bool fRet = BitcoinMiner();
-        printf("BitcoinMiner returned %s\n\n\n", fRet ? "true" : "false");
+        bool fRet = BitcoinMiner(nThreadId);
+        printf("BitcoinMiner thread %d returned %s\n", nThreadId, fRet ? "true" : "false");
     }
     CATCH_PRINT_EXCEPTION("BitcoinMiner()")
-    vfThreadRunning[3] = false;
+    CRITICAL_BLOCK(cs_nMinersRunning)
+    {
+        if (--nMinersRunning <= 0)
+        {
+            nMinersRunning = 0;
+            vfThreadRunning[3] = false;
+        }
+    }
+}
+
+// Start the miners. Returns how many actually got off the ground.
+int StartMinerThreads()
+{
+    int nThreads = MinerThreadCount();
+    int nStarted = 0;
+    for (int i = 0; i < nThreads; i++)
+    {
+        if (_beginthread(ThreadBitcoinMiner, 0, (void*)(intptr_t)(i + 1)) == (uintptr_t)-1)
+            printf("Error: _beginthread(ThreadBitcoinMiner) failed on thread %d\n", i + 1);
+        else
+            nStarted++;
+    }
+    // The dataset is one allocation shared by all of them; only the 2 MB
+    // scratchpads multiply. Printed because "why is it using 2 GB" is the first
+    // question anyone asks.
+    printf("Mining with %d thread(s) of %u core(s) -- about %d MB "
+           "(~2080 MB shared RandomX dataset + ~2 MB per thread)\n",
+           nStarted, std::thread::hardware_concurrency(), 2080 + 2 * nStarted);
+    return nStarted;
 }
 
 

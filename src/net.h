@@ -58,6 +58,8 @@ int  BtfPexAccept(const std::vector<std::string>& vDesc);
 void AbandonRequests(void (*fn)(void*, CDataStream&), void* param1);
 bool AnySubscribed(unsigned int nChannel);
 void ThreadBitcoinMiner(void* parg);
+// Starts MinerThreadCount() miners; returns how many came up.
+int  StartMinerThreads();
 bool StartNode(string& strError=REF(string()));
 bool StopNode();
 void CheckForShutdown(int n);

@@ -1,6 +1,7 @@
 // Bitflash entry point -- starts node threads then runs GUI (or headless).
 
 #include "headers_core.h"
+#include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
 #include <csignal>
 #endif
@@ -52,6 +53,7 @@ static void PrintUsage()
     printf("  /operator\n");
     printf("  /participant=POOL_BTF_ADDRESS\n");
     printf("  /solomine\n");
+    printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
     printf("\n");
     printf("Pool operator announcement:\n");
     printf("  /poolname=NAME\n");
@@ -98,6 +100,26 @@ static void ParseStartupArguments(int argc, char* argv[])
 
     if (arg(argc,argv,"/solomine") || arg(argc,argv,"-solomine"))
         fSoloMineTest = true;
+
+    // /genproclimit=N -- threads to hash with. 0 or absent means automatic,
+    // which is every core but one. Named after Bitcoin's own option so it reads
+    // familiarly to anyone who has run one of these before.
+    string strProcLimit = argval2(argc, argv, "/genproclimit", "-genproclimit");
+    if (!strProcLimit.empty())
+    {
+        int n = atoi(strProcLimit.c_str());
+        unsigned int nCores = std::thread::hardware_concurrency();
+        if (n < 0)
+            fprintf(stderr, "Ignoring /genproclimit=%s: not a thread count\n",
+                    strProcLimit.c_str());
+        else if (nCores > 0 && n > (int)nCores * 4)
+            // Well past diminishing returns, and every thread still costs a
+            // scratchpad. Refuse rather than quietly thrash the machine.
+            fprintf(stderr, "Ignoring /genproclimit=%d: this machine has %u core(s)\n",
+                    n, nCores);
+        else
+            nMinerThreads = n;   // 0 stays automatic
+    }
 
     if (arg(argc,argv,"/operator") || arg(argc,argv,"-operator"))
         nMineMode = MINE_OPERATOR;
@@ -289,8 +311,7 @@ int main(int argc, char* argv[])
             printf("Error: _beginthread(ThreadRPCServer) failed\n");
     }
     if (fGenerateBitcoins)
-        if (_beginthread(ThreadBitcoinMiner, 0, NULL) == (uintptr_t)-1)
-            printf("Error: _beginthread(ThreadBitcoinMiner) failed\n");
+        StartMinerThreads();
 
 #ifdef BITFLASH_NO_GUI
     // Nothing else this binary can do; /nogui is accepted and redundant.

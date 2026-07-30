@@ -32,6 +32,7 @@ int64  GetBalance();
 string PubKeyToAddress(const std::vector<unsigned char>& vchPubKey);
 bool   AddressToHash160(const std::string& str, uint160& hash160Ret);
 void   ThreadBitcoinMiner(void*);
+int    StartMinerThreads();
 void   ThreadRPCServer(void*);
 
 // ---------------------------------------------------------------------------
@@ -762,7 +763,7 @@ static void DrawOptionsDialog()
                 fGenerateBitcoins = 0;
             } else {
                 fGenerateBitcoins = 1;
-                if (!vfThreadRunning[3]) _beginthread(ThreadBitcoinMiner, 0, NULL);
+                if (!vfThreadRunning[3]) StartMinerThreads();
             }
 
             if (nMineMode == MINE_OPERATOR) {

@@ -72,6 +72,13 @@ bool fSoloMineTest = false; // /solomine: mine without requiring a peer (local t
 
 // Settings
 int fGenerateBitcoins;
+// How many threads to hash with. 0 means "decide from the hardware" -- see
+// MinerThreadCount(). This was effectively 1 forever, because Bitcoin 0.1.0
+// started exactly one miner thread and nothing here ever changed that. It made
+// sense for SHA-256d in 2009; RandomX is built to be fed by every core at once,
+// so a 32-core machine was mining at a thirty-second of its capacity and the
+// only visible symptom was a suspiciously idle CPU.
+int nMinerThreads = 0;
 int64 nTransactionFee = 0;
 CAddress addrIncoming;
 int    nMineMode        = MINE_RELAY;
@@ -118,6 +125,26 @@ void GetParticipantMiningStats(uint64& sharesSent, uint64& sharesAccepted, doubl
 //
 // mapKeys
 //
+
+// Threads to hash with, resolving the automatic case.
+//
+// Automatic leaves one core to the rest of the node -- accepting blocks,
+// talking to peers, serving the GUI -- because a machine that mines perfectly
+// while falling behind the chain has won nothing. Anyone who disagrees can say
+// so with /genproclimit and get exactly what they ask for.
+//
+// Memory is not the reason to hold back: the ~2 GB RandomX dataset is shared by
+// every thread, and each one adds only its own 2 MB scratchpad. Sixteen threads
+// cost about 32 MB more than one.
+int MinerThreadCount()
+{
+    if (nMinerThreads > 0)
+        return nMinerThreads;
+    unsigned int nCores = std::thread::hardware_concurrency();
+    if (nCores <= 1)
+        return 1;
+    return (int)(nCores - 1);
+}
 
 bool AddKey(const CKey& key)
 {
@@ -2769,7 +2796,7 @@ static bool PoolParticipantMiner()
     return true;
 }
 
-bool BitcoinMiner()
+bool BitcoinMiner(int nThreadId)
 {
     // Relay mode: never mines, just relays/syncs. (Shouldn't normally get here
     // since the GUI hides Start Mining for Relay, but guard it regardless.)
@@ -2809,11 +2836,17 @@ bool BitcoinMiner()
     while (fGenerateBitcoins)
     {
         Sleep(50);
-        CheckForShutdown(3);
+        // Return instead of _endthread()ing. With more than one miner thread the
+        // bookkeeping in ThreadBitcoinMiner has to run on the way out, and
+        // _endthread() does not unwind on Windows, so a normal return is the
+        // only exit that works the same on both platforms.
+        if (fShutdown)
+            return true;
         while (vNodes.empty() && !fSoloMineTest)
         {
             Sleep(1000);
-            CheckForShutdown(3);
+            if (fShutdown)
+                return true;
         }
 
         unsigned int nTransactionsUpdatedLast = nTransactionsUpdated;
@@ -2908,8 +2941,11 @@ bool BitcoinMiner()
             Sleep(1000);
             continue;
         }
-        LogPrint("net", "BitcoinMiner: mining with RandomX (%s)\n",
-               RandomXFastReady() ? "fast 2GB" : "light 256MB");
+        // The thread number is in the line on purpose: every miner would
+        // otherwise print the same text, and the dedup filter would fold them
+        // into one, leaving no way to tell four threads from one.
+        LogPrint("net", "BitcoinMiner: thread %d hashing with RandomX (%s)\n",
+               nThreadId, RandomXFastReady() ? "fast 2GB" : "light 256MB");
 
         unsigned int nStart = GetTime();
         uint256 hashTarget = CBigNum().SetCompact(pblock->nBits).getuint256();
@@ -2950,7 +2986,8 @@ bool BitcoinMiner()
             // ~256 hashes is already plenty of time)
             if ((++pblock->nNonce & 0xff) == 0)
             {
-                CheckForShutdown(3);
+                if (fShutdown)
+                    break;          // falls through to RandomXDestroyMinerVM below
                 if (pblock->nNonce == 0)
                     break;
                 if (pindexPrev != pindexBest)
@@ -2963,6 +3000,8 @@ bool BitcoinMiner()
             }
         }
         RandomXDestroyMinerVM(rxvm);
+        if (fShutdown)
+            break;
     }
 
     return true;

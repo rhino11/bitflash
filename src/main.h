@@ -73,6 +73,10 @@ extern string strPoolName;        // operator: announced pool name
 extern string strPoolDashboardUrl; // operator: optional dashboard URL
 extern double dPoolFeePercent;     // operator: announced fee percent
 extern bool fSoloMineTest; // /solomine: mine without requiring a peer (local test)
+// Threads to hash with; 0 = decide from the hardware. Set by /genproclimit.
+extern int nMinerThreads;
+// Resolves the automatic case into a real count.
+int MinerThreadCount();
 extern bool gPoolServerRunning;    // GUI/startup state
 extern volatile bool gPoolRunning; // runtime pool server loop flag (rpc.cpp)
 
@@ -117,7 +121,9 @@ void PrintBlockTree();
 void AddOrphanTx(const CDataStream& vMsg);
 void EraseOrphanTx(uint256 hash);
 void LimitOrphanTx(unsigned int nMaxOrphans);
-bool BitcoinMiner();
+// nThreadId is 1..N, only for logging: it makes each miner's lines
+// distinguishable, which the dedup filter would otherwise collapse into one.
+bool BitcoinMiner(int nThreadId = 1);
 void ThreadRPCServer(void* parg);  // rpc.cpp -- .btf pool server
 void GetParticipantMiningStats(uint64& sharesSent, uint64& sharesAccepted, double& hashRate);
 void SetParticipantMiningStatus(const std::string& status);
