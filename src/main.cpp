@@ -898,7 +898,7 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
             }
 
             if (prevout.n >= txPrev.vout.size() || prevout.n >= txindex.vSpent.size())
-                return error("ConnectInputs() : %s prevout.n out of range %d %d %d", GetHash().ToString().substr(0,6).c_str(), prevout.n, txPrev.vout.size(), txindex.vSpent.size());
+                return error("ConnectInputs() : %s prevout.n out of range %d %d %d", GetHash().ToString().substr(0,6).c_str(), prevout.n, (int)txPrev.vout.size(), (int)txindex.vSpent.size());
 
             // If prev is coinbase, check that it's matured
             if (txPrev.IsCoinBase())
@@ -1690,14 +1690,14 @@ void PrintBlockTree()
             pindex->nBlockPos,
             block.GetHash().ToString().substr(0,14).c_str(),
             DateTimeStr(block.nTime).c_str(),
-            block.vtx.size());
+            (int)block.vtx.size());
 
         CRITICAL_BLOCK(cs_mapWallet)
         {
             if (mapWallet.count(block.vtx[0].GetHash()))
             {
                 CWalletTx& wtx = mapWallet[block.vtx[0].GetHash()];
-                printf("    mine:  %d  %d  %d", wtx.GetDepthInMainChain(), wtx.GetBlocksToMaturity(), wtx.GetCredit());
+                printf("    mine:  %d  %d  %lld", wtx.GetDepthInMainChain(), wtx.GetBlocksToMaturity(), wtx.GetCredit());
             }
         }
         printf("\n");
@@ -1759,7 +1759,7 @@ bool ProcessMessages(CNode* pfrom)
     CDataStream& vRecv = pfrom->vRecv;
     if (vRecv.empty())
         return true;
-    LogPrint("net", "ProcessMessages(%d bytes)\n", vRecv.size());
+    LogPrint("net", "ProcessMessages(%d bytes)\n", (int)vRecv.size());
 
     //
     // Message format
@@ -1783,7 +1783,7 @@ bool ProcessMessages(CNode* pfrom)
             break;
         }
         if (pstart - vRecv.begin() > 0)
-            if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE SKIPPED %d BYTES\n\n", pstart - vRecv.begin());
+            if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE SKIPPED %d BYTES\n\n", (int)(pstart - vRecv.begin()));
         vRecv.erase(vRecv.begin(), pstart);
 
         // Read header
@@ -1836,7 +1836,7 @@ bool ProcessMessages(CNode* pfrom)
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 {
     static map<unsigned int, vector<unsigned char> > mapReuseKey;
-    if (LogAcceptsCategory("net")) { printf("received: %-12s (%d bytes)  ", strCommand.c_str(), vRecv.size()); for (int i = 0; i < min(vRecv.size(), (unsigned int)25); i++) printf("%02x ", vRecv[i] & 0xff); printf("\n"); }
+    if (LogAcceptsCategory("net")) { printf("received: %-12s (%d bytes)  ", strCommand.c_str(), (int)vRecv.size()); for (int i = 0; i < min(vRecv.size(), (unsigned int)25); i++) printf("%02x ", vRecv[i] & 0xff); printf("\n"); }
     if (nDropMessagesTest > 0 && GetRand(nDropMessagesTest) == 0)
     {
         if (LogAcceptsCategory("net")) printf("dropmessages DROPPING RECV MESSAGE\n");
@@ -2171,7 +2171,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 
 
     if (!vRecv.empty())
-        if (LogAcceptsCategory("net")) printf("ProcessMessage(%s) : %d extra bytes\n", strCommand.c_str(), vRecv.size());
+        if (LogAcceptsCategory("net")) printf("ProcessMessage(%s) : %d extra bytes\n", strCommand.c_str(), (int)vRecv.size());
 
     return true;
 }
@@ -2885,7 +2885,7 @@ bool BitcoinMiner()
         }
         pblock->nBits = nBits;
         pblock->vtx[0].vout[0].nValue = pblock->GetBlockValue(nBestHeight + 1, nFees);
-        if (LogAcceptsCategory("net")) printf("\n\nRunning BitcoinMiner with %d transactions in block\n", pblock->vtx.size());
+        if (LogAcceptsCategory("net")) printf("\n\nRunning BitcoinMiner with %d transactions in block\n", (int)pblock->vtx.size());
 
 
         //

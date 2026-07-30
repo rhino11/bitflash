@@ -180,7 +180,7 @@ void RandAddSeed(bool fPerfmon)
             RAND_add(&hash, sizeof(hash), min(nSize/500.0, (double)sizeof(hash)));
             hash = 0;
             memset(pdata, 0, nSize);
-            printf("RandAddSeed() got %d bytes of performance data\n", nSize);
+            printf("RandAddSeed() got %lu bytes of performance data\n", nSize);
         }
     }
 #else
@@ -472,7 +472,7 @@ void AddTimeData(unsigned int ip, int64 nTime)
     if (vTimeOffsets.empty())
         vTimeOffsets.push_back(0);
     vTimeOffsets.push_back(nOffsetSample);
-    printf("Added time data, samples %d, ip %08x, offset %+lld (%+lld minutes)\n", vTimeOffsets.size(), ip, vTimeOffsets.back(), vTimeOffsets.back()/60);
+    printf("Added time data, samples %d, ip %08x, offset %+lld (%+lld minutes)\n", (int)vTimeOffsets.size(), ip, vTimeOffsets.back(), vTimeOffsets.back()/60);
     if (vTimeOffsets.size() >= 5 && vTimeOffsets.size() % 2 == 1)
     {
         sort(vTimeOffsets.begin(), vTimeOffsets.end());

@@ -14,7 +14,9 @@ typedef unsigned long long  uint64;
 #define for  if (false) ; else for
 #endif
 
-#ifndef _MSC_VER
+// MinGW already provides __forceinline for MSVC compatibility, so defining it
+// unconditionally warned ten times per build once -w was removed.
+#if !defined(_MSC_VER) && !defined(__forceinline)
 #define __forceinline  inline
 #endif
 
@@ -40,16 +42,16 @@ typedef unsigned long long  uint64;
 #endif
 #define snprintf my_snprintf
 
+// One definition for every target. The MSVCRT branch that used to sit here
+// produced "I64d", which is the specifier that segfaults on glibc (issue #5) --
+// and it was pointless besides: this build targets UCRT, which accepts the C99
+// forms, and the rest of the tree already prints int64 with %lld on Windows.
+// Keeping one spelling everywhere is also what lets the format attributes below
+// use a single archetype, so a bad specifier fails the build on both platforms.
 #ifndef PRId64
-#if defined(_MSC_VER) || defined(__BORLANDC__) || defined(__MSVCRT__)
-#define PRId64  "I64d"
-#define PRIu64  "I64u"
-#define PRIx64  "I64x"
-#else
 #define PRId64  "lld"
 #define PRIu64  "llu"
 #define PRIx64  "llx"
-#endif
 #endif
 
 // This is needed because the foreach macro can't get over the comma in pair<t1, t2>
@@ -102,10 +104,30 @@ void LogPrintDedup(const char* category, const char* file, int line, const std::
 #define LogPrint(category, ...) \
     do { if (LogAcceptsCategory(category)) LogPrintDedup((category), __FILE__, __LINE__, strprintf(__VA_ARGS__)); } while (0)
 
+// Every format string in this project goes through one of the four functions
+// below -- `printf` itself is remapped to OutputDebugStringF just above, and
+// snprintf to my_snprintf. None of them carried a format attribute, and GCC
+// only checks format strings for functions it knows are printf-like, so
+// -Wformat had nothing to inspect and the whole tree was unchecked. That is
+// how `%I64d` (MSVC-only, and a segfault on glibc) survived in
+// CTxOut::ToString until it crashed a node mid-sync -- see issue #5.
+//
+// gnu_printf on both platforms, deliberately. MinGW's other option, ms_printf,
+// models the legacy msvcrt: it rejects %zu, which this tree uses and UCRT
+// supports, and it accepts %I64d, which is the specifier that crashes on glibc.
+// It would give false positives where the code is right and stay silent where it
+// is dangerous. gnu_printf describes UCRT's C99 behaviour accurately, so one
+// archetype covers both builds and a bad specifier fails either one.
+#if defined(__GNUC__)
+#define BF_FORMAT(fmt, args) __attribute__((format(gnu_printf, fmt, args)))
+#else
+#define BF_FORMAT(fmt, args)
+#endif
+
 void RandAddSeed(bool fPerfmon=false);
-int my_snprintf(char* buffer, size_t limit, const char* format, ...);
-string strprintf(const char* format, ...);
-bool error(const char* format, ...);
+int my_snprintf(char* buffer, size_t limit, const char* format, ...) BF_FORMAT(3, 4);
+string strprintf(const char* format, ...) BF_FORMAT(1, 2);
+bool error(const char* format, ...) BF_FORMAT(1, 2);
 void PrintException(std::exception* pex, const char* pszThread);
 void ParseString(const string& str, char c, vector<string>& v);
 string FormatMoney(int64 n, bool fPlus=false);
@@ -265,6 +287,8 @@ void PrintHex(const T pbegin, const T pend, const char* pszFormat="%s", bool fSp
 
 // Forward declaration -- defined in main.cpp
 string GetAppDir();
+
+inline int OutputDebugStringF(const char* pszFormat, ...) BF_FORMAT(1, 2);
 
 inline int OutputDebugStringF(const char* pszFormat, ...)
 {

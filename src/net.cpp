@@ -920,7 +920,7 @@ void ThreadSocketHandler2(void* parg)
 
                     if (pnodeExtra->GetRefCount() <= (pnodeExtra->fNetworkNode ? 1 : 0))
                     {
-                        LogPrint("net", "(%d nodes) disconnecting duplicate: %s\n", vNodes.size(), pnodeExtra->addr.ToString().c_str());
+                        LogPrint("net", "(%d nodes) disconnecting duplicate: %s\n", (int)vNodes.size(), pnodeExtra->addr.ToString().c_str());
                         if (pnodeExtra->fNetworkNode && !pnode->fNetworkNode)
                         {
                             pnode->AddRef();

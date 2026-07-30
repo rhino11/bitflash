@@ -6,8 +6,12 @@
 #include "headers.h"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
-// We link libsecp256k1 statically (without this the header assumes DLL import)
+// We link libsecp256k1 statically (without this the header assumes DLL import).
+// Both makefiles also pass -DSECP256K1_STATIC; the guard keeps that from
+// warning while leaving this file correct if built without the flag.
+#ifndef SECP256K1_STATIC
 #define SECP256K1_STATIC
+#endif
 #include <secp256k1.h>
 #include <secp256k1_schnorrsig.h>
 #include <secp256k1_extrakeys.h>

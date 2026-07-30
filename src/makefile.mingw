@@ -7,7 +7,14 @@ DEPS      = ../deps
 RANDOMX   = ../RandomX
 IMGUI_DIR = imgui
 
-CXXFLAGS = -std=gnu++14 -O2 -w -fpermissive -Wno-deprecated-declarations -pthread \
+# See the long note in Makefile: -w hid the format bug that segfaulted the node
+# on glibc (issue #5), and -w cannot be narrowed, so format diagnostics are now
+# fatal and only the categories this tree actually produces are silenced.
+WARNFLAGS = -Wformat -Werror=format \
+            -Wno-deprecated-declarations -Wno-write-strings \
+            -Wno-narrowing -Wno-unused-result
+
+CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
            -DWIN32 -DNOPCH \
            -DSECP256K1_STATIC \
            -I$(DEPS)/include -I$(RANDOMX)/src \

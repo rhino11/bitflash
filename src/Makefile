@@ -9,7 +9,26 @@ RANDOMX_DIR ?= $(HOME)/RandomX
 
 IMGUI_DIR = imgui
 
-CXXFLAGS = -std=gnu++14 -O2 -w -fpermissive -pthread \
+# -w used to sit here and suppressed every diagnostic in the build, including
+# the one that mattered: `%I64d` is MSVC-only, glibc mis-parses it as the GNU
+# `I` flag with a width of 64 and an `int` conversion, and the resulting vararg
+# desynchronisation segfaulted the node while logging a received block (issue
+# #5, deterministic at height 1062 -- the first block carrying a real
+# transaction). GCC had been reporting it all along:
+#
+#   warning: format '%d' expects argument of type 'int',
+#            but argument 4 has type 'int64_t'
+#
+# -w cannot be narrowed: it wins over any -W or -Werror= that follows it, so it
+# has to go. The four -Wno- entries below are the categories this 2009-era tree
+# genuinely produces (measured: 248 deprecated-declarations, 157 write-strings,
+# 18 narrowing, 1 unused-result); silencing them by name instead of silencing
+# everything keeps the build quiet while leaving format errors fatal.
+WARNFLAGS = -Wformat -Werror=format \
+            -Wno-deprecated-declarations -Wno-write-strings \
+            -Wno-narrowing -Wno-unused-result
+
+CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
            -DSECP256K1_STATIC \
            -I$(SECP_INC) -I$(RANDOMX_DIR)/src \
            -I/usr/include/nlohmann \

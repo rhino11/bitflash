@@ -392,7 +392,9 @@ public:
     const char* GetCommand() const
     {
         if (!IsKnownType())
-            throw std::out_of_range(strprintf("CInv::GetCommand() : type=% unknown type", type));
+            // Was "type=% unknown type": the % swallowed the space as a flag and
+            // the u as the conversion, so this read "type= 3nknown type".
+            throw std::out_of_range(strprintf("CInv::GetCommand() : type=%d unknown type", type));
         return ppszTypeName[type];
     }
 

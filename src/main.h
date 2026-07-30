@@ -650,11 +650,11 @@ public:
     string ToString() const
     {
         string str;
-        str += strprintf("CTransaction(hash=%s, ver=%d, vin.size=%d, vout.size=%d, nLockTime=%d)\n",
+        str += strprintf("CTransaction(hash=%s, ver=%d, vin.size=%d, vout.size=%d, nLockTime=%u)\n",
             GetHash().ToString().substr(0,6).c_str(),
             nVersion,
-            vin.size(),
-            vout.size(),
+            (int)vin.size(),
+            (int)vout.size(),
             nLockTime);
         for (int i = 0; i < vin.size(); i++)
             str += "    " + vin[i].ToString() + "\n";
@@ -1081,7 +1081,7 @@ public:
             hashPrevBlock.ToString().substr(0,14).c_str(),
             hashMerkleRoot.ToString().substr(0,6).c_str(),
             nTime, nBits, nNonce,
-            vtx.size());
+            (int)vtx.size());
         for (int i = 0; i < vtx.size(); i++)
         {
             printf("  ");
@@ -1223,8 +1223,10 @@ public:
 
     string ToString() const
     {
-        return strprintf("CBlockIndex(nprev=%08x, pnext=%08x, nFile=%d, nBlockPos=%-6d nHeight=%d, merkle=%s, hashBlock=%s)",
-            pprev, pnext, nFile, nBlockPos, nHeight,
+        // pprev/pnext are pointers: %08x truncated them to 32 bits on a 64-bit
+        // build, so the two fields this line exists to show were unreliable.
+        return strprintf("CBlockIndex(nprev=%p, pnext=%p, nFile=%d, nBlockPos=%-6d nHeight=%d, merkle=%s, hashBlock=%s)",
+            (void*)pprev, (void*)pnext, nFile, nBlockPos, nHeight,
             hashMerkleRoot.ToString().substr(0,6).c_str(),
             GetBlockHash().ToString().substr(0,14).c_str());
     }

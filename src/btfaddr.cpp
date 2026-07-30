@@ -7,7 +7,10 @@
 #include "btfaddr.h"
 
 #include <openssl/sha.h>
+// See the note in nostr.cpp: the makefiles pass -DSECP256K1_STATIC too.
+#ifndef SECP256K1_STATIC
 #define SECP256K1_STATIC
+#endif
 #include <secp256k1.h>
 #include <secp256k1_schnorrsig.h>
 #include <secp256k1_extrakeys.h>
