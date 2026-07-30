@@ -36,3 +36,25 @@ dist/
 .DS_Store
 Thumbs.db
 src/bitflash
+
+# Key material and secrets the node creates in its data directory.
+# *.dat above already covers wallet.dat, but these are not .dat files and are
+# every bit as sensitive: btf_enc.key and nostr.key are this node's .btf
+# identity, and walletrpc.token is bearer authority to spend from the wallet.
+*.key
+btf_enc.key
+nostr.key
+walletrpc.token
+
+# Wallet/key backups
+*.tgz
+*.tar.gz
+bitflash-keys-*
+
+# Mempool dump, if a node is configured to write one
+mempool.txt
+
+# Patches and scratch files kept alongside a working tree
+*.patch
+*.rej
+*.orig
