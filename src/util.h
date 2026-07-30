@@ -3,6 +3,11 @@
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 
 
+// For abi::__forced_unwind, which CATCH_PRINT_EXCEPTION below must let past.
+#ifndef _WIN32
+#include <cxxabi.h>
+#endif
+
 #if defined(_MSC_VER) || defined(__BORLANDC__)
 typedef __int64  int64;
 typedef unsigned __int64  uint64;
@@ -419,7 +424,34 @@ inline void heapchk()
         }                                                           \
     }
 
+// The forced-unwind arm has to come first, and it has to rethrow.
+//
+// On POSIX, _endthread() is pthread_exit(), and glibc implements that by
+// throwing abi::__forced_unwind through the stack. It is not a real exception
+// and catching it without rethrowing is a fatal error by contract: glibc
+// notices and calls abort().
+//
+// The bare catch(...) below did exactly that. Every shutdown on Linux died with
+//
+//     UNKNOWN EXCEPTION  bitflash-node in ThreadSocketHandler()
+//     FATAL: exception not rethrown
+//
+// which looked like nothing worse than an ugly exit, and was not: the process
+// aborted partway through shutting down, so nothing after StopNode() ran. See
+// main_gui.cpp, where DBFlush(true) is now called -- it could never have
+// worked while this abort stood in front of it. Windows is unaffected; there
+// _endthread() is the CRT's and unwinds nothing.
+#ifdef _WIN32
+#define CATCH_FORCED_UNWIND
+#else
+#define CATCH_FORCED_UNWIND              \
+    catch (abi::__forced_unwind&) {      \
+        throw;                           \
+    }
+#endif
+
 #define CATCH_PRINT_EXCEPTION(pszFn)     \
+    CATCH_FORCED_UNWIND                  \
     catch (std::exception& e) {          \
         PrintException(&e, (pszFn));     \
     } catch (...) {                      \

@@ -67,6 +67,10 @@ static void PrintUsage()
     printf("  /port=N                    (P2P listen port, default 8433)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
+    printf("Wallet:\n");
+    printf("  /backupwallet=FILE         (write a wallet.dat that opens on its own,\n");
+    printf("                              then exit; run it again after new addresses)\n");
+    printf("\n");
     printf("Each option also accepts '-' instead of '/'.\n");
 }
 
@@ -219,6 +223,28 @@ int main(int argc, char* argv[])
         return 1;
     }
     printf("Height=%d\n", nBestHeight);
+
+    // Before the node opens sockets or touches anything: the wallet is loaded,
+    // which is all a backup needs, and finishing here means the copy is taken
+    // from a quiet directory rather than from under a running node.
+    string strBackup = argval2(argc, argv, "/backupwallet", "-backupwallet");
+    if (!strBackup.empty())
+    {
+        bool fOk = BackupWallet(strBackup);
+        if (fOk)
+        {
+            printf("Backed up to %s\n", strBackup.c_str());
+            printf("This file opens on its own -- it does not need the database/ "
+                   "directory beside it.\n");
+            printf("It is a snapshot: coins paid to addresses created after now are "
+                   "not in it, so back up again whenever you receive to a new address.\n");
+        }
+        else
+            fprintf(stderr, "Backup failed -- nothing was written.\n");
+        DBFlush(true);
+        return fOk ? 0 : 1;
+    }
+
     ReacceptWalletTransactions();
 
     if (!StartNode(strErrors)) { fprintf(stderr,"StartNode: %s\n",strErrors.c_str()); return 1; }
@@ -249,6 +275,11 @@ int main(int argc, char* argv[])
         printf("Running headless. Ctrl-C to stop.\n");
         while (!fShutdown) Sleep(500);
         StopNode();
+        // Checkpoints, releases wallet.dat from this directory's Berkeley DB
+        // environment, and closes it. Declared since 2009 and never once
+        // called here, which is why a wallet.dat copied elsewhere would not
+        // open -- issue #40. Not optional.
+        DBFlush(true);
         return 0;
     }
 
@@ -258,6 +289,7 @@ int main(int argc, char* argv[])
     int ret = RunGUI(argc, argv);
     fShutdown = true;
     StopNode();
+    DBFlush(true);
     return ret;
 #endif
 }

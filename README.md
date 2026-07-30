@@ -69,6 +69,37 @@ backup — it holds your keys.
 
 ---
 
+## Backing up your wallet
+
+Two things about this wallet will cost you money if you do not know them. Both
+are consequences of the 0.1.0 wallet format, and neither is obvious.
+
+**Copying `wallet.dat` on its own is not a backup.** Berkeley DB ties the file
+to the environment in the `database/` subdirectory beside it, so a lone
+`wallet.dat` will not open elsewhere — the keys are all still in there, and the
+file is refused anyway. Use the built-in command, which writes a copy that
+stands on its own:
+
+```
+bitflash -backupwallet=/path/to/wallet-backup.dat
+```
+
+It loads the wallet, writes the copy, and exits without starting the node. If
+you would rather copy by hand, shut the node down first and take the **whole**
+data directory, not just `wallet.dat`.
+
+**Every backup is a snapshot, so repeat it.** Keys are generated when they are
+needed rather than derived from a seed, so a backup contains only the keys that
+existed the moment it was taken. Mine a block or receive to a new address
+afterwards, and those coins sit on-chain at an address whose private key is in
+no backup you hold. Back up again whenever you use a new address.
+
+The second point is the pre-BIP32 problem that deterministic wallets were
+invented to solve; see [#47](https://github.com/Bitflash-sh/bitflash/issues/47).
+Until that lands, repetition is the only defence.
+
+---
+
 ## Mining
 
 Open **Options** from the menu bar. Under Mining Mode:

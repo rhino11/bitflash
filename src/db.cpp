@@ -59,7 +59,12 @@ CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
         {
             string strAppDir = GetAppDir();
             string strLogDir = strAppDir + "/database";
-            _mkdir(strLogDir.c_str());
+
+            // _mkdir returns 0 only when it actually created the directory, so
+            // this is also the test for "this environment did not exist until
+            // now". See the recovery block after dbenv.open() for why we care.
+            bool fFreshEnv = (_mkdir(strLogDir.c_str()) == 0);
+
             printf("dbenv.open strAppDir=%s\n", strAppDir.c_str());
 
             dbenv.set_lg_dir(strLogDir.c_str());
@@ -81,6 +86,41 @@ CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
             if (ret > 0)
                 throw runtime_error(strprintf("CDB() : error %d opening database environment\n", ret));
             fDbEnvInit = true;
+
+            // A Berkeley DB file records, in every page header, a log sequence
+            // number belonging to the environment that wrote it. Carried into a
+            // different environment those numbers refer to logs that do not
+            // exist, and BDB refuses to write: "Db::put: Invalid argument",
+            // thrown from a path that used to abort the process.
+            //
+            // That is what happens when someone backs up wallet.dat on its own.
+            // It is the obviously important file, it is the only one people
+            // copy, and the environment it is welded to lives in a database/
+            // subdirectory nobody has reason to suspect. The file is intact --
+            // same bytes, same keys -- and the wallet still will not open.
+            // Issue #40 reports exactly this, after the fact.
+            //
+            // lsn_reset() exists for precisely this migration, so do it for
+            // them. A fresh environment beside pre-existing .dat files means
+            // those files came from somewhere else; in the normal case the
+            // environment is already there and none of this runs.
+            if (fFreshEnv)
+            {
+                static const char* pszBdbFiles[] = { "wallet.dat", "blkindex.dat" };
+                for (int i = 0; i < (int)(sizeof(pszBdbFiles)/sizeof(pszBdbFiles[0])); i++)
+                {
+                    const char* pszName = pszBdbFiles[i];
+                    if (!FileExists((strAppDir + "/" + pszName).c_str()))
+                        continue;
+                    try
+                    {
+                        if (dbenv.lsn_reset(pszName, 0) == 0)
+                            printf("CDB() : adopted %s from another environment "
+                                   "(log sequence numbers reset)\n", pszName);
+                    }
+                    catch (...) { }   // best effort; the open below reports real trouble
+                }
+            }
         }
 
         strFile = pszFile;
@@ -137,7 +177,14 @@ void DBFlush(bool fShutdown)
     printf("DBFlush(%s)\n", fShutdown ? "true" : "false");
     CRITICAL_BLOCK(cs_db)
     {
-        dbenv.txn_checkpoint(0, 0, 0);
+        // This runs on the way out. Anything that throws here and is not caught
+        // takes the process down before the wallet has been put down cleanly,
+        // which is the difference between a portable wallet.dat and one welded
+        // to this directory -- the lsn_reset just below is what frees it.
+        try { dbenv.txn_checkpoint(0, 0, 0); }
+        catch (const std::exception& e)
+        { printf("DBFlush() : checkpoint failed: %s\n", e.what()); }
+
         map<string, int>::iterator mi = mapFileUseCount.begin();
         while (mi != mapFileUseCount.end())
         {
@@ -145,7 +192,9 @@ void DBFlush(bool fShutdown)
             int nRefCount = (*mi).second;
             if (nRefCount == 0)
             {
-                dbenv.lsn_reset(strFile.c_str(), 0);
+                try { dbenv.lsn_reset(strFile.c_str(), 0); }
+                catch (const std::exception& e)
+                { printf("DBFlush() : lsn_reset(%s) failed: %s\n", strFile.c_str(), e.what()); }
                 mapFileUseCount.erase(mi++);
             }
             else
@@ -578,5 +627,84 @@ bool LoadWallet()
         CWalletDB().WriteDefaultKey(keyUser.GetPubKey());
     }
 
+    return true;
+}
+
+
+// Write a copy of wallet.dat that can be opened anywhere.
+//
+// A plain file copy is not a backup here. Berkeley DB stamps every page with a
+// log sequence number tied to the environment that wrote it, so the copy only
+// works beside the database/ directory it grew up with -- which is why backing
+// up "just wallet.dat", the one file anybody would think to save, produces
+// something that will not open. See the recovery block in CDB::CDB and #40.
+//
+// So: flush outstanding writes, copy, then clear the copy's log sequence
+// numbers. What lands on disk is a wallet.dat that stands on its own.
+//
+// This is still a point-in-time snapshot. Keys are generated as they are
+// needed, not derived from a seed, so coins paid to an address created after
+// this file was written are not spendable from it. Backing up once is not
+// enough, and that is a property of the wallet format rather than of this
+// function.
+bool BackupWallet(const string& strDest)
+{
+    if (strDest.empty())
+        return error("BackupWallet() : no destination given\n");
+
+    string strSrc = GetAppDir() + "/wallet.dat";
+    if (!FileExists(strSrc.c_str()))
+        return error("BackupWallet() : %s does not exist\n", strSrc.c_str());
+
+    CRITICAL_BLOCK(cs_db)
+    {
+        // Committing first, so the copy is not missing the newest records.
+        // Both calls can throw, and a failed backup must not take the node
+        // down with it.
+        try { dbenv.txn_checkpoint(0, 0, 0); }
+        catch (const std::exception& e)
+        { return error("BackupWallet() : checkpoint failed: %s\n", e.what()); }
+
+        try
+        {
+            FILE* pfIn = fopen(strSrc.c_str(), "rb");
+            if (!pfIn)
+                return error("BackupWallet() : cannot read %s\n", strSrc.c_str());
+            FILE* pfOut = fopen(strDest.c_str(), "wb");
+            if (!pfOut)
+            {
+                fclose(pfIn);
+                return error("BackupWallet() : cannot write %s\n", strDest.c_str());
+            }
+
+            char buf[65536];
+            size_t n;
+            bool fOk = true;
+            while ((n = fread(buf, 1, sizeof(buf), pfIn)) > 0)
+                if (fwrite(buf, 1, n, pfOut) != n) { fOk = false; break; }
+            if (ferror(pfIn))
+                fOk = false;
+            fclose(pfIn);
+            // Flushed and closed before lsn_reset touches it.
+            if (fclose(pfOut) != 0)
+                fOk = false;
+
+            if (!fOk)
+            {
+                remove(strDest.c_str());   // half a wallet is worse than none
+                return error("BackupWallet() : copy to %s failed\n", strDest.c_str());
+            }
+
+            // Without this the copy is welded to this node's database/ dir.
+            int ret = dbenv.lsn_reset(strDest.c_str(), 0);
+            if (ret != 0)
+                printf("BackupWallet() : warning -- lsn_reset returned %d; the copy "
+                       "may only open beside this node's database/ directory\n", ret);
+        }
+        catch (const std::exception& e)
+        { return error("BackupWallet() : %s\n", e.what()); }
+    }
+
+    printf("BackupWallet() : wrote %s\n", strDest.c_str());
     return true;
 }

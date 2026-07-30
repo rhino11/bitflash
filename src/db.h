@@ -403,6 +403,12 @@ public:
 
 bool LoadWallet();
 
+// Writes a wallet.dat that opens on its own, anywhere -- see the definition in
+// db.cpp for why a plain file copy does not. Still a point-in-time snapshot:
+// keys are made as needed rather than derived from a seed, so coins paid to an
+// address created after this call are not spendable from the file it writes.
+bool BackupWallet(const string& strDest);
+
 inline bool SetAddressBookName(const string& strAddress, const string& strName)
 {
     return CWalletDB().WriteName(strAddress, strName);
