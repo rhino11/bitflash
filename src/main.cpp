@@ -2883,7 +2883,25 @@ bool BitcoinMiner(int nThreadId)
         CTransaction txNew;
         txNew.vin.resize(1);
         txNew.vin[0].prevout.SetNull();
-        txNew.vin[0].scriptSig << nBits << ++bnExtraNonce;
+        // The height comes first and is what makes this transaction unique.
+        //
+        // Without it nothing in the coinbase belongs to the block: it is a
+        // function of the difficulty, a counter, and the payout key. nBits
+        // holds still for long stretches and bnExtraNonce is a local that
+        // restarts at zero whenever the miner does, so the same combination
+        // comes round again and produces a byte-identical transaction with the
+        // same txid. Two blocks then name the same transaction and the index
+        // keeps whichever arrived last, which silently destroys the outputs of
+        // the first. It has already happened twice on this chain, at heights
+        // 859 and 860 (#58).
+        //
+        // Two coinbases at different heights can now never be identical, no
+        // matter what the counter or the key do.
+        //
+        // Nothing validates coinbase content, so this changes only what we
+        // produce -- nodes that do not upgrade accept these blocks unchanged.
+        // Requiring the height is a separate, coordinated step.
+        txNew.vin[0].scriptSig << (pindexPrev ? pindexPrev->nHeight + 1 : 0) << nBits << ++bnExtraNonce;
         txNew.vout.resize(1);
         // Always pay coinbase to own wallet key. In operator mode, the pool
         // server distributes shares to miners via SendMoney() after each block.
