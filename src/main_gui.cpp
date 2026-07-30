@@ -79,7 +79,15 @@ static void ParseStartupArguments(int argc, char* argv[])
         fDebug = true;
 
     if (arg(argc,argv,"/gen") || arg(argc,argv,"-gen"))
+    {
         fGenerateBitcoins = 1;
+        // Mining mode defaults to MINE_RELAY, and nothing in this parser ever
+        // changed it, so BitcoinMiner() returned immediately at its relay guard
+        // and /gen mined nothing at all. /operator and /participant still set
+        // their own mode below, so only the unqualified case is affected.
+        if (nMineMode == MINE_RELAY)
+            nMineMode = MINE_SOLO;
+    }
 
     if (arg(argc,argv,"/solomine") || arg(argc,argv,"-solomine"))
         fSoloMineTest = true;
