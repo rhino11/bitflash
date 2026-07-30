@@ -153,7 +153,12 @@ static bool RebuildJob()
         CTransaction txNew;
         txNew.vin.resize(1);
         txNew.vin[0].prevout.SetNull();
-        txNew.vin[0].scriptSig << nBits << (CBigNum)extraNonce;
+        // Height first, for the reason given at the matching line in
+        // BitcoinMiner: it is what keeps two coinbases at different heights
+        // from ever being byte-identical. This builder was missed when that
+        // went in, and it produces real blocks -- a pool operator's template
+        // is mined and submitted like any other. #58.
+        txNew.vin[0].scriptSig << (pindexPrev ? pindexPrev->nHeight + 1 : 0) << nBits << (CBigNum)extraNonce;
         txNew.vout.resize(1);
         txNew.vout[0].scriptPubKey << key.GetPubKey() << OP_CHECKSIG;
 
