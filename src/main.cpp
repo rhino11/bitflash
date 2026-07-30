@@ -2190,6 +2190,18 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
     }
 
 
+    else if (strCommand == "ping")
+    {
+        // Nothing to do and nothing to answer. Arriving at all is the entire
+        // content of the message: the receive path has already stamped
+        // nLastRecv, which is what the sender wanted us to notice.
+        //
+        // Deliberately no reply. A node old enough not to know "ping" ignores
+        // it as an unknown command and would never answer one, so a scheme
+        // that required an answer would read every such peer as dead.
+    }
+
+
     else
     {
         // Ignore unknown commands for extensibility
@@ -2219,6 +2231,17 @@ bool SendMessages(CNode* pto)
         // Don't send anything until we get their version message
         if (pto->nVersion == 0)
             return true;
+
+
+        //
+        // Message: keep-alive ping
+        //
+        // Only when we have nothing else queued -- any real message serves the
+        // same purpose. A peer with nothing to relay is otherwise silent, and
+        // silence is exactly what the inactivity check disconnects on.
+        //
+        if (pto->nLastSend && GetTime() - pto->nLastSend > BTF_PING_INTERVAL_SECS && pto->vSend.empty())
+            pto->PushMessage("ping");
 
 
         //

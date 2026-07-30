@@ -1092,7 +1092,11 @@ void ThreadSocketHandler2(void* parg)
                     vRecv.resize(nPos + nBufSize);
                     int nBytes = recv(hSocket, &vRecv[nPos], nBufSize, 0);
                     vRecv.resize(nPos + max(nBytes, 0));
-                    if (nBytes == 0)
+                    if (nBytes > 0)
+                    {
+                        pnode->nLastRecv = GetTime();
+                    }
+                    else if (nBytes == 0)
                     {
                         // socket closed gracefully
                         if (!pnode->fDisconnect)
@@ -1127,6 +1131,7 @@ void ThreadSocketHandler2(void* parg)
                         if (nBytes > 0)
                         {
                             vSend.erase(vSend.begin(), vSend.begin() + nBytes);
+                            pnode->nLastSend = GetTime();
                         }
                         else if (nBytes == 0)
                         {
@@ -1140,6 +1145,42 @@ void ThreadSocketHandler2(void* parg)
                                 pnode->vSend.clear();
                         }
                     }
+                    if (vSend.empty())
+                        pnode->nLastSendEmpty = GetTime();
+                }
+            }
+
+            //
+            // Inactivity
+            //
+            // Dropping the connection is the whole cure: everything above this
+            // layer already knows how to reconnect, and a peer we cannot hear
+            // is worth exactly as much as no peer at all. Give a new
+            // connection a grace period first, or we would cut off peers that
+            // are still completing the rendezvous handshake.
+            //
+            if (GetTime() - pnode->nTimeConnected > BTF_HANDSHAKE_GRACE_SECS)
+            {
+                if (pnode->nLastRecv == 0 || pnode->nLastSend == 0)
+                {
+                    LogPrint("net", "socket no message in first %d seconds, recv=%d send=%d\n",
+                             BTF_HANDSHAKE_GRACE_SECS, pnode->nLastRecv != 0, pnode->nLastSend != 0);
+                    pnode->fDisconnect = true;
+                }
+                else if (GetTime() - pnode->nLastSend > BTF_SEND_STALL_SECS &&
+                         GetTime() - pnode->nLastSendEmpty > BTF_SEND_STALL_SECS)
+                {
+                    // We have had something queued to send for this long and
+                    // none of it has gone out: the socket accepts no more.
+                    LogPrint("net", "socket not sending\n");
+                    pnode->fDisconnect = true;
+                }
+                else if (GetTime() - pnode->nLastRecv > BTF_RECV_TIMEOUT_SECS)
+                {
+                    // The deaf case. Nothing has arrived for many block
+                    // intervals while the socket still looks perfectly fine.
+                    LogPrint("net", "socket inactivity timeout\n");
+                    pnode->fDisconnect = true;
                 }
             }
         }

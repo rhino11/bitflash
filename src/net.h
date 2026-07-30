@@ -51,6 +51,24 @@ static const int64        PEX_MIN_INTERVAL         = 60;
 // traffic is nothing: one per relay per five minutes.
 static const int          BTF_RENDEZVOUS_WAIT_SECS = 300;
 
+// Liveness of an established peer connection. BTF_RENDEZVOUS_WAIT_SECS bounds
+// the wait for a dial to arrive; these bound the connection that comes out of
+// it, which has the same failure mode once it goes quiet.
+//
+// A healthy peer relays a block inventory roughly every nTargetSpacing (two
+// minutes), so silence measured in block intervals is the honest signal.
+// Bitcoin used ninety minutes against ten-minute blocks -- nine intervals --
+// and the same nine intervals here is eighteen minutes; thirty leaves margin
+// for a slow stretch without letting a dead path last an hour.
+static const int          BTF_RECV_TIMEOUT_SECS    = 30 * 60;
+static const int          BTF_SEND_STALL_SECS      = 10 * 60;
+static const int          BTF_HANDSHAKE_GRACE_SECS = 60;
+
+// Send a ping after this long with nothing to say, so a peer running the
+// inactivity check above does not mistake a quiet node for a dead one. Must
+// stay well under BTF_RECV_TIMEOUT_SECS.
+static const int          BTF_PING_INTERVAL_SECS   = 10 * 60;
+
 // Descriptors to hand a peer: ours first, then peers that answered us.
 void BtfPexCollect(std::vector<std::string>& vDescOut);
 // Verify descriptors a peer sent and remember the good ones. Returns how many.
@@ -500,6 +518,16 @@ public:
     // Last "btfpeers" we accepted from this node, to rate-limit the exchange.
     int64 nLastPexRecv;
 
+    // Liveness. A peer whose network path dies silently -- NAT drops an idle
+    // mapping, a relay restarts, a route changes -- never sends FIN, so the
+    // socket stays readable-never and the node simply stops hearing from it
+    // with no error anywhere. These stamps are the only way to tell that
+    // apart from a peer that merely has nothing to say.
+    int64 nTimeConnected;
+    int64 nLastSend;
+    int64 nLastRecv;
+    int64 nLastSendEmpty;
+
 
     CNode(SOCKET hSocketIn, CAddress addrIn, bool fInboundIn=false)
     {
@@ -517,6 +545,10 @@ public:
         nRefCount = 0;
         nReleaseTime = 0;
         nLastPexRecv = 0;
+        nTimeConnected = GetTime();
+        nLastSend = 0;
+        nLastRecv = 0;
+        nLastSendEmpty = GetTime();
         vfSubscribe.assign(256, false);
 
         // Push a version message
