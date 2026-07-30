@@ -1884,6 +1884,12 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         if (pfrom->nVersion == 0)
             return false;
 
+        // Optional: peers older than this field simply end the message here,
+        // and nStartingHeight stays -1 for them. Never make this a requirement
+        // -- every node released so far sends the short form.
+        if (!vRecv.empty())
+            vRecv >> pfrom->nStartingHeight;
+
         pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
         pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
 
@@ -1912,7 +1918,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         if (!vPexOut.empty())
             pfrom->PushMessage("btfpeers", vPexOut);
 
-        if (LogAcceptsCategory("net")) printf("version addrMe = %s\n", addrMe.ToString().c_str());
+        if (LogAcceptsCategory("net")) printf("version addrMe = %s, peer height = %d\n", addrMe.ToString().c_str(), pfrom->nStartingHeight);
     }
 
 

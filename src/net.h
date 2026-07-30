@@ -69,6 +69,21 @@ static const int          BTF_HANDSHAKE_GRACE_SECS = 60;
 // stay well under BTF_RECV_TIMEOUT_SECS.
 static const int          BTF_PING_INTERVAL_SECS   = 10 * 60;
 
+// How long a node must stay behind the network before it says so, and how
+// often it repeats itself. Five minutes is two and a half block intervals --
+// long enough that ordinary relay lag never trips it.
+static const int          BTF_BEHIND_GRACE_SECS         = 5 * 60;
+static const int          BTF_BEHIND_WARN_INTERVAL_SECS = 5 * 60;
+
+// Defined in main.cpp. Declared here because CNode announces it in the version
+// message, and net.h is included before main.h.
+extern int nBestHeight;
+
+// Median height announced by the peers we are connected to, or -1 while nobody
+// has told us anything. Median rather than maximum so one peer claiming an
+// absurd height cannot move it.
+int GetPeerMedianHeight();
+
 // Descriptors to hand a peer: ours first, then peers that answered us.
 void BtfPexCollect(std::vector<std::string>& vDescOut);
 // Verify descriptors a peer sent and remember the good ones. Returns how many.
@@ -528,6 +543,11 @@ public:
     int64 nLastRecv;
     int64 nLastSendEmpty;
 
+    // Height this peer announced in its version message, or -1 if it sent a
+    // version message that predates the field. Knowing how far along everyone
+    // else is, is the only way a node can tell "in sync" from "not hearing".
+    int nStartingHeight;
+
 
     CNode(SOCKET hSocketIn, CAddress addrIn, bool fInboundIn=false)
     {
@@ -549,12 +569,16 @@ public:
         nLastSend = 0;
         nLastRecv = 0;
         nLastSendEmpty = GetTime();
+        nStartingHeight = -1;
         vfSubscribe.assign(256, false);
 
         // Push a version message
         /// when NTP implemented, change to just nTime = GetAdjustedTime()
         int64 nTime = (fInbound ? GetAdjustedTime() : GetTime());
-        PushMessage("version", VERSION, nLocalServices, nTime, addr);
+        // nBestHeight goes last so a node that predates it stops reading after
+        // addr and treats the rest as trailing bytes, which cost it a log line
+        // and nothing else.
+        PushMessage("version", VERSION, nLocalServices, nTime, addr, nBestHeight);
     }
 
     ~CNode()
@@ -762,6 +786,22 @@ public:
         {
             BeginMessage(pszCommand);
             vSend << a1 << a2 << a3 << a4;
+            EndMessage();
+        }
+        catch (...)
+        {
+            AbortMessage();
+            throw;
+        }
+    }
+
+    template<typename T1, typename T2, typename T3, typename T4, typename T5>
+    void PushMessage(const char* pszCommand, const T1& a1, const T2& a2, const T3& a3, const T4& a4, const T5& a5)
+    {
+        try
+        {
+            BeginMessage(pszCommand);
+            vSend << a1 << a2 << a3 << a4 << a5;
             EndMessage();
         }
         catch (...)

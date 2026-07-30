@@ -1225,6 +1225,65 @@ void ThreadMessageHandler(void* parg)
     }
 }
 
+int GetPeerMedianHeight()
+{
+    vector<int> vHeights;
+    CRITICAL_BLOCK(cs_vNodes)
+        foreach(CNode* pnode, vNodes)
+            if (pnode->nStartingHeight >= 0)
+                vHeights.push_back(pnode->nStartingHeight);
+
+    if (vHeights.empty())
+        return -1;
+
+    sort(vHeights.begin(), vHeights.end());
+    return vHeights[vHeights.size() / 2];
+}
+
+
+// Say out loud when we are behind the network.
+//
+// This is the whole reason the height is in the handshake. Every serious bug
+// this node has had looked identical from the outside: running, threads alive,
+// nothing in the log, and no blocks arriving. A node that knows where everyone
+// else is can say so, and "8 blocks behind for 27 minutes" is a sentence a
+// user can act on. Deliberately not behind a debug category -- an operator who
+// already suspects trouble is not the one who needs telling.
+static void WarnIfBehind()
+{
+    static int64 nLastWarned;
+    static int64 nBehindSince;
+
+    int nPeers = GetPeerMedianHeight();
+    if (nPeers < 0 || nBestHeight < 0)
+        return;
+
+    // One block of slack: somebody is always mid-relay.
+    if (nBestHeight >= nPeers - 1)
+    {
+        nBehindSince = 0;
+        return;
+    }
+
+    int64 nNow = GetTime();
+    if (nBehindSince == 0)
+    {
+        nBehindSince = nNow;
+        return;
+    }
+
+    // Falling briefly behind is ordinary. Staying behind is not.
+    if (nNow - nBehindSince < BTF_BEHIND_GRACE_SECS)
+        return;
+    if (nNow - nLastWarned < BTF_BEHIND_WARN_INTERVAL_SECS)
+        return;
+
+    nLastWarned = nNow;
+    printf("WARNING: %d blocks behind the network (height %d, peers report %d) for %d minutes\n",
+           nPeers - nBestHeight, nBestHeight, nPeers, (int)((nNow - nBehindSince) / 60));
+}
+
+
 void ThreadMessageHandler2(void* parg)
 {
     printf("ThreadMessageHandler started\n");
@@ -1249,6 +1308,8 @@ void ThreadMessageHandler2(void* parg)
 
             pnode->Release();
         }
+
+        WarnIfBehind();
 
         // Wait and allow messages to bunch up
         vfThreadRunning[2] = false;

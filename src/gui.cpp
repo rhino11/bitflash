@@ -26,6 +26,7 @@ extern CAddress      addrLocalHost;
 
 void   MainFrameRepaint();
 int    GetDiscoveredPeerCount();
+int    GetPeerMedianHeight();
 string DateTimeStr(int64 nTime);
 bool   SendMoney(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew);
 int64  GetBalance();
@@ -237,6 +238,15 @@ static void DrawStatusBar()
             "Connected peers: %d  Detected peers: %d  Height: %d",
             connected, discovered, nBestHeight);
     }
+
+    // A node that has stopped receiving looks exactly like one with nothing to
+    // do. Now that peers announce their height, say the difference out loud
+    // instead of leaving the user to guess from a number that stopped moving.
+    int peerHeight = GetPeerMedianHeight();
+    if (peerHeight >= 0 && nBestHeight < peerHeight - 1)
+        ImGui::TextColored(ImVec4(0.95f, 0.65f, 0.20f, 1.0f),
+                           "Behind the network by %d block(s) -- peers report height %d",
+                           peerHeight - nBestHeight, peerHeight);
 
     ImGui::End();
 }
