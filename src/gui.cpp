@@ -124,15 +124,32 @@ static void RefreshWallet()
     g_txRows.clear();
     TRY_CRITICAL_BLOCK(cs_mapWallet)
     {
-        // Sort: unconfirmed first (depth 0), then by depth ascending (least
-        // deep = most recent). We can't use nTimeReceived because a node
-        // resync re-stamps all txs with the same time. Depth is always correct.
-        std::vector<std::pair<int,uint256>> vs;
-        for (auto& kv : mapWallet)
-            vs.push_back({kv.second.GetDepthInMainChain(), kv.second.GetHash()});
+        // Sort: pending first, then confirmed by depth ascending (least deep =
+        // most recent), then orphaned coinbases at the very bottom.
+        //
+        // Orphans have to be pushed down explicitly. They are depth 0, exactly
+        // like a genuinely pending transaction, so sorting on depth alone put
+        // every orphan the node had ever produced at the top of the list -- and
+        // they never age out, because depth 0 is where they stay forever. A
+        // miner with a week of ordinary orphaned races opened the wallet and
+        // saw nothing but failures stacked above every block it had actually
+        // won. The balance was right; the list was telling a different story.
+        //
+        // We can't sort on nTimeReceived because a resync re-stamps every
+        // transaction with the same time. Depth is always correct.
+        //
+        // 0 = pending, 1 = confirmed, 2 = orphaned.
+        std::vector<std::pair<std::pair<int,int>,uint256>> vs;
+        for (auto& kv : mapWallet) {
+            int d = kv.second.GetDepthInMainChain();
+            bool orphaned = kv.second.IsCoinBase() && kv.second.hashBlock != 0 && d == 0;
+            int rank = orphaned ? 2 : (d == 0 ? 0 : 1);
+            vs.push_back({{rank, d}, kv.second.GetHash()});
+        }
         std::sort(vs.begin(), vs.end(),
-            [](const std::pair<int,uint256>& a, const std::pair<int,uint256>& b) {
-                return a.first < b.first; // 0 (unconfirmed) first, then shallowest
+            [](const std::pair<std::pair<int,int>,uint256>& a,
+               const std::pair<std::pair<int,int>,uint256>& b) {
+                return a.first < b.first;
             });
         for (auto& sv : vs) {
             auto mi = mapWallet.find(sv.second);
