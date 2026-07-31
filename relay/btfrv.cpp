@@ -35,6 +35,7 @@ typedef int SOCKET;
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <chrono>
 
 namespace btf
 {
@@ -45,6 +46,9 @@ static SOCKET            g_listen = INVALID_SOCKET;
 // Services that have registered and are waiting for a client, keyed by pubkey.
 static std::map<std::string, SOCKET> g_waiting;
 static std::mutex                    g_mtx;
+
+// How often the reaper walks the waiting map.
+static const int REAP_INTERVAL_SECS = 60;
 
 bool RvInit()
 {
@@ -106,6 +110,77 @@ static SOCKET ConnectTo(const char* host, unsigned short port)
     return s;
 }
 
+// ---- liveness of a waiting registration ----
+
+// True when the far end of a registration socket is provably gone.
+//
+// A registered service sends nothing while it waits, so the socket should never
+// be readable. Readable therefore means one of two things, and recv tells them
+// apart: 0 is a clean close, negative is an error, and either way the
+// registration is worthless. Anything else -- including a service that somehow
+// has data pending -- is left alone, because guessing wrong here unregisters a
+// node that is perfectly fine.
+//
+// select() rather than MSG_DONTWAIT so the same code compiles on Windows, and
+// so the socket's blocking mode is never touched.
+static bool RegistrationDead(SOCKET s)
+{
+    fd_set rd;
+    FD_ZERO(&rd);
+    FD_SET(s, &rd);
+    struct timeval tv;
+    tv.tv_sec = 0;
+    tv.tv_usec = 0;
+    int r = select((int)(s + 1), &rd, NULL, NULL, &tv);
+    if (r <= 0)
+        return false;               // not readable: still waiting, healthy
+    char c;
+    int n = recv(s, &c, 1, MSG_PEEK);
+    return (n <= 0);
+}
+
+// Drop registrations whose far end has gone away.
+//
+// Deliberately no expiry by age. Nodes older than v1.2.7 register once and then
+// block forever waiting to be dialled -- they never re-register, so a clock
+// based rule would quietly make every one of them unreachable, and being
+// blocked in recv they would never find out. Only provable death counts.
+static void ReapDeadRegistrations()
+{
+    int nBefore = 0, nReaped = 0;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        nBefore = (int)g_waiting.size();
+        std::map<std::string, SOCKET>::iterator it = g_waiting.begin();
+        while (it != g_waiting.end())
+        {
+            if (RegistrationDead(it->second))
+            {
+                CLOSESOCK(it->second);
+                g_waiting.erase(it++);
+                nReaped++;
+            }
+            else
+                ++it;
+        }
+    }
+    if (nReaped > 0)
+        printf("reaper: dropped %d dead registration(s), %d waiting\n",
+               nReaped, nBefore - nReaped);
+    fflush(stdout);
+}
+
+static void ReaperThread()
+{
+    while (!g_stop)
+    {
+        for (int i = 0; i < REAP_INTERVAL_SECS && !g_stop; i++)
+            std::this_thread::sleep_for(std::chrono::seconds(1));
+        if (g_stop) break;
+        ReapDeadRegistrations();
+    }
+}
+
 // ---- relay side ----
 
 // Pump bytes from `from` to `to`. Owns closing `from`; shuts down `to` on exit
@@ -146,7 +221,23 @@ static void HandleIncoming(SOCKET s)
         {
             std::lock_guard<std::mutex> lk(g_mtx);
             std::map<std::string, SOCKET>::iterator it = g_waiting.find(pubkey);
-            if (it != g_waiting.end()) { svc = it->second; g_waiting.erase(it); }
+            if (it != g_waiting.end())
+            {
+                // Check before handing it over. Pairing a client with a dead
+                // registration produces a tunnel that fails after both sides
+                // think they succeeded, which is the failure the dialling node
+                // reports as "tunnel to X failed" with nothing to explain it.
+                if (RegistrationDead(it->second))
+                {
+                    CLOSESOCK(it->second);
+                    g_waiting.erase(it);
+                }
+                else
+                {
+                    svc = it->second;
+                    g_waiting.erase(it);
+                }
+            }
         }
         if (svc == INVALID_SOCKET)
         {
@@ -186,6 +277,8 @@ bool RvRelayRun(unsigned short port)
     addr.sin_port = htons(port);
     if (bind(g_listen, (struct sockaddr*)&addr, sizeof(addr)) != 0) { CLOSESOCK(g_listen); return false; }
     if (listen(g_listen, 16) != 0) { CLOSESOCK(g_listen); return false; }
+
+    std::thread(ReaperThread).detach();
 
     while (!g_stop)
     {
