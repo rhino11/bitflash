@@ -3151,17 +3151,39 @@ bool BitcoinMiner(int nThreadId)
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_NORMAL);
                 CRITICAL_BLOCK(cs_main)
                 {
-                    // Save key
-                    if (!AddKey(key))
+                    // Is the parent we solved for still the tip?
+                    //
+                    // The loop only tests this every 256 hashes, and never
+                    // again once a solution turns up. So a thread that found
+                    // one just after somebody else extended the chain would
+                    // submit a block built on a parent that is no longer the
+                    // tip -- a block born orphaned, at a height already taken.
+                    //
+                    // Every miner thread on this machine works from the same
+                    // pindexPrev, so the moment one of them wins, all the
+                    // others are hashing a doomed template until their next
+                    // checkpoint. On a 32-core box that is thirty threads with
+                    // a standing chance of producing a guaranteed orphan, and
+                    // it is why a healthy miner's wallet filled up with them.
+                    if (pindexPrev != pindexBest)
                     {
-                        RandomXDestroyMinerVM(rxvm);
-                        return false;
+                        LogPrint("net", "BitcoinMiner: thread %d solved for a parent that is no longer the tip, discarding\n",
+                                 nThreadId);
                     }
-                    key.MakeNewKey();
+                    else
+                    {
+                        // Save key
+                        if (!AddKey(key))
+                        {
+                            RandomXDestroyMinerVM(rxvm);
+                            return false;
+                        }
+                        key.MakeNewKey();
 
-                    // Process this block the same as if we had received it from another node
-                    if (!ProcessBlock(NULL, pblock.release()))
-                        LogPrint("net", "ERROR in BitcoinMiner, ProcessBlock, block not accepted\n");
+                        // Process this block the same as if we had received it from another node
+                        if (!ProcessBlock(NULL, pblock.release()))
+                            LogPrint("net", "ERROR in BitcoinMiner, ProcessBlock, block not accepted\n");
+                    }
                 }
                 SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
 
