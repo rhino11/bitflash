@@ -7,6 +7,7 @@
 #include <randomx.h>
 #include <thread>
 #include <vector>
+#include <mutex>
 
 // Fixed key (seed) that determines the RandomX cache/dataset. Keeping it
 // constant avoids per-epoch "reseed" logic; for the CPU+RAM fairness goal
@@ -52,10 +53,32 @@ bool RandomXInit()
 }
 
 
+// One dataset, once, no matter how many miners ask for it.
+//
+// Every miner thread calls this at startup. The g_fFast guard below is only
+// set at the very end, after the ~2 GB dataset has been filled, which takes
+// tens of seconds -- so without this lock all of them sail past the guard
+// together and each allocates its own dataset. Measured in production: a
+// 32-core machine logged "initializing ~2 GB dataset" 34 times and committed
+// 65 GB of private pages against a startup message promising 2142 MB.
+//
+// The waste was the mild half. g_dataset is assigned the moment the memory is
+// allocated, before it holds anything, so the last thread to allocate would
+// swing the pointer out from under the threads still filling their own. A
+// miner could then hash against a dataset another thread had not finished
+// writing, producing proof of work that no other node can reproduce.
+//
+// Holding the lock across the whole initialisation is deliberate: a thread
+// that arrives mid-init has nothing useful to do until the dataset exists,
+// and blocking is how it waits for exactly that.
+static std::mutex g_csDataset;
+
 bool RandomXInitDataset(int nThreads)
 {
     if (!g_fInit && !RandomXInit())
         return false;
+
+    std::lock_guard<std::mutex> lock(g_csDataset);
     if (g_fFast)
         return true;
 
