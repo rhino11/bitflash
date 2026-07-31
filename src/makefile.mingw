@@ -14,8 +14,13 @@ WARNFLAGS = -Wformat -Werror=format \
             -Wno-deprecated-declarations -Wno-write-strings \
             -Wno-narrowing -Wno-unused-result
 
+# FD_SETSIZE has to be defined before winsock2.h and it has to be the same
+# number in every translation unit -- fd_set carries an array of that length,
+# so disagreeing about it means disagreeing about sizeof(fd_set). That is why
+# it lives here as a -D and not as a #define in a header. Windows defaults to
+# 64, which capped this node at 63 watchable peers no matter how many it had.
 CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
-           -DWIN32 -DNOPCH \
+           -DWIN32 -DNOPCH -DFD_SETSIZE=1024 \
            -DSECP256K1_STATIC \
            -I$(DEPS)/include -I$(RANDOMX)/src \
            -I$(DEPS)/include/nlohmann \

@@ -67,6 +67,30 @@ static const int          BTF_RECV_TIMEOUT_SECS    = 30 * 60;
 static const int          BTF_SEND_STALL_SECS      = 10 * 60;
 static const int          BTF_HANDSHAKE_GRACE_SECS = 60;
 
+// Ceiling on simultaneous connections.
+//
+// ThreadSocketHandler watches every peer through one select(), and select()
+// cannot watch more descriptors than FD_SETSIZE. On Windows FD_SET simply
+// stops adding once the set is full -- no error, no log -- so every socket
+// past the limit stays open and is never read again. Nothing capped vNodes,
+// so a node accepted connections it had no way to service, and because new
+// entries go on the end of vNodes it was always the newest connection that
+// starved, including the ones dialed to fix connectivity.
+//
+// Measured on two nodes before this ceiling existed: 277 and 90 CNode objects
+// against 93 and 90 live sockets, and a status bar reporting hundreds of
+// peers for a node that was really talking to thirty.
+//
+// 125 is Bitcoin's number and sits far below FD_SETSIZE on both platforms.
+static const unsigned int MAX_CONNECTIONS = 125;
+
+// A node marked for disconnect is normally held until its buffers drain, so
+// a last message still goes out. But vSend cannot drain through a socket
+// whose far end is gone, and that made such a node immortal: it stayed in
+// vNodes, kept its socket open, and kept being counted. Force it out after
+// this long regardless of what is still buffered.
+static const int64        DISCONNECT_DRAIN_SECS    = 60;
+
 // Send a ping after this long with nothing to say, so a peer running the
 // inactivity check above does not mistake a quiet node for a dead one. Must
 // stay well under BTF_RECV_TIMEOUT_SECS.
@@ -520,6 +544,7 @@ protected:
     int nRefCount;
 public:
     int64 nReleaseTime;
+    int64 nDisconnectSince;
     map<uint256, CRequestTracker> mapRequests;
     CCriticalSection cs_mapRequests;
 
@@ -572,6 +597,7 @@ public:
         fDisconnect = false;
         nRefCount = 0;
         nReleaseTime = 0;
+        nDisconnectSince = 0;
         nLastPexRecv = 0;
         pindexLastGetBlocksBegin = NULL;
         hashLastGetBlocksEnd = 0;

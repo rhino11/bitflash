@@ -954,8 +954,27 @@ void ThreadSocketHandler2(void* parg)
             vector<CNode*> vNodesCopy = vNodes;
             foreach(CNode* pnode, vNodesCopy)
             {
-                if (pnode->ReadyToDisconnect() && pnode->vRecv.empty() && pnode->vSend.empty())
+                // Wait for the buffers to drain before letting a node go, so a
+                // last message still gets out -- but not forever. vSend never
+                // drains through a socket whose far end is gone, and a node
+                // stuck that way stayed in vNodes for the life of the process,
+                // holding its socket and counting as a peer.
+                if (!pnode->ReadyToDisconnect())
+                    pnode->nDisconnectSince = 0;
+                else if (pnode->nDisconnectSince == 0)
+                    pnode->nDisconnectSince = GetTime();
+
+                bool fDrained = pnode->vRecv.empty() && pnode->vSend.empty();
+                bool fStuck   = pnode->nDisconnectSince != 0 &&
+                                GetTime() - pnode->nDisconnectSince > DISCONNECT_DRAIN_SECS;
+
+                if (pnode->ReadyToDisconnect() && (fDrained || fStuck))
                 {
+                    if (!fDrained)
+                        printf("dropping stuck node %s after %d s with %d bytes unsent\n",
+                               pnode->addr.ToString().c_str(),
+                               (int)(GetTime() - pnode->nDisconnectSince),
+                               (int)pnode->vSend.size());
                     // remove from vNodes
                     vNodes.erase(remove(vNodes.begin(), vNodes.end(), pnode), vNodes.end());
                     pnode->Disconnect();
@@ -1010,15 +1029,34 @@ void ThreadSocketHandler2(void* parg)
         SOCKET hSocketMax = 0;
         FD_SET(hListenSocket, &fdsetRecv);
         hSocketMax = max(hSocketMax, hListenSocket);
+        // FD_SET drops silently once the set is full, so count what goes in
+        // and say so. A peer that never makes it into the set is never read,
+        // and that is indistinguishable from a peer with nothing to say --
+        // the failure this whole path used to hide.
+        unsigned int nWatched = 1; // the listen socket
         CRITICAL_BLOCK(cs_vNodes)
         {
             foreach(CNode* pnode, vNodes)
             {
+                if (nWatched >= FD_SETSIZE)
+                    break;
                 FD_SET(pnode->hSocket, &fdsetRecv);
+                nWatched++;
                 hSocketMax = max(hSocketMax, pnode->hSocket);
                 TRY_CRITICAL_BLOCK(pnode->cs_vSend)
                     if (!pnode->vSend.empty())
                         FD_SET(pnode->hSocket, &fdsetSend);
+            }
+            if (vNodes.size() + 1 > (size_t)FD_SETSIZE)
+            {
+                static int64 nLastWarned = 0;
+                if (GetTime() - nLastWarned > 60)
+                {
+                    nLastWarned = GetTime();
+                    printf("WARNING: %d peers but select() can only watch %d -- %d are not being read\n",
+                           (int)vNodes.size(), (int)FD_SETSIZE - 1,
+                           (int)vNodes.size() - (int)FD_SETSIZE + 1);
+                }
             }
         }
 
@@ -1028,12 +1066,37 @@ void ThreadSocketHandler2(void* parg)
         CheckForShutdown(0);
         if (nSelect == SOCKET_ERROR)
         {
+            // This used to answer a failed select() by marking every
+            // descriptor from 0 to hSocketMax ready, which is code written for
+            // POSIX, where a descriptor is a small integer. A Windows SOCKET is
+            // a kernel handle in the thousands, so the loop iterated over
+            // numbers that are not sockets and told the rest of the function
+            // that every peer had data. One bad handle in the set makes
+            // select() fail on every pass, so a single closed socket put the
+            // whole thread into that state permanently.
+            //
+            // Find the bad handle instead and let it be dropped.
             int nErr = WSAGetLastError();
             LogPrint("net", "select failed: %d\n", nErr);
-            for (int i = 0; i <= hSocketMax; i++)
+            FD_ZERO(&fdsetRecv);
+            FD_ZERO(&fdsetSend);
+            CRITICAL_BLOCK(cs_vNodes)
             {
-                FD_SET(i, &fdsetRecv);
-                FD_SET(i, &fdsetSend);
+                foreach(CNode* pnode, vNodes)
+                {
+                    int nType = 0;
+#ifdef _WIN32
+                    int nTypeLen = sizeof(nType);
+#else
+                    socklen_t nTypeLen = sizeof(nType);
+#endif
+                    if (getsockopt(pnode->hSocket, SOL_SOCKET, SO_TYPE, (char*)&nType, &nTypeLen) != 0)
+                    {
+                        printf("dropping node %s: its socket is no longer valid\n",
+                               pnode->addr.ToString().c_str());
+                        pnode->fDisconnect = true;
+                    }
+                }
             }
             Sleep(timeout.tv_usec/1000);
         }
@@ -1068,11 +1131,28 @@ void ThreadSocketHandler2(void* parg)
             }
             else
             {
-                LogPrint("net", "accepted connection from %s\n", addr.ToString().c_str());
-                CNode* pnode = new CNode(hSocket, addr, true);
-                pnode->AddRef();
+                // Refuse rather than accept a connection this node cannot
+                // watch. Without this the listen socket kept taking peers --
+                // it is always in the select set -- while everything past the
+                // limit sat open and unread, which fed on itself: the deafer
+                // the node got, the more connections it collected.
+                unsigned int nNodes = 0;
                 CRITICAL_BLOCK(cs_vNodes)
-                    vNodes.push_back(pnode);
+                    nNodes = (unsigned int)vNodes.size();
+                if (nNodes >= MAX_CONNECTIONS)
+                {
+                    LogPrint("net", "refusing connection from %s, already at %u\n",
+                             addr.ToString().c_str(), nNodes);
+                    closesocket(hSocket);
+                }
+                else
+                {
+                    LogPrint("net", "accepted connection from %s\n", addr.ToString().c_str());
+                    CNode* pnode = new CNode(hSocket, addr, true);
+                    pnode->AddRef();
+                    CRITICAL_BLOCK(cs_vNodes)
+                        vNodes.push_back(pnode);
+                }
             }
         }
 
