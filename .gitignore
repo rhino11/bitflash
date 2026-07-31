@@ -11,6 +11,7 @@ src/bitflash-node
 Bitflash-*-windows/
 Bitflash-*-windows.zip
 Bitflash-*.AppImage
+bitflash-node-*-x86_64
 SHA256SUMS
 
 # Runtime data / logs
