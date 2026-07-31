@@ -13,6 +13,39 @@
 // CDB
 //
 
+// Closes a Berkeley DB cursor however the function exits.
+//
+// Three functions opened one and none of them ever closed it. Berkeley DB
+// requires every cursor to be closed before the handle it came from, and
+// ~CDB() calls Close(), which calls pdb->close() inside a catch-all that
+// swallows whatever it returns. So the violation was real and silent.
+//
+// An open cursor also holds read locks. That is what made the first version of
+// the startup chain repair (#61) hang: it opened a write transaction beside
+// the cursor CTxDB::LoadBlockIndex was still holding, and waited on it forever
+// with nothing in any log. The repair had to be moved to the caller.
+//
+// Each of these functions has several early returns, so a guard is safer than
+// remembering to close on every one of them. Same fix Bitcoin made in
+// c5c7911da, alongside its zombie-socket and double-close work.
+class CAutoCursor
+{
+public:
+    explicit CAutoCursor(Dbc* pcursorIn) : pcursor(pcursorIn) { }
+    ~CAutoCursor()
+    {
+        if (pcursor)
+        {
+            try { pcursor->close(); }
+            catch (...) { }   // closing on the way out must not throw
+        }
+    }
+private:
+    Dbc* pcursor;
+    CAutoCursor(const CAutoCursor&);
+    void operator=(const CAutoCursor&);
+};
+
 static CCriticalSection cs_db;
 static bool fDbEnvInit = false;
 DbEnv dbenv(0u);
@@ -266,6 +299,7 @@ bool CTxDB::ReadOwnerTxes(uint160 hash160, int nMinHeight, vector<CTransaction>&
     Dbc* pcursor = GetCursor();
     if (!pcursor)
         return false;
+    CAutoCursor cursorGuard(pcursor);
 
     unsigned int fFlags = DB_SET_RANGE;
     loop
@@ -375,6 +409,7 @@ bool CTxDB::LoadBlockIndex()
     Dbc* pcursor = GetCursor();
     if (!pcursor)
         return false;
+    CAutoCursor cursorGuard(pcursor);
 
     unsigned int fFlags = DB_SET_RANGE;
     loop
@@ -544,6 +579,7 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         Dbc* pcursor = GetCursor();
         if (!pcursor)
             return false;
+        CAutoCursor cursorGuard(pcursor);
 
         loop
         {
