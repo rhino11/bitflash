@@ -3437,22 +3437,36 @@ bool CreateTransaction(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, in
                 wtxNew.vout.clear();
                 if (nValue < 0)
                     return false;
-                int64 nValueOut = nValue;
-                nValue += nFee;
+
+                // nValue is the amount the payee asked for and must stay that.
+                //
+                // This used to read "nValueOut = nValue; nValue += nFee;", and
+                // both lines are inside the retry loop. The first pass was
+                // fine. But when the fee turned out to be too low the loop
+                // starts over, and on the second pass nValueOut is read from
+                // an nValue that already had the fee added -- so the payee is
+                // sent the amount plus the fee, and it compounds on every
+                // further retry, with the sender covering it.
+                //
+                // The retry fires whenever GetMinFee exceeds the fee we
+                // guessed, which for this fee schedule means any transaction
+                // over 10 KB: a wallet paying from many small inputs. Bitcoin
+                // fixed this in 107d9e288.
+                int64 nTotalValue = nValue + nFee;
 
                 // Choose coins to use
                 set<CWalletTx*> setCoins;
-                if (!SelectCoins(nValue, setCoins))
+                if (!SelectCoins(nTotalValue, setCoins))
                     return false;
                 int64 nValueIn = 0;
                 foreach(CWalletTx* pcoin, setCoins)
                     nValueIn += pcoin->GetCredit();
 
                 // Fill vout[0] to the payee
-                wtxNew.vout.push_back(CTxOut(nValueOut, scriptPubKey));
+                wtxNew.vout.push_back(CTxOut(nValue, scriptPubKey));
 
                 // Fill vout[1] back to self with any change
-                if (nValueIn > nValue)
+                if (nValueIn > nTotalValue)
                 {
                     // Use the same key as one of the coins
                     vector<unsigned char> vchPubKey;
@@ -3467,7 +3481,7 @@ bool CreateTransaction(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, in
                     // Fill vout[1] to ourself
                     CScript scriptPubKey;
                     scriptPubKey << vchPubKey << OP_CHECKSIG;
-                    wtxNew.vout.push_back(CTxOut(nValueIn - nValue, scriptPubKey));
+                    wtxNew.vout.push_back(CTxOut(nValueIn - nTotalValue, scriptPubKey));
                 }
 
                 // Fill vin
