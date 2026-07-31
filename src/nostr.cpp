@@ -83,7 +83,11 @@ static CCriticalSection   cs_btfPeers;
 const char* pszNostrRelays[] = {
     "wss://relay.damus.io",
     "wss://nos.lol",
-    "wss://relay.nostr.band",
+    // Was relay.nostr.band, which went down and stayed down (2026-07-31:
+    // resolves, refuses TCP on 443, from several networks). Replaced with a
+    // relay on a different upstream again -- 206.245.132.32, neither
+    // Cloudflare nor Hetzner, which the rest of this list already leans on.
+    "wss://nostr.bitcoiner.social",
     "wss://nostr21.com",
     "wss://offchain.pub",
     "wss://nostr.mom",
@@ -1172,6 +1176,74 @@ bool BtfResolveMany(const std::vector<std::string>& btfAddrs,
 }
 
 
+// ---- per-relay backoff -----------------------------------------------------
+//
+// A relay that is down costs the whole discovery loop the full connect timeout,
+// every round, forever. relay.nostr.band went down and produced 1092 identical
+// error lines on the seed while adding ten seconds to every pass -- and the
+// loop is what discovers peers, so a dead relay was slowing down the live ones.
+//
+// Back off per relay instead: 30s after the first failure, doubling to a
+// fifteen-minute ceiling, cleared the moment it answers again. This changes
+// only when an attempt happens, never whether discovery is correct.
+struct CRelayBackoff
+{
+    int64 nNextTry;
+    int   nFails;
+    CRelayBackoff() : nNextTry(0), nFails(0) {}
+};
+static map<string, CRelayBackoff> mapRelayBackoff;
+static CCriticalSection           cs_relayBackoff;
+
+static const int64 RELAY_BACKOFF_BASE_SECS = 30;
+static const int64 RELAY_BACKOFF_MAX_SECS  = 15 * 60;
+
+static bool RelayDueForRetry(const string& relay)
+{
+    CRITICAL_BLOCK(cs_relayBackoff)
+    {
+        map<string, CRelayBackoff>::iterator it = mapRelayBackoff.find(relay);
+        if (it == mapRelayBackoff.end())
+            return true;
+        return GetTime() >= it->second.nNextTry;
+    }
+    return true;
+}
+
+static void RelayNoteFailure(const string& relay)
+{
+    CRITICAL_BLOCK(cs_relayBackoff)
+    {
+        CRelayBackoff& b = mapRelayBackoff[relay];
+        b.nFails++;
+        int64 nWait = RELAY_BACKOFF_BASE_SECS;
+        for (int i = 1; i < b.nFails && nWait < RELAY_BACKOFF_MAX_SECS; i++)
+            nWait *= 2;
+        if (nWait > RELAY_BACKOFF_MAX_SECS)
+            nWait = RELAY_BACKOFF_MAX_SECS;
+        b.nNextTry = GetTime() + nWait;
+        // Only on the way in, so a relay that stays down says this once per
+        // backoff step rather than once per pass.
+        LogPrint("nostr", "Nostr: %s unreachable (%d in a row), not retrying for %ds\n",
+                 relay.c_str(), b.nFails, (int)nWait);
+    }
+}
+
+static void RelayNoteSuccess(const string& relay)
+{
+    CRITICAL_BLOCK(cs_relayBackoff)
+    {
+        map<string, CRelayBackoff>::iterator it = mapRelayBackoff.find(relay);
+        if (it != mapRelayBackoff.end())
+        {
+            if (it->second.nFails > 0)
+                LogPrint("nostr", "Nostr: %s answering again after %d failure(s)\n",
+                         relay.c_str(), it->second.nFails);
+            mapRelayBackoff.erase(it);
+        }
+    }
+}
+
 // Connect to a relay: publish our .btf descriptor and collect relay data.
 static bool SeedFromRelay(CNostrKey& key, const string& relay)
 {
@@ -1653,9 +1725,14 @@ void ThreadNostrSeed(void* parg)
         for (int i = 0; i < nNostrRelays; i++)
         {
             if (fShutdown) return;
+            if (!RelayDueForRetry(pszNostrRelays[i]))
+                continue;
             try
             {
-                SeedFromRelay(key, pszNostrRelays[i]);
+                if (SeedFromRelay(key, pszNostrRelays[i]))
+                    RelayNoteSuccess(pszNostrRelays[i]);
+                else
+                    RelayNoteFailure(pszNostrRelays[i]);
             }
             CATCH_PRINT_EXCEPTION("SeedFromRelay")
         }
