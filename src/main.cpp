@@ -282,6 +282,16 @@ void AddOrphanTx(const CDataStream& vMsg)
     uint256 hash = tx.GetHash();
     if (mapOrphanTransactions.count(hash))
         return;
+
+    // Do not allow an orphan to have an unbounded number of inputs.
+    // 10,000 inputs is enough for massive legitimate sweeps, but bounds the total
+    // memory in mapOrphanTransactionsByPrev to ~10,000 * MAX_ORPHAN_TRANSACTIONS.
+    if (tx.vin.size() > 10000)
+    {
+        if (LogAcceptsCategory("net")) printf("AddOrphanTx() : orphan with %d inputs rejected\n", (int)tx.vin.size());
+        return;
+    }
+
     CDataStream* pvMsg = mapOrphanTransactions[hash] = new CDataStream(vMsg);
     foreach(const CTxIn& txin, tx.vin)
         mapOrphanTransactionsByPrev.insert(make_pair(txin.prevout.hash, pvMsg));

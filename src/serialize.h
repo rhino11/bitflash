@@ -20,7 +20,7 @@ class CDataStream;
 class CAutoFile;
 
 static const int VERSION = 101;
-
+static const unsigned int MAX_SIZE = 0x02000000;
 
 
 
@@ -399,6 +399,8 @@ void Unserialize(Stream& is, basic_string<C>& str, int, int)
     // only string field on a serialized type and RelayMessage casts it away --
     // so this is a guard against the next one that does, not a live hole.
     unsigned int nSize = ReadCompactSize(is);
+    if (nSize > MAX_SIZE)
+        throw std::ios_base::failure("String size too large");
     str.clear();
     unsigned int nMid = 0;
     while (nMid < nSize)
@@ -472,6 +474,8 @@ void Unserialize_impl(Stream& is, std::vector<T, A>& v, int nType, int nVersion,
     // Limit size per read so bogus size value won't cause out of memory
     v.clear();
     unsigned int nSize = ReadCompactSize(is);
+    if (nSize > MAX_SIZE)
+        throw std::ios_base::failure("Vector size too large");
     unsigned int i = 0;
     while (i < nSize)
     {
@@ -492,6 +496,8 @@ void Unserialize_impl(Stream& is, std::vector<T, A>& v, int nType, int nVersion,
 
     v.clear();
     unsigned int nSize = ReadCompactSize(is);
+    if (nSize > MAX_SIZE)
+        throw std::ios_base::failure("Vector size too large");
     unsigned int i = 0;
     unsigned int nMid = 0;
     while (nMid < nSize)

@@ -681,7 +681,32 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
                        int& blocksFoundThisSession)
 {
     json req;
-    try { req = json::parse(rawLine); }
+    try {
+        // Fast pre-parse depth check to prevent stack overflow in json::parse.
+        // Legitimate Stratum requests have a depth of at most 4.
+        int depth = 0;
+        bool in_string = false;
+        bool escape = false;
+        for (char c : rawLine) {
+            if (in_string) {
+                if (escape) escape = false;
+                else if (c == '\\') escape = true;
+                else if (c == '"') in_string = false;
+            } else {
+                if (c == '"') in_string = true;
+                else if (c == '{' || c == '[') {
+                    if (++depth > 20) {
+                        LogPrint("worker", "[worker] JSON too deeply nested from %s\n",
+                                 m->address.empty() ? "(unauth)" : m->address.c_str());
+                        return true;
+                    }
+                } else if (c == '}' || c == ']') {
+                    depth--;
+                }
+            }
+        }
+        req = json::parse(rawLine);
+    }
     catch (...) {
         LogPrint("worker", "[worker] JSON parse error from %s: %.80s\n",
                  m->address.empty() ? "(unauth)" : m->address.c_str(),

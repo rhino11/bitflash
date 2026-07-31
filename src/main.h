@@ -14,7 +14,6 @@ class CBlockIndex;
 class CWalletTx;
 class CKeyItem;
 
-static const unsigned int MAX_SIZE = 0x02000000;
 // Ceiling on transactions held waiting for a parent that has not arrived.
 // They cost a peer nothing to send and are never validated, only stored.
 static const unsigned int MAX_ORPHAN_TRANSACTIONS = 100;
