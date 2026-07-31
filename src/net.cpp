@@ -181,6 +181,17 @@ bool AnySubscribed(unsigned int nChannel)
     return false;
 }
 
+void CNode::PushGetBlocks(CBlockIndex* pindexBegin, uint256 hashEnd)
+{
+    // Filter out duplicate requests.
+    if (pindexBegin == pindexLastGetBlocksBegin && hashEnd == hashLastGetBlocksEnd)
+        return;
+    pindexLastGetBlocksBegin = pindexBegin;
+    hashLastGetBlocksEnd     = hashEnd;
+
+    PushMessage("getblocks", CBlockLocator(pindexBegin), hashEnd);
+}
+
 bool CNode::IsSubscribed(unsigned int nChannel)
 {
     if (nChannel >= vfSubscribe.size())

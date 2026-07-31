@@ -293,6 +293,43 @@ void AddOrphanTx(const CDataStream& vMsg)
 // grow this map until the node runs out of memory. Evict at random rather than
 // in map order, so an attacker cannot keep its own orphans resident by
 // choosing hashes that sort low.
+// Drop orphan blocks at random until we are back under the ceiling.
+//
+// Random rather than oldest-first, matching LimitOrphanTx below: there is no
+// arrival order recorded, and an attacker who knew the eviction rule could aim
+// at it. Dropping one costs nothing that matters -- if its parent ever shows
+// up, the block is requested again like any other.
+//
+// Both maps have to be kept in step, and the CBlock itself has to be deleted:
+// mapOrphanBlocks owns it.
+void LimitOrphanBlocks(unsigned int nMaxOrphans)
+{
+    while (mapOrphanBlocks.size() > nMaxOrphans)
+    {
+        uint256 randomhash;
+        for (int i = 0; i < 4; i++)
+            ((uint64*)&randomhash)[i] = GetRand(_UI64_MAX);
+        map<uint256, CBlock*>::iterator it = mapOrphanBlocks.lower_bound(randomhash);
+        if (it == mapOrphanBlocks.end())
+            it = mapOrphanBlocks.begin();
+
+        CBlock* pblock = it->second;
+        uint256 hashPrev = pblock->hashPrevBlock;
+
+        for (multimap<uint256, CBlock*>::iterator mi = mapOrphanBlocksByPrev.lower_bound(hashPrev);
+             mi != mapOrphanBlocksByPrev.upper_bound(hashPrev);)
+        {
+            if (mi->second == pblock)
+                mapOrphanBlocksByPrev.erase(mi++);
+            else
+                ++mi;
+        }
+
+        mapOrphanBlocks.erase(it);
+        delete pblock;
+    }
+}
+
 void LimitOrphanTx(unsigned int nMaxOrphans)
 {
     while (mapOrphanTransactions.size() > nMaxOrphans)
@@ -1468,9 +1505,16 @@ bool ProcessBlock(CNode* pfrom, CBlock* pblock)
         mapOrphanBlocks.insert(make_pair(hash, pblock));
         mapOrphanBlocksByPrev.insert(make_pair(pblock->hashPrevBlock, pblock));
 
+        // Read what we need out of pblock before trimming: eviction picks at
+        // random and is perfectly entitled to pick the block just inserted,
+        // which would leave the GetOrphanRoot call below reading freed memory.
+        uint256 hashOrphanRoot = GetOrphanRoot(pblock);
+
+        LimitOrphanBlocks(MAX_ORPHAN_BLOCKS);
+
         // Ask this guy to fill in what we're missing
         if (pfrom)
-            pfrom->PushMessage("getblocks", CBlockLocator(pindexBest), GetOrphanRoot(pblock));
+            pfrom->PushGetBlocks(pindexBest, hashOrphanRoot);
         return true;
     }
 
@@ -2047,7 +2091,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         if (!fAskedForBlocks && !pfrom->fClient)
         {
             fAskedForBlocks = true;
-            pfrom->PushMessage("getblocks", CBlockLocator(pindexBest), uint256(0));
+            pfrom->PushGetBlocks(pindexBest, uint256(0));
         }
 
         // Introduce ourselves and hand over the .btf peers that answered us.
@@ -2110,7 +2154,7 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
             if (!fAlreadyHave)
                 pfrom->AskFor(inv);
             else if (inv.type == MSG_BLOCK && mapOrphanBlocks.count(inv.hash))
-                pfrom->PushMessage("getblocks", CBlockLocator(pindexBest), GetOrphanRoot(mapOrphanBlocks[inv.hash]));
+                pfrom->PushGetBlocks(pindexBest, GetOrphanRoot(mapOrphanBlocks[inv.hash]));
         }
     }
 

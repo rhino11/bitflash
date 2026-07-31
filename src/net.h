@@ -7,6 +7,9 @@ class CAddress;
 class CInv;
 class CRequestTracker;
 class CNode;
+// Defined in main.h, which is included after this file. Only ever used here as
+// a pointer, so the forward declaration is enough.
+class CBlockIndex;
 
 
 
@@ -533,6 +536,11 @@ public:
     // Last "btfpeers" we accepted from this node, to rate-limit the exchange.
     int64 nLastPexRecv;
 
+    // Last getblocks we sent this peer, so we do not ask the same question
+    // over and over. See CNode::PushGetBlocks.
+    CBlockIndex* pindexLastGetBlocksBegin;
+    uint256      hashLastGetBlocksEnd;
+
     // Liveness. A peer whose network path dies silently -- NAT drops an idle
     // mapping, a relay restarts, a route changes -- never sends FIN, so the
     // socket stays readable-never and the node simply stops hearing from it
@@ -565,6 +573,8 @@ public:
         nRefCount = 0;
         nReleaseTime = 0;
         nLastPexRecv = 0;
+        pindexLastGetBlocksBegin = NULL;
+        hashLastGetBlocksEnd = 0;
         nTimeConnected = GetTime();
         nLastSend = 0;
         nLastRecv = 0;
@@ -716,6 +726,22 @@ public:
 
 
 
+
+    // Ask this peer to fill in blocks we are missing, but only once per
+    // question.
+    //
+    // Every orphan block fires one of these, and an inv for a block we already
+    // hold as an orphan fires another. A node that is missing part of the
+    // chain therefore asks the same peer the same thing repeatedly: measured
+    // on a production node, 1287 orphan blocks out of 4117 processed, and 97
+    // "already have block" from the answers coming back more than once. The
+    // duplicate answers create more orphans, which fire more requests.
+    //
+    // Remembering the last question asked breaks that loop. Same fix Bitcoin
+    // made in e2c2648c1.
+    // Body lives in net.cpp: it builds a CBlockLocator, which main.h defines,
+    // and main.h is included after this file.
+    void PushGetBlocks(CBlockIndex* pindexBegin, uint256 hashEnd);
 
     void PushMessage(const char* pszCommand)
     {

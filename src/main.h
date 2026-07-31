@@ -18,6 +18,13 @@ static const unsigned int MAX_SIZE = 0x02000000;
 // Ceiling on transactions held waiting for a parent that has not arrived.
 // They cost a peer nothing to send and are never validated, only stored.
 static const unsigned int MAX_ORPHAN_TRANSACTIONS = 100;
+// Blocks held waiting for a parent that has not arrived. Orphan transactions
+// have had a ceiling since 0.1.0 and orphan blocks never did: one whose parent
+// never turns up stays in memory for the life of the process, and a peer can
+// send an unlimited number of them by inventing the previous-block hash. They
+// are not free either -- each holds a whole block. A production node was
+// seeing 1287 of them against 4117 blocks processed.
+static const unsigned int MAX_ORPHAN_BLOCKS = 200;
 // Signature operations allowed in one block. Size alone does not bound what a
 // block costs to validate: every OP_CHECKSIG is an elliptic-curve verification,
 // so a block within the size limit could still hold millions of them and take
@@ -125,6 +132,8 @@ void PrintBlockTree();
 void AddOrphanTx(const CDataStream& vMsg);
 void EraseOrphanTx(uint256 hash);
 void LimitOrphanTx(unsigned int nMaxOrphans);
+// Same ceiling idea for orphan blocks, which never had one.
+void LimitOrphanBlocks(unsigned int nMaxOrphans);
 // nThreadId is 1..N, only for logging: it makes each miner's lines
 // distinguishable, which the dedup filter would otherwise collapse into one.
 bool BitcoinMiner(int nThreadId = 1);
