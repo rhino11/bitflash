@@ -54,6 +54,7 @@ static void PrintUsage()
     printf("  /participant=POOL_BTF_ADDRESS\n");
     printf("  /solomine\n");
     printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
+    printf("  /checkblocks=N             (blocks re-verified at startup, default 288, 0 = all)\n");
     printf("\n");
     printf("Pool operator announcement:\n");
     printf("  /poolname=NAME\n");
@@ -100,6 +101,10 @@ static void ParseStartupArguments(int argc, char* argv[])
 
     if (arg(argc,argv,"/solomine") || arg(argc,argv,"-solomine"))
         fSoloMineTest = true;
+
+    string strCheckBlocks = argval2(argc, argv, "/checkblocks", "-checkblocks");
+    if (!strCheckBlocks.empty())
+        nCheckBlocksOnLoad = atoi(strCheckBlocks.c_str());
 
     // /genproclimit=N -- threads to hash with. 0 or absent means automatic,
     // which is every core but one. Named after Bitcoin's own option so it reads

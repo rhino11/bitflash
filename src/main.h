@@ -52,6 +52,8 @@ extern unsigned int GENESIS_NONCE;
 extern CBlockIndex* pindexGenesisBlock;
 extern int nBestHeight;
 extern uint256 hashBestChain;
+extern int nCheckBlocksOnLoad;
+extern CBlockIndex* pindexBadChainFork;
 extern CBlockIndex* pindexBest;
 extern unsigned int nTransactionsUpdated;
 extern string strSetDataDir;

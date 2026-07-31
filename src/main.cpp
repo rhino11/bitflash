@@ -49,6 +49,15 @@ uint256 hashGenesisMerkleRoot("0x1a45b4482532abb29b10e234d3f13132230525a339ecea9
 CBlockIndex* pindexGenesisBlock = NULL;
 int nBestHeight = -1;
 uint256 hashBestChain = 0;
+// Blocks at the tip to re-verify on startup. 0 means the whole chain. 288 is
+// about ten hours at a two-minute target -- far enough back to catch a bad tip,
+// short enough that startup does not pay a RandomX hash per block for the whole
+// history. /checkblocks=N overrides it.
+int nCheckBlocksOnLoad = 288;
+// Set by CTxDB::LoadBlockIndex when the tail of the chain fails verification.
+// The repair runs in LoadBlockIndex() below, once that read-only handle and its
+// cursor are closed.
+CBlockIndex* pindexBadChainFork = NULL;
 CBlockIndex* pindexBest = NULL;
 
 map<uint256, CBlock*> mapOrphanBlocks;
@@ -1576,6 +1585,72 @@ bool LoadBlockIndex(bool fAllowNew)
     if (!txdb.LoadBlockIndex())
         return false;
     txdb.Close();
+
+    // Repair a bad tip found during verification.
+    //
+    // This has to happen after the handle above is closed. CTxDB::LoadBlockIndex
+    // walks the index with a cursor it never closes, so it is still holding read
+    // locks -- a write transaction opened alongside it waits on them forever.
+    // Measured, not guessed: the node came up, printed the diagnosis, and hung
+    // there with nothing in any log.
+    if (pindexBadChainFork)
+    {
+        CBlockIndex* pindexFork = pindexBadChainFork;
+        pindexBadChainFork = NULL;
+
+        printf("LoadBlockIndex() : *** moving best chain back to height %d, discarding %d block(s)\n",
+               pindexFork->nHeight, nBestHeight - pindexFork->nHeight);
+
+        vector<CBlockIndex*> vDisconnect;
+        for (CBlockIndex* pindex = pindexBest; pindex && pindex != pindexFork; pindex = pindex->pprev)
+            vDisconnect.push_back(pindex);
+
+        bool fRolledBack = false;
+        try
+        {
+            CTxDB txdbWrite;
+            txdbWrite.TxnBegin();
+            foreach(CBlockIndex* pindex, vDisconnect)
+            {
+                CBlock block;
+                if (!block.ReadFromDisk(pindex->nFile, pindex->nBlockPos, true))
+                    throw runtime_error("ReadFromDisk for disconnect failed");
+                if (!block.DisconnectBlock(txdbWrite, pindex))
+                    throw runtime_error("DisconnectBlock failed");
+            }
+            if (!txdbWrite.WriteHashBestChain(pindexFork->GetBlockHash()))
+                throw runtime_error("WriteHashBestChain failed");
+            txdbWrite.TxnCommit();
+            txdbWrite.Close();
+            fRolledBack = true;
+        }
+        catch (const std::exception& e)
+        {
+            printf("LoadBlockIndex() : rollback failed: %s\n", e.what());
+        }
+        catch (...)
+        {
+            printf("LoadBlockIndex() : rollback failed\n");
+        }
+
+        if (fRolledBack)
+        {
+            foreach(CBlockIndex* pindex, vDisconnect)
+                if (pindex->pprev)
+                    pindex->pprev->pnext = NULL;
+
+            pindexBest    = pindexFork;
+            hashBestChain = pindexBest->GetBlockHash();
+            nBestHeight   = pindexBest->nHeight;
+            printf("LoadBlockIndex() : now at height %d, will re-download from peers\n", nBestHeight);
+        }
+        else
+        {
+            // Start anyway. The operator needs a running node to read this from.
+            printf("LoadBlockIndex() : *** still on the bad chain at height %d -- back up the data directory and report this\n",
+                   nBestHeight);
+        }
+    }
 
     //
     // Init with genesis block

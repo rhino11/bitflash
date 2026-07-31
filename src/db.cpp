@@ -435,6 +435,47 @@ bool CTxDB::LoadBlockIndex()
     nBestHeight = pindexBest->nHeight;
     printf("LoadBlockIndex(): hashBestChain=%s  height=%d\n", hashBestChain.ToString().substr(0,14).c_str(), nBestHeight);
 
+    // Verify the tail of the best chain, and fall back to the last good block
+    // if any of it fails.
+    //
+    // A node that accepted blocks its current rules would reject -- because it
+    // was running an older build, or because the tip it landed on was never
+    // valid -- has no way to notice on its own. It keeps the branch, keeps
+    // building on it, and keeps mining coins that the rest of the network
+    // throws away. The only cure used to be deleting blk*.dat by hand, which
+    // requires knowing something is wrong in the first place. That is how a
+    // node here once mined a 323-block fork for five days.
+    //
+    // Checking every block on every start would mean a RandomX hash per block,
+    // so only the tail is checked by default. /checkblocks=0 does the lot.
+    int nCheckBlocks = nCheckBlocksOnLoad;
+    CBlockIndex* pindexFork = NULL;
+    int nChecked = 0;
+    for (CBlockIndex* pindex = pindexBest; pindex && pindex->pprev; pindex = pindex->pprev)
+    {
+        if (nCheckBlocks > 0 && nChecked >= nCheckBlocks)
+            break;
+        nChecked++;
+        CBlock block;
+        if (!block.ReadFromDisk(pindex->nFile, pindex->nBlockPos, true))
+            return error("LoadBlockIndex() : ReadFromDisk failed at height %d", pindex->nHeight);
+        if (!block.CheckBlock())
+        {
+            printf("LoadBlockIndex() : *** bad block at height %d, hash=%s\n",
+                   pindex->nHeight, pindex->GetBlockHash().ToString().substr(0,14).c_str());
+            // Keep going: an older bad block further back wins, because
+            // everything after it has to come off too.
+            pindexFork = pindex->pprev;
+        }
+    }
+    printf("LoadBlockIndex(): verified %d block(s)\n", nChecked);
+
+    // The repair itself happens in the caller, after this handle is closed.
+    // The cursor above is still open and holds read locks, so a write
+    // transaction opened here waits on it forever -- measured: the node came
+    // up, printed the diagnosis, and hung with no error anywhere.
+    pindexBadChainFork = pindexFork;
+
     return true;
 }
 
