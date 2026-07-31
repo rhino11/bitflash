@@ -243,6 +243,10 @@ int main(int argc, char* argv[])
     try
     {
         if (!LoadWallet()) { fprintf(stderr, "LoadWallet failed\n"); return 1; }
+
+        // After the block index, so there is a chain to compare the wallet
+        // against, and before anything reports a balance.
+        RescanSpentFlags();
     }
     catch (const std::exception& e)
     {

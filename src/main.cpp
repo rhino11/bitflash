@@ -693,6 +693,71 @@ bool CWalletTx::AcceptWalletTransaction(CTxDB& txdb, bool fCheckInputs)
     return true;
 }
 
+int RescanSpentFlags()
+{
+    // Believe the chain, not the wallet, about what has already been spent.
+    //
+    // fSpent lives in wallet.dat and is written when this node spends
+    // something. A wallet.dat that was restored from backup, or copied and
+    // used on another machine, carries whatever that flag was at the moment
+    // the copy was taken -- so it can say "unspent" about coins the chain
+    // shows as gone. The balance then reads high, and the error only surfaces
+    // when a send is attempted against coins that no longer exist.
+    //
+    // Issue #47 is about this shape of problem and #40 reports living through
+    // it. Bitcoin fixed the same thing in 53d508072.
+    //
+    // One direction only. Marking spent when the chain says spent is safe;
+    // clearing the flag because the chain has not caught up yet would offer
+    // up coins that are already on their way out.
+    CTxDB txdb("r");
+    int nCorrected = 0;
+    int nExamined = 0;
+    int nAlreadySpent = 0, nNotIndexed = 0;
+    CRITICAL_BLOCK(cs_mapWallet)
+    {
+        foreach(PAIRTYPE(const uint256, CWalletTx)& item, mapWallet)
+        {
+            CWalletTx& wtx = item.second;
+            nExamined++;
+            if (wtx.fSpent)
+                { nAlreadySpent++; continue; }
+
+            CTxIndex txindex;
+            if (!txdb.ReadTxIndex(wtx.GetHash(), txindex))
+                { nNotIndexed++; continue; }
+
+            // fSpent is one flag for the whole transaction, not one per
+            // output -- CommitTransactionSpent already marks the entire
+            // previous transaction when it spends any part of it, so matching
+            // that here keeps the two consistent.
+            bool fSeenSpent = false;
+            for (int i = 0; i < (int)txindex.vSpent.size() && i < (int)wtx.vout.size(); i++)
+                if (!txindex.vSpent[i].IsNull() && wtx.vout[i].IsMine())
+                    fSeenSpent = true;
+
+            if (fSeenSpent)
+            {
+                wtx.fSpent = true;
+                wtx.WriteToDisk();
+                nCorrected++;
+                printf("RescanSpentFlags() : %s was spent on chain but the wallet did not know\n",
+                       wtx.GetHash().ToString().substr(0,10).c_str());
+            }
+        }
+    }
+    // Always say it ran. A check that reports only when it finds something is
+    // indistinguishable from a check that never executed, and this codebase has
+    // paid for that confusion more than once.
+    printf("RescanSpentFlags() : examined %d, already-spent %d, not-indexed %d, corrected %d\n",
+           nExamined, nAlreadySpent, nNotIndexed, nCorrected);
+    if (nCorrected)
+        printf("RescanSpentFlags() : this wallet was behind the chain about what it had already spent, "
+               "which is what a restored backup looks like\n");
+    return nCorrected;
+}
+
+
 void ReacceptWalletTransactions()
 {
     // Reaccept any txes of ours that aren't already in a block

@@ -117,6 +117,8 @@ bool AddKey(const CKey& key);
 vector<unsigned char> GenerateNewKey();
 bool AddToWallet(const CWalletTx& wtxIn);
 void ReacceptWalletTransactions();
+// Returns how many wallet transactions the chain corrected.
+int  RescanSpentFlags();
 void RelayWalletTransactions();
 bool LoadBlockIndex(bool fAllowNew=true);
 void PrintBlockTree();
