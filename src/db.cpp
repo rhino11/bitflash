@@ -636,6 +636,14 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
             {
                 ssValue >> vchDefaultKeyRet;
             }
+            else if (strType == "pool")
+            {
+                int64 nIndex;
+                ssKey >> nIndex;
+                vector<unsigned char> vchPubKey;
+                ssValue >> vchPubKey;
+                mapKeyPool[nIndex] = vchPubKey;
+            }
             else if (strType == "setting")  /// or settings or option or options or config?
             {
                 string strKey;

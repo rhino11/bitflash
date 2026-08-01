@@ -175,6 +175,58 @@ vector<unsigned char> GenerateNewKey()
     return key.GetPubKey();
 }
 
+CCriticalSection cs_keyPool;
+map<int64, vector<unsigned char> > mapKeyPool;
+
+void TopUpKeyPool()
+{
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        while ((int)mapKeyPool.size() < KEYPOOL_SIZE)
+        {
+            // Indices only ever go up. Reusing one would mean two pool records
+            // racing for the same slot after an erase.
+            int64 nIndex = 1;
+            if (!mapKeyPool.empty())
+                nIndex = (--mapKeyPool.end())->first + 1;
+
+            CKey key;
+            key.MakeNewKey();
+            // AddKey writes the private key. Order matters: the key is in
+            // wallet.dat before anything can point at it, so a crash between
+            // the two writes costs an unused key, never a usable one.
+            if (!AddKey(key))
+                return;
+            vector<unsigned char> vchPubKey = key.GetPubKey();
+            if (!CWalletDB().WritePool(nIndex, vchPubKey))
+                return;
+            mapKeyPool[nIndex] = vchPubKey;
+        }
+    }
+}
+
+vector<unsigned char> GetKeyFromPool()
+{
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        TopUpKeyPool();
+        if (!mapKeyPool.empty())
+        {
+            map<int64, vector<unsigned char> >::iterator mi = mapKeyPool.begin();
+            int64 nIndex = mi->first;
+            vector<unsigned char> vchPubKey = mi->second;
+            mapKeyPool.erase(mi);
+            CWalletDB().ErasePool(nIndex);
+            return vchPubKey;
+        }
+    }
+    // Nothing in the pool and nothing could be added -- disk full, wallet
+    // locked open elsewhere. Generating on demand is what this code did for
+    // its whole life, so fall back to it rather than refuse to mine.
+    printf("GetKeyFromPool() : pool empty, generating a key on demand\n");
+    return GenerateNewKey();
+}
+
 
 
 
@@ -3061,8 +3113,11 @@ bool BitcoinMiner(int nThreadId)
         RandomXInitDataset(nThreads > 0 ? (int)nThreads : 1);
     }
 
-    CKey key;
-    key.MakeNewKey();
+    // Drawn from the pool, so it is already in wallet.dat before a single hash
+    // is computed. The old code generated a key here and only saved it if this
+    // thread happened to win a block, which meant a backup taken while mining
+    // could not spend what the very next block paid.
+    vector<unsigned char> vchPubKey = GetKeyFromPool();
     CBigNum bnExtraNonce = 0;
     while (fGenerateBitcoins)
     {
@@ -3113,7 +3168,7 @@ bool BitcoinMiner(int nThreadId)
         txNew.vout.resize(1);
         // Always pay coinbase to own wallet key. In operator mode, the pool
         // server distributes shares to miners via SendMoney() after each block.
-        txNew.vout[0].scriptPubKey << key.GetPubKey() << OP_CHECKSIG;
+        txNew.vout[0].scriptPubKey << vchPubKey << OP_CHECKSIG;
 
 
         //
@@ -3234,13 +3289,13 @@ bool BitcoinMiner(int nThreadId)
                     }
                     else
                     {
-                        // Save key
-                        if (!AddKey(key))
-                        {
-                            RandomXDestroyMinerVM(rxvm);
-                            return false;
-                        }
-                        key.MakeNewKey();
+                        // The key that just got paid was written to wallet.dat
+                        // when it left the pool, so there is nothing to save
+                        // here -- only a fresh one to take for the next block.
+                        // Two threads never draw the same key: the pool hands
+                        // them out one at a time under cs_keyPool, which is
+                        // what keeps concurrent coinbases distinct (#58).
+                        vchPubKey = GetKeyFromPool();
 
                         // Process this block the same as if we had received it from another node
                         if (!ProcessBlock(NULL, pblock.release()))

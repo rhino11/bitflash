@@ -386,6 +386,19 @@ public:
         return Write(string("defaultkey"), vchPubKey);
     }
 
+    // Keys generated ahead of time and not yet handed out. The private key of
+    // each is already stored under its own "key" record by AddKey; a "pool"
+    // record only says that this one is still unspoken for.
+    bool WritePool(int64 nIndex, const vector<unsigned char>& vchPubKey)
+    {
+        return Write(make_pair(string("pool"), nIndex), vchPubKey);
+    }
+
+    bool ErasePool(int64 nIndex)
+    {
+        return Erase(make_pair(string("pool"), nIndex));
+    }
+
     template<typename T>
     bool ReadSetting(const string& strKey, T& value)
     {

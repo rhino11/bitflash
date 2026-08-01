@@ -124,6 +124,32 @@ FILE* OpenBlockFile(unsigned int nFile, unsigned int nBlockPos, const char* pszM
 FILE* AppendBlockFile(unsigned int& nFileRet);
 bool AddKey(const CKey& key);
 vector<unsigned char> GenerateNewKey();
+
+// --- Key pool -------------------------------------------------------------
+//
+// A backup of this wallet only ever contained the keys that existed the moment
+// it was taken. Mine a block or take a new address afterwards and the coin
+// lands on a key the backup has never heard of -- it is on the chain, and the
+// file you carefully put away cannot spend it. The LEIA-ME shipped with a
+// warning about this, which is an admission, not a fix.
+//
+// Keys are now generated a hundred at a time and handed out one by one, so a
+// backup covers the next hundred addresses this node will use. It is the same
+// answer Bitcoin arrived at, and it is not deterministic derivation (#47) --
+// it just buys back the distance between a backup and the next mistake.
+static const int KEYPOOL_SIZE = 100;
+extern CCriticalSection cs_keyPool;
+extern map<int64, vector<unsigned char> > mapKeyPool;
+
+// Fill the pool back up to KEYPOOL_SIZE. Every key it creates is written to
+// wallet.dat before it is offered to anybody.
+void TopUpKeyPool();
+
+// Hand out the oldest unused key. Falls back to generating one on the spot if
+// the pool cannot be filled, which is exactly what this code did before the
+// pool existed -- a wallet that cannot pre-generate should still be able to
+// mine.
+vector<unsigned char> GetKeyFromPool();
 bool AddToWallet(const CWalletTx& wtxIn);
 void ReacceptWalletTransactions();
 // Returns how many wallet transactions the chain corrected.

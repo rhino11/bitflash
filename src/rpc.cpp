@@ -146,7 +146,9 @@ static bool RebuildJob()
         CBlockIndex* pindexPrev = pindexBest;
         unsigned int nBits = GetNextWorkRequired(pindexPrev);
 
-        CKey key; key.MakeNewKey();
+        // From the pool, so the template's payout key is in wallet.dat before
+        // any miner is handed work against it.
+        vector<unsigned char> vchPubKey = GetKeyFromPool();
         static std::atomic<uint32_t> sExtra{0};
         uint32_t extraNonce = ++sExtra;
 
@@ -160,7 +162,7 @@ static bool RebuildJob()
         // is mined and submitted like any other. #58.
         txNew.vin[0].scriptSig << (pindexPrev ? pindexPrev->nHeight + 1 : 0) << nBits << (CBigNum)extraNonce;
         txNew.vout.resize(1);
-        txNew.vout[0].scriptPubKey << key.GetPubKey() << OP_CHECKSIG;
+        txNew.vout[0].scriptPubKey << vchPubKey << OP_CHECKSIG;
 
         CBlock block;
         block.vtx.push_back(txNew);
@@ -194,7 +196,8 @@ static bool RebuildJob()
                           (unsigned int)GetAdjustedTime());
         block.nBits  = nBits;
         block.nNonce = 1;
-        AddKey(key);
+        // No AddKey here: the pool wrote this key to wallet.dat before it was
+        // handed out.
 
         StratumJob job;
         job.jobId       = ToHex(&extraNonce, 4);
