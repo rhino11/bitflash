@@ -834,6 +834,15 @@ bool BackupWallet(const string& strDest)
         { return error("BackupWallet() : %s\n", e.what()); }
     }
 
+    // Recorded here rather than by whoever called, so that a backup taken with
+    // /backupwallet counts as much as one taken from the GUI. When the GUI
+    // wrote this itself, anyone following the README -- which documents the
+    // command line first -- was told forever that they had never backed up.
+    // Outside the cs_db block above: this opens the wallet for writing, and
+    // there is no reason to do that while holding the database lock.
+    try { CWalletDB().WriteSetting("nLastWalletBackup", (int64)GetTime()); }
+    catch (...) { }   // the backup is written; failing to note it is not fatal
+
     printf("BackupWallet() : wrote %s\n", strDest.c_str());
     return true;
 }

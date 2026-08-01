@@ -125,9 +125,47 @@ static std::string BackupTimeSuffix()
     return strprintf("%lld", (long long)GetTime());
 }
 
+// Where to put a backup by default.
+//
+// Not the data directory. A copy that lives in the folder it is meant to
+// outlive is not a backup: same disk, same directory the README tells people to
+// copy wholesale, and the same directory they are eventually going to delete --
+// which is the moment the backup was for. The home directory is not off-site
+// either, but it survives the one accident this file exists to survive.
+static std::string DefaultBackupDir()
+{
+#ifdef _WIN32
+    const char* pszHome = getenv("USERPROFILE");
+#else
+    const char* pszHome = getenv("HOME");
+#endif
+    if (pszHome && *pszHome)
+        return std::string(pszHome);
+    return GetAppDir();   // nothing better available; the warning below still fires
+}
+
+// True when a path sits inside the data directory, so the dialog can say so.
+static bool PathIsInsideDataDir(const std::string& strPath)
+{
+    std::string strDir = GetAppDir();
+    if (strPath.size() < strDir.size())
+        return false;
+    std::string a = strPath.substr(0, strDir.size());
+    // Windows paths are case-insensitive and mix separators; compare loosely.
+    for (size_t i = 0; i < a.size(); i++)
+    {
+        char c1 = a[i], c2 = strDir[i];
+        if (c1 == '\\') c1 = '/';
+        if (c2 == '\\') c2 = '/';
+        if (tolower((unsigned char)c1) != tolower((unsigned char)c2))
+            return false;
+    }
+    return true;
+}
+
 static void SetDefaultBackupPath()
 {
-    std::string path = GetAppDir() + "/wallet-backup-" + BackupTimeSuffix() + ".dat";
+    std::string path = DefaultBackupDir() + "/wallet-backup-" + BackupTimeSuffix() + ".dat";
     strncpy(g_backupPath, path.c_str(), sizeof(g_backupPath)-1);
     g_backupPath[sizeof(g_backupPath)-1] = '\0';
 }
@@ -899,6 +937,16 @@ static void DrawWalletSafetyDialog()
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##backup-path", g_backupPath, sizeof(g_backupPath));
 
+        if (PathIsInsideDataDir(g_backupPath))
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+            ImGui::TextWrapped(
+                "This path is inside the data directory. A backup kept there is lost "
+                "with the thing it was protecting -- put it on another disk, or at "
+                "least somewhere you would not delete along with the node's files.");
+            ImGui::PopStyleColor();
+        }
+
         if (ImGui::Button("Use new default name", ImVec2(170.0f, 0.0f)))
             SetDefaultBackupPath();
         ImGui::SameLine();
@@ -922,8 +970,9 @@ static void DrawWalletSafetyDialog()
                 TopUpKeyPool();
                 if (BackupWallet(path))
                 {
-                    g_lastWalletBackup = GetTime();
-                    CWalletDB().WriteSetting("nLastWalletBackup", g_lastWalletBackup);
+                    // BackupWallet records the time itself, so a backup taken
+                    // with /backupwallet counts the same as one taken here.
+                    CWalletDB("r").ReadSetting("nLastWalletBackup", g_lastWalletBackup);
                     g_backupStatus = "Backup written: " + path;
                     SetDefaultBackupPath();
                 }
