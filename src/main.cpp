@@ -217,6 +217,11 @@ vector<unsigned char> GetKeyFromPool()
             vector<unsigned char> vchPubKey = mi->second;
             mapKeyPool.erase(mi);
             CWalletDB().ErasePool(nIndex);
+            // Leave the wallet with a full backup window after each draw too,
+            // not only immediately before a draw. If topping up fails, the key
+            // already chosen is still safe to use -- its private half was
+            // written before it entered the pool.
+            TopUpKeyPool();
             return vchPubKey;
         }
     }

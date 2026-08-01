@@ -1,6 +1,7 @@
 // Bitflash entry point -- starts node threads then runs GUI (or headless).
 
 #include "headers_core.h"
+#include "selftest.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
 #include <csignal>
@@ -48,6 +49,7 @@ static void PrintUsage()
     printf("  /debug\n");
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
+    printf("  /selftest=wallet-keypool\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -218,6 +220,10 @@ int main(int argc, char* argv[])
     }
 
     ParseStartupArguments(argc, argv);
+
+    string strSelfTest = argval2(argc, argv, "/selftest", "-selftest");
+    if (!strSelfTest.empty())
+        return RunSelfTest(strSelfTest);
 
     // Berkeley DB reports failure by throwing, and CDB's constructor lets it
     // through. Nothing on this path caught anything, so an unreadable

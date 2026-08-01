@@ -41,14 +41,16 @@ LIBS = -L$(SECP_LIB) -lsecp256k1 \
 
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
-          randomx_pow.h btfaddr.h btfchan.h btfrv.h btftunnel.h market.h compat.h
+          randomx_pow.h btfaddr.h btfchan.h btfrv.h btftunnel.h market.h \
+          selftest.h compat.h
 
 IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
              obj/imgui_widgets.o obj/imgui_impl_glfw.o obj/imgui_impl_opengl3.o
 
 NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
-            obj/btfaddr.o obj/btfchan.o obj/btfrv.o obj/btftunnel.o obj/rpc.o
+            obj/btfaddr.o obj/btfchan.o obj/btfrv.o obj/btftunnel.o obj/rpc.o \
+            obj/selftest.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o
 
@@ -126,5 +128,6 @@ clean:
 test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 	$(CXX) $(CXXFLAGS) -o $@ test_bip32.cpp bip32.cpp -lssl -lcrypto
 
-tests: test_bip32
+tests: test_bip32 bitflash-node
 	./test_bip32
+	./bitflash-node /selftest=wallet-keypool
