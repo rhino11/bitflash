@@ -88,15 +88,20 @@ It loads the wallet, writes the copy, and exits without starting the node. If
 you would rather copy by hand, shut the node down first and take the **whole**
 data directory, not just `wallet.dat`.
 
-**Every backup is a snapshot, so repeat it.** Keys are generated when they are
-needed rather than derived from a seed, so a backup contains only the keys that
-existed the moment it was taken. Mine a block or receive to a new address
-afterwards, and those coins sit on-chain at an address whose private key is in
-no backup you hold. Back up again whenever you use a new address.
+**Every backup is still a snapshot, but it now has a safety margin.** The wallet
+keeps a pool of 100 pre-generated keys. A backup contains those keys, so it
+covers the next 100 mining rewards or receive addresses the node hands out after
+the backup. That makes a normal backup much safer than the original 0.1.0
+wallet, where the very next block could land on a key the backup did not have.
 
-The second point is the pre-BIP32 problem that deterministic wallets were
-invented to solve; see [#47](https://github.com/Bitflash-sh/bitflash/issues/47).
-Until that lands, repetition is the only defence.
+It is not a seed phrase. Heavy use can drain the key pool, and deterministic
+wallet restore is still tracked in [#47](https://github.com/Bitflash-sh/bitflash/issues/47).
+Back up again after mining for a while, after creating many receive addresses,
+and before moving the wallet to another machine.
+
+The GUI has a **Backup Wallet** button and a **Wallet Safety** view. Use that if
+you do not want to run the command by hand; it fills the key pool before writing
+the backup.
 
 ### When wallet.dat itself will not open
 

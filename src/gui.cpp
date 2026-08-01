@@ -51,11 +51,16 @@ static bool        g_showSend          = false;
 static bool        g_showOptions       = false;
 static bool        g_showAbout         = false;
 static bool        g_showDiagnostics   = false;
+static bool        g_showWalletSafety  = false;
 static bool        g_needRefresh       = true;
 
 static char        g_sendAddr[128]        = {};
 static char        g_sendAmount[32]       = {};
 static std::string g_sendStatus;
+static char        g_backupPath[512]      = {};
+static std::string g_backupStatus;
+static int64       g_lastWalletBackup     = 0;
+static bool        g_walletSafetyLoaded   = false;
 static char        g_participantPool[256] = {};
 static char        g_poolName[128]        = {};
 static char        g_poolFee[32]          = {};
@@ -115,8 +120,38 @@ static std::string PoolLabel(const BtfPoolAnnouncement& ann)
     return o.str();
 }
 
+static std::string BackupTimeSuffix()
+{
+    return strprintf("%lld", (long long)GetTime());
+}
+
+static void SetDefaultBackupPath()
+{
+    std::string path = GetAppDir() + "/wallet-backup-" + BackupTimeSuffix() + ".dat";
+    strncpy(g_backupPath, path.c_str(), sizeof(g_backupPath)-1);
+    g_backupPath[sizeof(g_backupPath)-1] = '\0';
+}
+
+static void LoadWalletSafetyState()
+{
+    if (g_walletSafetyLoaded)
+        return;
+    CWalletDB("r").ReadSetting("nLastWalletBackup", g_lastWalletBackup);
+    SetDefaultBackupPath();
+    g_walletSafetyLoaded = true;
+}
+
+static int KeyPoolCount()
+{
+    int n = 0;
+    CRITICAL_BLOCK(cs_keyPool)
+        n = (int)mapKeyPool.size();
+    return n;
+}
+
 static void RefreshWallet()
 {
+    LoadWalletSafetyState();
     std::vector<unsigned char> vchPubKey;
     if (CWalletDB("r").ReadDefaultKey(vchPubKey))
         g_myAddress = PubKeyToAddress(vchPubKey);
@@ -307,10 +342,12 @@ static void DrawMainWindow()
     // ---- Menu bar ----
     if (ImGui::BeginMenuBar()) {
         if (ImGui::BeginMenu("File")) {
+            if (ImGui::MenuItem("Backup Wallet")) g_showWalletSafety = true;
             if (ImGui::MenuItem("Exit")) glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Options")) g_showOptions = true;
+        if (ImGui::MenuItem("Wallet Safety")) g_showWalletSafety = true;
         if (ImGui::MenuItem("Diagnostics")) g_showDiagnostics = true;
         if (ImGui::MenuItem("About"))   g_showAbout   = true;
         ImGui::EndMenuBar();
@@ -339,6 +376,9 @@ static void DrawMainWindow()
     ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.20f, 0.55f, 0.20f, 1.0f));
     if (ImGui::Button("  Send Coins  ")) g_showSend = true;
     ImGui::PopStyleColor(2);
+
+    ImGui::SameLine(0.0f, 8.0f);
+    if (ImGui::Button("  Backup Wallet  ")) g_showWalletSafety = true;
 
     ImGui::SameLine(0.0f, 20.0f);
     if (fGenerateBitcoins) {
@@ -701,7 +741,7 @@ static void DrawOptionsDialog()
     }
     wasOpen = true;
 
-    ImGui::SetNextWindowSize(ImVec2(500.0f, 335.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(540.0f, 385.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("Options", &g_showOptions,
@@ -721,6 +761,14 @@ static void DrawOptionsDialog()
         ImGui::RadioButton("Solo -- rewards go to your wallet",        &g_mineRadio, MINE_SOLO);
         ImGui::RadioButton("Operator -- run a pool for other miners",  &g_mineRadio, MINE_OPERATOR);
         ImGui::RadioButton("Participant -- mine to someone's pool",    &g_mineRadio, MINE_PARTICIPANT);
+
+        if (g_mineRadio != MINE_RELAY && g_lastWalletBackup == 0) {
+            ImGui::Spacing();
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+            ImGui::TextWrapped("Back up this wallet before mining. The key pool covers the next %d generated addresses, but only after you save a backup that contains those keys.", KEYPOOL_SIZE);
+            ImGui::PopStyleColor();
+            if (ImGui::SmallButton("Backup now")) g_showWalletSafety = true;
+        }
 
         if (g_mineRadio == MINE_OPERATOR) {
             ImGui::Spacing();
@@ -818,6 +866,100 @@ static void DrawOptionsDialog()
         if (ImGui::Button("Cancel", ImVec2(90.0f, 0.0f))) g_showOptions = false;
     }
     if (!g_showOptions) wasOpen = false;
+    ImGui::End();
+}
+
+// ---------------------------------------------------------------------------
+// Wallet safety dialog
+// ---------------------------------------------------------------------------
+static void DrawWalletSafetyDialog()
+{
+    if (!g_showWalletSafety) return;
+    LoadWalletSafetyState();
+
+    ImGui::SetNextWindowSize(ImVec2(650.0f, 390.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("Wallet Safety", &g_showWalletSafety,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
+    {
+        ImGui::SeparatorText("Backup");
+        if (g_lastWalletBackup > 0)
+            ImGui::Text("Last GUI backup: %s", DateTimeStr(g_lastWalletBackup).c_str());
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                               "Last GUI backup: never");
+
+        ImGui::TextDisabled("Data directory:");
+        ImGui::SameLine();
+        ImGui::TextWrapped("%s", GetAppDir().c_str());
+
+        ImGui::Spacing();
+        ImGui::Text("Backup file:");
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputText("##backup-path", g_backupPath, sizeof(g_backupPath));
+
+        if (ImGui::Button("Use new default name", ImVec2(170.0f, 0.0f)))
+            SetDefaultBackupPath();
+        ImGui::SameLine();
+        if (ImGui::Button("Copy data dir", ImVec2(120.0f, 0.0f)))
+            ImGui::SetClipboardText(GetAppDir().c_str());
+
+        ImGui::Spacing();
+        if (ImGui::Button("Write Backup", ImVec2(150.0f, 0.0f)))
+        {
+            std::string path = g_backupPath;
+            if (path.empty())
+            {
+                g_backupStatus = "Choose a backup file first.";
+            }
+            else if (FileExists(path.c_str()))
+            {
+                g_backupStatus = "Refusing to overwrite an existing file. Use a new name.";
+            }
+            else
+            {
+                TopUpKeyPool();
+                if (BackupWallet(path))
+                {
+                    g_lastWalletBackup = GetTime();
+                    CWalletDB().WriteSetting("nLastWalletBackup", g_lastWalletBackup);
+                    g_backupStatus = "Backup written: " + path;
+                    SetDefaultBackupPath();
+                }
+                else
+                {
+                    g_backupStatus = "Backup failed. See debug.log for the detailed error.";
+                }
+            }
+        }
+
+        if (!g_backupStatus.empty())
+        {
+            ImVec4 col = g_backupStatus.find("Backup written") == 0
+                ? ImVec4(0.35f, 1.0f, 0.45f, 1.0f)
+                : ImVec4(1.0f, 0.45f, 0.35f, 1.0f);
+            ImGui::PushStyleColor(ImGuiCol_Text, col);
+            ImGui::TextWrapped("%s", g_backupStatus.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Key Pool");
+        int nPool = KeyPoolCount();
+        ImGui::Text("Pre-generated keys ready: %d / %d", nPool, KEYPOOL_SIZE);
+        ImGui::ProgressBar(KEYPOOL_SIZE > 0 ? (float)nPool / (float)KEYPOOL_SIZE : 0.0f,
+                           ImVec2(-1.0f, 0.0f));
+        ImGui::TextWrapped(
+            "A backup contains the keys that already exist. The key pool keeps "
+            "future mining rewards and receive addresses inside the next backup "
+            "window, but it is not a seed phrase. Back up again after heavy use.");
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        if (ImGui::Button("Close", ImVec2(90.0f, 0.0f)))
+            g_showWalletSafety = false;
+    }
     ImGui::End();
 }
 
@@ -965,6 +1107,7 @@ int RunGUI(int argc, char* argv[])
         DrawMainWindow();
         DrawSendDialog();
         DrawOptionsDialog();
+        DrawWalletSafetyDialog();
         DrawDiagnosticsDialog();
         DrawAboutDialog();
         DrawStatusBar();
