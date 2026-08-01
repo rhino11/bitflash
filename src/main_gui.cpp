@@ -76,6 +76,8 @@ static void PrintUsage()
     printf("  /dumpwallet=FILE           (export private keys as text -- readable by\n");
     printf("                              anyone, so guard it like cash)\n");
     printf("  /importwallet=FILE         (load keys from such a file back in)\n");
+    printf("  /rescan                    (walk the chain for coins this wallet owns\n");
+    printf("                              but never recorded, then exit)\n");
     printf("\n");
     printf("Each option also accepts '-' instead of '/'.\n");
 }
@@ -307,11 +309,35 @@ int main(int argc, char* argv[])
         int nAdded = 0, nSkipped = 0;
         bool fOk = ImportWallet(strImport, nAdded, nSkipped);
         if (fOk)
+        {
             printf("Imported %d key(s); %d were already here.\n", nAdded, nSkipped);
+            // Importing a key without looking for its coins leaves the user
+            // holding a wallet that says zero about money that is on the
+            // chain. That was the old behaviour and it looks exactly like the
+            // import having failed.
+            if (nAdded > 0)
+            {
+                printf("Looking through the chain for coins belonging to the imported key(s)...\n");
+                int nFound = ScanForWalletTransactions(pindexGenesisBlock);
+                printf("Found %d transaction(s). Start the node normally to see the balance.\n", nFound);
+            }
+        }
         else
             fprintf(stderr, "Import failed.\n");
         DBFlush(true);
         return fOk ? 0 : 1;
+    }
+
+    // /rescan -- walk the chain and pick up anything the wallet's keys own but
+    // the wallet never recorded. Cheap to offer and the only recourse when a
+    // balance is wrong for this reason.
+    if (arg(argc,argv,"/rescan") || arg(argc,argv,"-rescan"))
+    {
+        printf("Rescanning the chain for this wallet's transactions...\n");
+        int nFound = ScanForWalletTransactions(pindexGenesisBlock);
+        printf("Rescan done: %d transaction(s) added or updated.\n", nFound);
+        DBFlush(true);
+        return 0;
     }
 
     ReacceptWalletTransactions();

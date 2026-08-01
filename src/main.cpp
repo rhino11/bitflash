@@ -305,6 +305,55 @@ bool AddToWalletIfMine(const CTransaction& tx, const CBlock* pblock)
     return true;
 }
 
+int ScanForWalletTransactions(CBlockIndex* pindexStart)
+{
+    // Walk the chain looking for transactions that belong to keys this wallet
+    // holds now, whatever it held when those blocks arrived.
+    //
+    // Nothing in this tree could do that. A key added after the fact -- from
+    // /importwallet, or from a backup restored onto a node that had since
+    // moved on -- was simply invisible: the coins were on the chain, the
+    // private key was in wallet.dat, and the balance did not show them,
+    // because a transaction only ever entered the wallet at the moment its
+    // block arrived over the network.
+    //
+    // Bitcoin grew the same function for the same reason. It is also what any
+    // recovery-phrase feature has to stand on: deriving the keys is the easy
+    // half, and without this the other half does not exist.
+    int nFound = 0;
+    int nScanned = 0;
+    CBlockIndex* pindex = pindexStart;
+    CRITICAL_BLOCK(cs_main)
+    {
+        while (pindex)
+        {
+            CBlock block;
+            if (block.ReadFromDisk(pindex, true))
+            {
+                foreach(CTransaction& tx, block.vtx)
+                {
+                    // Ask before handing it over: AddToWalletIfMine returns
+                    // true for a transaction that is none of our business, so
+                    // its return value cannot be counted.
+                    if (tx.IsMine())
+                    {
+                        if (AddToWalletIfMine(tx, &block))
+                            nFound++;
+                    }
+                }
+            }
+            nScanned++;
+            if ((nScanned % 500) == 0)
+                printf("ScanForWalletTransactions() : %d blocks scanned, %d transaction(s) found\n",
+                       nScanned, nFound);
+            pindex = pindex->pnext;
+        }
+    }
+    printf("ScanForWalletTransactions() : %d block(s) scanned, %d transaction(s) added or updated\n",
+           nScanned, nFound);
+    return nFound;
+}
+
 bool EraseFromWallet(uint256 hash)
 {
     CRITICAL_BLOCK(cs_mapWallet)

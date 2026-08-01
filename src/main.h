@@ -152,6 +152,11 @@ void TopUpKeyPool();
 vector<unsigned char> GetKeyFromPool();
 bool AddToWallet(const CWalletTx& wtxIn);
 void ReacceptWalletTransactions();
+// Walk the chain from pindexStart forward, adding every transaction that pays
+// a key this wallet holds. Returns how many were added or updated. Needed by
+// anything that puts a key into the wallet after the fact -- an import, a
+// restored backup, and later a recovery phrase.
+int  ScanForWalletTransactions(CBlockIndex* pindexStart);
 // Returns how many wallet transactions the chain corrected.
 int  RescanSpentFlags();
 void RelayWalletTransactions();
