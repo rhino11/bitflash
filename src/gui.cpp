@@ -12,6 +12,11 @@
 #include <cstdio>
 #include <sstream>
 #include <iomanip>
+#include <atomic>
+#include <mutex>
+#include <thread>
+#include "bip32.h"
+#include "walletcmd.h"
 #include "font_roboto.h"
 
 // ---------------------------------------------------------------------------
@@ -910,6 +915,220 @@ static void DrawOptionsDialog()
 // ---------------------------------------------------------------------------
 // Wallet safety dialog
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Recovery phrase
+//
+// The phrase is shown once, and the seed is installed only after the user says
+// they have written it down. Generating it and storing it in the same breath
+// would hand somebody a wallet whose only backup is twelve words they may have
+// closed the window on -- which is worse than no phrase at all, because they
+// would believe they had one.
+//
+// Nothing here writes the words to disk or to debug.log. They live in one
+// std::string that is cleared the moment the dialog closes.
+// ---------------------------------------------------------------------------
+static bool        g_showCreatePhrase   = false;
+static bool        g_showRestorePhrase  = false;
+static std::string g_pendingMnemonic;
+static bool        g_phraseWrittenDown  = false;
+static std::string g_phraseStatus;
+
+static char        g_restoreInput[600]  = {};
+static std::string g_restoreStatus;
+static std::atomic<bool> g_restoreRunning(false);
+static std::atomic<int>  g_restoreDerived(0);
+static std::atomic<int>  g_restoreRecovered(0);
+static std::string g_restoreResult;
+static std::mutex  g_restoreResultMutex;
+
+static void RestoreProgress(void*, int nDerived, int nRecovered)
+{
+    g_restoreDerived.store(nDerived);
+    g_restoreRecovered.store(nRecovered);
+}
+
+static void RestoreThread(std::string strPhrase)
+{
+    std::string strError;
+    int nRecovered = 0, nDerived = 0;
+    bool fOk = RestoreFromPhrase(strPhrase, 0, RestoreProgress, NULL,
+                                 strError, nRecovered, nDerived);
+    {
+        std::lock_guard<std::mutex> lock(g_restoreResultMutex);
+        if (!fOk)
+            g_restoreResult = "Nothing was changed. " + strError;
+        else if (nRecovered > 0)
+            g_restoreResult = strprintf(
+                "Restored %d transaction(s) across %d derived addresses. "
+                "Restart the node to see the balance.", nRecovered, nDerived);
+        else
+            g_restoreResult = strprintf(
+                "No transactions found for the first %d addresses of that phrase. "
+                "Check the words and their order.", nDerived);
+    }
+    g_restoreRunning.store(false);
+    g_needRefresh = true;
+}
+
+static void DrawCreatePhraseDialog()
+{
+    if (!g_showCreatePhrase) return;
+
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 340.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("Recovery Phrase", &g_showCreatePhrase,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
+    {
+        ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                           "Write these twelve words down, in order, on paper.");
+        ImGui::TextWrapped(
+            "They are the only thing that can rebuild this wallet if the file is lost. "
+            "Anyone who reads them can spend your coins. They are not stored anywhere, "
+            "and this is the only time they will be shown.");
+        ImGui::Spacing();
+
+        ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.10f, 0.10f, 0.10f, 1.0f));
+        ImGui::BeginChild("##phrase", ImVec2(0.0f, 70.0f), true);
+        ImGui::PushTextWrapPos(0.0f);
+        ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.6f, 1.0f), "%s", g_pendingMnemonic.c_str());
+        ImGui::PopTextWrapPos();
+        ImGui::EndChild();
+        ImGui::PopStyleColor();
+
+        ImGui::Spacing();
+        ImGui::TextWrapped(
+            "Keys already in this wallet are NOT covered by the phrase -- they existed "
+            "before it did. Keep your file backups as well.");
+        ImGui::Spacing();
+
+        ImGui::Checkbox("I have written these words down", &g_phraseWrittenDown);
+        ImGui::Spacing();
+
+        if (!g_phraseWrittenDown)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Finish", ImVec2(120.0f, 0.0f)))
+        {
+            std::string strError;
+            if (SetHDSeedFromMnemonic(g_pendingMnemonic, strError))
+            {
+                TopUpKeyPool();
+                g_phraseStatus = "Recovery phrase created. New addresses come from it.";
+            }
+            else
+            {
+                g_phraseStatus = "Could not install the seed: " + strError;
+            }
+            g_pendingMnemonic.clear();
+            g_phraseWrittenDown = false;
+            g_showCreatePhrase = false;
+            g_needRefresh = true;
+        }
+        if (!g_phraseWrittenDown)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)))
+        {
+            // Nothing was installed, so there is nothing to undo. The words go
+            // away with the string.
+            g_pendingMnemonic.clear();
+            g_phraseWrittenDown = false;
+            g_showCreatePhrase = false;
+            g_phraseStatus = "Cancelled. No recovery phrase was created.";
+        }
+    }
+    ImGui::End();
+
+    // Closing with the window X is the same as cancelling.
+    if (!g_showCreatePhrase && !g_pendingMnemonic.empty())
+    {
+        g_pendingMnemonic.clear();
+        g_phraseWrittenDown = false;
+        g_phraseStatus = "Cancelled. No recovery phrase was created.";
+    }
+}
+
+static void DrawRestorePhraseDialog()
+{
+    if (!g_showRestorePhrase) return;
+
+    ImGui::SetNextWindowSize(ImVec2(640.0f, 330.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("Restore From Phrase", &g_showRestorePhrase,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
+    {
+        ImGui::TextWrapped(
+            "Type the twelve words, in order, separated by spaces. The node will "
+            "derive the addresses they describe and search the chain for their coins.");
+        ImGui::Spacing();
+
+        if (HaveHDSeed())
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+            ImGui::TextWrapped(
+                "This wallet already has a recovery phrase. Restoring replaces it: "
+                "coins on addresses from the current phrase would no longer come back "
+                "from the words you wrote down for it. Back up wallet.dat first.");
+            ImGui::PopStyleColor();
+            ImGui::Spacing();
+        }
+
+        ImGui::SetNextItemWidth(-1.0f);
+        ImGui::InputTextMultiline("##phrase-in", g_restoreInput, sizeof(g_restoreInput),
+                                  ImVec2(0.0f, 60.0f));
+
+        ImGui::Spacing();
+        bool fBusy = g_restoreRunning.load();
+        if (fBusy)
+            ImGui::BeginDisabled();
+        if (ImGui::Button("Restore", ImVec2(140.0f, 0.0f)))
+        {
+            std::string strWhy;
+            if (!CanScanWalletTransactions(strWhy))
+            {
+                std::lock_guard<std::mutex> lock(g_restoreResultMutex);
+                g_restoreResult = strWhy;
+            }
+            else
+            {
+                {
+                    std::lock_guard<std::mutex> lock(g_restoreResultMutex);
+                    g_restoreResult.clear();
+                }
+                g_restoreDerived.store(0);
+                g_restoreRecovered.store(0);
+                g_restoreRunning.store(true);
+                // On its own thread: a restore walks the whole chain once per
+                // batch and would otherwise freeze the window for as long as it
+                // takes.
+                std::thread(RestoreThread, std::string(g_restoreInput)).detach();
+            }
+        }
+        if (fBusy)
+            ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        if (ImGui::Button("Close", ImVec2(100.0f, 0.0f)) && !fBusy)
+            g_showRestorePhrase = false;
+
+        ImGui::Spacing();
+        if (fBusy)
+        {
+            ImGui::Text("Searching: %d addresses checked, %d transaction(s) so far",
+                        g_restoreDerived.load(), g_restoreRecovered.load());
+        }
+        else
+        {
+            std::lock_guard<std::mutex> lock(g_restoreResultMutex);
+            if (!g_restoreResult.empty())
+                ImGui::TextWrapped("%s", g_restoreResult.c_str());
+        }
+    }
+    ImGui::End();
+}
+
 static void DrawWalletSafetyDialog()
 {
     if (!g_showWalletSafety) return;
@@ -992,6 +1211,43 @@ static void DrawWalletSafetyDialog()
             ImGui::TextWrapped("%s", g_backupStatus.c_str());
             ImGui::PopStyleColor();
         }
+
+        ImGui::Spacing();
+        ImGui::SeparatorText("Recovery Phrase");
+        if (HaveHDSeed())
+            ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.6f, 1.0f),
+                               "This wallet has a recovery phrase.");
+        else
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
+                               "No recovery phrase. Only a file backup can rebuild this wallet.");
+
+        if (!HaveHDSeed())
+        {
+            if (ImGui::Button("Create recovery phrase", ImVec2(200.0f, 0.0f)))
+            {
+                std::string strError;
+                if (bitflash::BIP39GenerateMnemonic(g_pendingMnemonic, strError))
+                {
+                    g_phraseWrittenDown = false;
+                    g_phraseStatus.clear();
+                    g_showCreatePhrase = true;
+                }
+                else
+                {
+                    g_phraseStatus = "Could not generate a phrase: " + strError;
+                }
+            }
+            ImGui::SameLine();
+        }
+        if (ImGui::Button("Restore from phrase", ImVec2(190.0f, 0.0f)))
+            g_showRestorePhrase = true;
+
+        if (!g_phraseStatus.empty())
+            ImGui::TextWrapped("%s", g_phraseStatus.c_str());
+
+        ImGui::TextWrapped(
+            "A phrase covers addresses created after it. Keys that already existed "
+            "are not derived from it, so keep the file backups above as well.");
 
         ImGui::Spacing();
         ImGui::SeparatorText("Key Pool");
@@ -1157,6 +1413,8 @@ int RunGUI(int argc, char* argv[])
         DrawSendDialog();
         DrawOptionsDialog();
         DrawWalletSafetyDialog();
+        DrawCreatePhraseDialog();
+        DrawRestorePhraseDialog();
         DrawDiagnosticsDialog();
         DrawAboutDialog();
         DrawStatusBar();

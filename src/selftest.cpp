@@ -286,33 +286,9 @@ static int RunWalletKeyPoolSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
-// A -mwindows binary starts with no console attached, so stdout goes nowhere
-// even when it was launched from a terminal. Borrow the caller's console for
-// the duration of the self-test. Nothing to do on Linux, where stdout is
-// already connected.
-static void AttachTerminal()
-{
-#ifdef _WIN32
-    // Only when there is nowhere for stdout to go. If the caller redirected it
-    // to a file or a pipe -- which is what `make tests > log` and any CI does --
-    // that handle is inherited and already works, and reopening it on CONOUT$
-    // would take the output away from the file and put it on the screen. That
-    // was the first version of this fix, and it broke the one case that
-    // mattered.
-    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
-    if (hOut != NULL && hOut != INVALID_HANDLE_VALUE)
-        return;
-
-    if (AttachConsole(ATTACH_PARENT_PROCESS))
-    {
-        // Return values ignored on purpose: if the reopen fails there is
-        // nowhere left to report it, and the exit status still carries the
-        // result.
-        freopen("CONOUT$", "w", stdout);
-        freopen("CONOUT$", "w", stderr);
-    }
-#endif
-}
+// AttachTerminal() moved to util.h: the wallet phrase commands need it too,
+// and two copies of a console-attach that must get its one condition right is
+// one copy too many.
 
 static int RunWalletHDSelfTest()
 {

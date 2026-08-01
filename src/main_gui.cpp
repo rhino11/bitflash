@@ -2,6 +2,7 @@
 
 #include "headers_core.h"
 #include "selftest.h"
+#include "walletcmd.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
 #include <csignal>
@@ -78,6 +79,11 @@ static void PrintUsage()
     printf("  /dumpwallet=FILE           (export private keys as text -- readable by\n");
     printf("                              anyone, so guard it like cash)\n");
     printf("  /importwallet=FILE         (load keys from such a file back in)\n");
+    printf("  /newaddress                (print the next receiving address, then exit)\n");
+    printf("  /newphrase                 (create a twelve-word recovery phrase for a\n");
+    printf("                              wallet that has none, show it once, exit)\n");
+    printf("  /restorephrase=\"WORDS\"     (rebuild this wallet from a phrase and scan\n");
+    printf("                              the chain for its coins, then exit)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -347,6 +353,38 @@ int main(int argc, char* argv[])
     // /rescan -- walk the chain and pick up anything the wallet's keys own but
     // the wallet never recorded. Cheap to offer and the only recourse when a
     // balance is wrong for this reason.
+    string strShow = argval2(argc, argv, "/showderived", "-showderived");
+    if (!strShow.empty())
+    {
+        int nRet = CmdShowDerived(atoi(strShow.c_str()));
+        DBFlush(true);
+        return nRet;
+    }
+
+    if (arg(argc,argv,"/newaddress") || arg(argc,argv,"-newaddress"))
+    {
+        int nRet = CmdNewAddress();
+        DBFlush(true);
+        return nRet;
+    }
+
+    if (arg(argc,argv,"/newphrase") || arg(argc,argv,"-newphrase"))
+    {
+        int nRet = CmdNewPhrase();
+        DBFlush(true);
+        return nRet;
+    }
+
+    string strRestore = argval2(argc, argv, "/restorephrase", "-restorephrase");
+    if (!strRestore.empty())
+    {
+        string strDepth = argval2(argc, argv, "/restoredepth", "-restoredepth");
+        int nMinDepth = strDepth.empty() ? 0 : atoi(strDepth.c_str());
+        int nRet = CmdRestorePhrase(strRestore, nMinDepth);
+        DBFlush(true);
+        return nRet;
+    }
+
     if (arg(argc,argv,"/rescan") || arg(argc,argv,"-rescan"))
     {
         string strScanError;

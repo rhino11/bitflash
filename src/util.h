@@ -293,6 +293,33 @@ void PrintHex(const T pbegin, const T pend, const char* pszFormat="%s", bool fSp
 // Forward declaration -- defined in main.cpp
 string GetAppDir();
 
+// Give a command-line operation somewhere to print.
+//
+// The Windows binary is linked -mwindows and starts with no console, so stdout
+// goes nowhere even when it was launched from a terminal. Commands that report
+// to the person who typed them -- the self-tests, the wallet phrase commands --
+// call this first.
+//
+// Only when there is nowhere for stdout to go already: if the caller redirected
+// it to a file or a pipe, that handle is inherited and works, and reopening it
+// on CONOUT$ would take the output away from the file and put it on the screen.
+inline void AttachTerminal()
+{
+#ifdef _WIN32
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != NULL && hOut != INVALID_HANDLE_VALUE)
+        return;
+    if (AttachConsole(ATTACH_PARENT_PROCESS))
+    {
+        // Return values ignored on purpose: if the reopen fails there is
+        // nowhere left to report it, and the exit status still carries the
+        // result.
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#endif
+}
+
 inline int OutputDebugStringF(const char* pszFormat, ...) BF_FORMAT(1, 2);
 
 inline int OutputDebugStringF(const char* pszFormat, ...)
