@@ -97,6 +97,7 @@ static void ParseStartupArguments(int argc, char* argv[])
         // their own mode below, so only the unqualified case is affected.
         if (nMineMode == MINE_RELAY)
             nMineMode = MINE_SOLO;
+        fMineModeFromCommandLine = true;
     }
 
     if (arg(argc,argv,"/solomine") || arg(argc,argv,"-solomine"))
@@ -127,12 +128,16 @@ static void ParseStartupArguments(int argc, char* argv[])
     }
 
     if (arg(argc,argv,"/operator") || arg(argc,argv,"-operator"))
+    {
         nMineMode = MINE_OPERATOR;
+        fMineModeFromCommandLine = true;
+    }
 
     if (arg(argc,argv,"/participant") || arg(argc,argv,"-participant"))
     {
         nMineMode = MINE_PARTICIPANT;
         strParticipantPool = argval2(argc, argv, "/participant", "-participant");
+        fMineModeFromCommandLine = true;
     }
 
     string poolName = argval2(argc, argv, "/poolname", "-poolname");

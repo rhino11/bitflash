@@ -64,9 +64,8 @@ extern CBlockIndex* pindexBest;
 extern unsigned int nTransactionsUpdated;
 extern string strSetDataDir;
 extern int nDropMessagesTest;
-// Mining mode -- persisted in wallet.dat
-// Mining mode -- decided fresh every launch (CLI flags, else default). Never
-// restored from wallet.dat; see LoadWallet() in db.cpp.
+// Mining mode -- remembered in wallet.dat, but the command line always wins.
+// See LoadWallet() in db.cpp for why the precedence has to be explicit.
 //   MINE_RELAY (0):       default. Node runs/syncs, never mines, no pool server.
 //   MINE_SOLO (1):        mine to own wallet, no pool server
 //   MINE_OPERATOR (2):    run pool server, mine to own wallet, distribute to miners
@@ -76,6 +75,10 @@ extern int nDropMessagesTest;
 #define MINE_OPERATOR    2
 #define MINE_PARTICIPANT 3
 extern int    nMineMode;
+// Set by the startup parser when a flag chose the mode. LoadWallet leaves the
+// stored mode alone when this is true, so a flag is never silently overruled by
+// something a previous session wrote.
+extern bool   fMineModeFromCommandLine;
 extern string strParticipantPool; // participant: pool .btf address
 extern string strPoolName;        // operator: announced pool name
 extern string strPoolDashboardUrl; // operator: optional dashboard URL

@@ -642,16 +642,29 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
                 ssKey >> strKey;
                 if (strKey == "nTransactionFee")    ssValue >> nTransactionFee;
                 if (strKey == "addrIncoming")       ssValue >> addrIncoming;
-                // Mining-mode/pool settings (nMineMode, strParticipantPool, strPoolName,
-                // strPoolDashboardUrl, dPoolFeePercent, fGenerateBitcoins) are intentionally
-                // NOT restored here. They used to be, and LoadWallet() runs after CLI flags
-                // are parsed in main_gui.cpp, so a saved value would silently overwrite
-                // whatever was just requested on the command line or in a previous Options
-                // session -- no error, no log line. That's what caused pool name/address to
-                // show correctly in the UI but stay stale in the logs, and mode to change
-                // behavior across restarts. Mode/pool config is decided fresh every launch
-                // instead: CLI flags if given, otherwise the compiled-in default. Nothing to
-                // go stale, nothing to fight over load order.
+
+                // Mining mode is restored, but only when no flag chose one.
+                //
+                // These settings used to be restored unconditionally. LoadWallet()
+                // runs after main_gui.cpp has parsed the command line, so a stored
+                // value silently overwrote what had just been asked for -- no error,
+                // no log line -- and the fix at the time was to stop restoring them
+                // at all. That traded a silent override for a different silent
+                // failure: a machine set to mine came back from every restart as a
+                // plain relay, looking exactly like one that had been asked to
+                // relay. A 32-core miner sat idle for hours that way, and the only
+                // evidence was memory usage that never climbed.
+                //
+                // Precedence is now explicit rather than accidental: a flag wins,
+                // and it says so in the log below. Only the two fields that decide
+                // whether this node mines are restored, plus the pool address a
+                // participant cannot work without.
+                if (!fMineModeFromCommandLine)
+                {
+                    if (strKey == "nMineMode")          ssValue >> nMineMode;
+                    if (strKey == "fGenerateBitcoins")  ssValue >> fGenerateBitcoins;
+                    if (strKey == "strParticipantPool") ssValue >> strParticipantPool;
+                }
             }
         }
     }
@@ -673,8 +686,10 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
 
     printf("nTransactionFee = %lld\n", nTransactionFee);
     printf("addrIncoming = %s\n", addrIncoming.ToString().c_str());
-    printf("nMineMode = %d, strParticipantPool = %s, fGenerateBitcoins = %d (from CLI/default, not wallet.dat)\n",
-           nMineMode, strParticipantPool.c_str(), fGenerateBitcoins);
+    printf("nMineMode = %d, strParticipantPool = %s, fGenerateBitcoins = %d (%s)\n",
+           nMineMode, strParticipantPool.c_str(), fGenerateBitcoins,
+           fMineModeFromCommandLine ? "from the command line, wallet.dat ignored"
+                                    : "remembered from wallet.dat, or the default");
     printf("strPoolName = %s, dPoolFeePercent = %.2f, strPoolDashboardUrl = %s (from CLI/default, not wallet.dat)\n",
            strPoolName.c_str(), dPoolFeePercent, strPoolDashboardUrl.c_str());
 

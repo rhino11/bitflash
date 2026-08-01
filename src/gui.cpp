@@ -795,6 +795,13 @@ static void DrawOptionsDialog()
                 if (!vfThreadRunning[3]) StartMinerThreads();
             }
 
+            // Remember the choice. Without this the node came back from every
+            // restart as a plain relay, and a machine that had been mining for
+            // days looked identical to one that had never been asked to.
+            CWalletDB().WriteSetting("nMineMode", nMineMode);
+            CWalletDB().WriteSetting("fGenerateBitcoins", fGenerateBitcoins);
+            CWalletDB().WriteSetting("strParticipantPool", strParticipantPool);
+
             if (nMineMode == MINE_OPERATOR) {
                 if (!gPoolServerRunning) {
                     gPoolServerRunning = true;

@@ -91,6 +91,7 @@ int nMinerThreads = 0;
 int64 nTransactionFee = 0;
 CAddress addrIncoming;
 int    nMineMode        = MINE_RELAY;
+bool   fMineModeFromCommandLine = false;
 string strParticipantPool;           // participant mode: pool .btf address
 string strPoolName       = "Bitflash Pool";
 string strPoolDashboardUrl;
