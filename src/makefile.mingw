@@ -102,4 +102,4 @@ test_bip32.exe: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 
 tests: test_bip32.exe bitflash.exe
 	./test_bip32.exe
-	./bitflash.exe /selftest=wallet-keypool
+	./bitflash.exe -selftest=wallet-keypool

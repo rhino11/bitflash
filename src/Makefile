@@ -130,4 +130,4 @@ test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 
 tests: test_bip32 bitflash-node
 	./test_bip32
-	./bitflash-node /selftest=wallet-keypool
+	./bitflash-node -selftest=wallet-keypool
