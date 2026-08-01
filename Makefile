@@ -2,6 +2,7 @@
 #
 #   make linux    build Bitflash-*-x86_64.AppImage
 #   make windows  build Bitflash-*-windows.zip (from MSYS2 UCRT64)
+#   make tests    build and run standalone unit tests
 #   make clean    remove build artifacts
 
 ROOT    := $(shell pwd)
@@ -156,5 +157,8 @@ clean:
 	rm -f Bitflash-*.AppImage Bitflash-*.zip
 	rm -rf Bitflash-*-windows
 
+tests:
+	$(MAKE) -C src -f Makefile tests
+
 .PHONY: linux windows clean appimage \
-        deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx
+        tests deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

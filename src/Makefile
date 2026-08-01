@@ -121,4 +121,10 @@ bitflash-node: $(NODE_ONLY_OBJS)
 	@echo "Built: bitflash-node (headless, no libGL needed)"
 
 clean:
-	rm -rf obj obj-node bitflash bitflash-node
+	rm -rf obj obj-node bitflash bitflash-node test_bip32
+
+test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
+	$(CXX) $(CXXFLAGS) -o $@ test_bip32.cpp bip32.cpp -lssl -lcrypto
+
+tests: test_bip32
+	./test_bip32

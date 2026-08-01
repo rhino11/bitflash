@@ -92,4 +92,11 @@ bitflash.exe: $(IMGUI_OBJS) $(NODE_OBJS) $(GUI_OBJS)
 	@echo "Built: bitflash.exe"
 
 clean:
-	rm -rf obj bitflash.exe
+	rm -rf obj bitflash.exe test_bip32.exe
+
+test_bip32.exe: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
+	$(CXX) $(CXXFLAGS) -o $@ test_bip32.cpp bip32.cpp -lssl -lcrypto -lcrypt32
+	@echo "Built: test_bip32.exe"
+
+tests: test_bip32.exe
+	./test_bip32.exe
