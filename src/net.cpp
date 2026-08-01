@@ -66,8 +66,12 @@ static string SockAccountingText()
 
     string str = "\n  sockets by where they were created\n";
     str += "  site                       opened   closed     live  close failed\n";
+    long long nTotalOpened = 0, nTotalClosed = 0, nTotalFailed = 0;
     for (int i = 0; i < SOCK_SITES; i++)
     {
+        nTotalOpened += nOpened[i];
+        nTotalClosed += nClosed[i];
+        nTotalFailed += nFailed[i];
         if (nOpened[i] == 0)
             continue;
         str += strprintf("  %-24s %8lld %8lld %8lld %13lld\n", pszSockSite[i],
@@ -75,6 +79,31 @@ static string SockAccountingText()
     }
     str += strprintf("  %-24s %8s %8lld %8s %13s\n", "closed but never tagged",
                      "-", nUntagged, "-", "-");
+    str += strprintf("  %-24s %8lld %8lld %8lld %13lld\n", "TOTAL",
+                     nTotalOpened, nTotalClosed, nTotalOpened - nTotalClosed, nTotalFailed);
+
+    // The live total above is what this program believes it is holding. Compare
+    // it against what the operating system attributes to the process: on
+    // Windows, `Get-NetTCPConnection | ? OwningProcess -eq <pid>`. A gap there
+    // is the leak, and the codes below say what the failed closes hit -- 10038
+    // (WSAENOTSOCK) means the handle was already gone and this close was a
+    // second one, which is a different bug from a descriptor that stayed.
+    if (nTotalFailed > 0)
+    {
+        str += "  close failures by code\n";
+        for (int i = 0; i < SOCK_SITES; i++)
+        {
+            if (nFailed[i] == 0)
+                continue;
+            map<int, long long> mapErr;
+            BtfSockCloseErrors(i, mapErr);
+            string strCodes;
+            for (map<int, long long>::const_iterator mi = mapErr.begin(); mi != mapErr.end(); ++mi)
+                strCodes += strprintf("%s%d x%lld", strCodes.empty() ? "" : ", ",
+                                      mi->first, mi->second);
+            str += strprintf("  %-24s %s\n", pszSockSite[i], strCodes.c_str());
+        }
+    }
     return str;
 }
 

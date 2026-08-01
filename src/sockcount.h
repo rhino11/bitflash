@@ -23,6 +23,7 @@
 #ifndef BITFLASH_SOCKCOUNT_H
 #define BITFLASH_SOCKCOUNT_H
 
+#include <cerrno>
 #include <map>
 #include <mutex>
 
@@ -52,6 +53,13 @@ struct BtfSockAccount
     long long nOpened[SOCK_SITES];
     long long nClosed[SOCK_SITES];
     long long nCloseFailed[SOCK_SITES];
+    // Why the close failed, counted per code per site. Measured on a node with
+    // 3h51m of uptime: the program believed it held 58 sockets and Windows
+    // attributed 112 to the process, 47 of them bound to an ephemeral port and
+    // never connected -- against 55 closes that had returned an error. The
+    // shapes match, and the error code is the piece that says whether the
+    // descriptor is still there or was already gone.
+    std::map<int, long long> mapCloseErr[SOCK_SITES];
     long long nClosedUntagged;
     BtfSockAccount() : nClosedUntagged(0)
     {
@@ -102,8 +110,10 @@ inline int BtfCloseSocket(SOCKET hSocket)
     }
 #ifdef _WIN32
     int nRet = ::closesocket(hSocket);
+    int nErr = (nRet != 0) ? WSAGetLastError() : 0;
 #else
     int nRet = ::close(hSocket);
+    int nErr = (nRet != 0) ? errno : 0;
 #endif
     // A close that fails leaves the descriptor -- and on Windows the ephemeral
     // port it holds -- in place. Counted because a socket the program believes
@@ -115,6 +125,7 @@ inline int BtfCloseSocket(SOCKET hSocket)
         BtfSockAccount& a = BtfSockAccounting();
         std::lock_guard<std::mutex> lock(a.mtx);
         a.nCloseFailed[nSite]++;
+        a.mapCloseErr[nSite][nErr]++;
     }
     return nRet;
 }
@@ -132,6 +143,18 @@ inline void BtfSockSnapshot(long long* pOpened, long long* pClosed, long long* p
         pFailed[i] = a.nCloseFailed[i];
     }
     *pUntagged = a.nClosedUntagged;
+}
+
+// The close-failure codes for one site, newest counts included. Separate call
+// because the table above is fixed-width and this is a list of unknown length.
+inline void BtfSockCloseErrors(int nSite, std::map<int, long long>& mapOut)
+{
+    mapOut.clear();
+    if (nSite < 0 || nSite >= SOCK_SITES)
+        return;
+    BtfSockAccount& a = BtfSockAccounting();
+    std::lock_guard<std::mutex> lock(a.mtx);
+    mapOut = a.mapCloseErr[nSite];
 }
 
 #endif
