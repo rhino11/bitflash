@@ -551,6 +551,9 @@ bool CReviewDB::WriteReviews(uint256 hash, const vector<CReview>& vReviews)
 
 bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
 {
+    // Whether wallet.dat actually carried a mining mode, as opposed to just the
+    // ancient fGenerateBitcoins flag. See the reconciliation further down.
+    bool fHaveStoredMineMode = false;
     vchDefaultKeyRet.clear();
 
     // Satoshi's "todo: shouldn't we catch exceptions" sat here since 2009, and
@@ -669,7 +672,7 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
                 // participant cannot work without.
                 if (!fMineModeFromCommandLine)
                 {
-                    if (strKey == "nMineMode")          ssValue >> nMineMode;
+                    if (strKey == "nMineMode")          { ssValue >> nMineMode; fHaveStoredMineMode = true; }
                     if (strKey == "fGenerateBitcoins")  ssValue >> fGenerateBitcoins;
                     if (strKey == "strParticipantPool") ssValue >> strParticipantPool;
                 }
@@ -690,6 +693,32 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         printf("LoadWallet: wallet.dat could not be read. Unknown failure while "
                "handling a '%s' record.\n", strLastType.c_str());
         return false;
+    }
+
+    // fGenerateBitcoins and nMineMode only mean anything together, and a
+    // wallet.dat can easily hold one without the other: Bitcoin 0.1.0 already
+    // wrote fGenerateBitcoins when mining was toggled, years before this fork
+    // had a mode at all. Restoring that lone flag put a node into the one state
+    // the miner cannot act on -- generate on, mode relay -- so every miner
+    // thread started and returned at the relay guard, and the machine sat there
+    // looking like it was mining while hashing nothing. That happened to a
+    // 32-core node on the first 1.2.11 start.
+    //
+    // So the flag is only believed when the mode it belongs to was stored with
+    // it, and the pair is made coherent either way.
+    if (!fMineModeFromCommandLine)
+    {
+        if (!fHaveStoredMineMode)
+        {
+            if (fGenerateBitcoins)
+                printf("LoadWallet: ignoring a stored fGenerateBitcoins with no mining mode "
+                       "beside it -- it predates this setting and cannot be read on its own\n");
+            fGenerateBitcoins = 0;
+        }
+        else
+        {
+            fGenerateBitcoins = (nMineMode != MINE_RELAY) ? 1 : 0;
+        }
     }
 
     printf("nTransactionFee = %lld\n", nTransactionFee);
