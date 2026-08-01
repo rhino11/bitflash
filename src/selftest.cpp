@@ -8,6 +8,23 @@
 #include "headers_core.h"
 #include "selftest.h"
 
+// Test results go to the terminal, not to debug.log.
+//
+// printf in this tree is OutputDebugStringF, which writes into the data
+// directory's debug.log and binds that path, once, on its first call. For a
+// self-test that produced two bad outcomes at the same time. On Windows the
+// binary is linked -mwindows and has no console, so `make tests` printed the
+// bip32 results, echoed the self-test command, and then showed nothing at all --
+// a failure was still caught, because a non-zero return stops make, but it
+// arrived with no way to tell which check failed. And because the first line
+// printed before strSetDataDir was pointed at the temporary directory, every
+// line landed in the developer's real debug.log: the same file users are asked
+// to paste into issues.
+//
+// Undefining the macro here gives this file the real printf, so results reach
+// stdout. Nothing else in the tree is affected.
+#undef printf
+
 #include <mutex>
 #include <stdexcept>
 #include <thread>
@@ -163,6 +180,7 @@ static bool Check(bool condition, const char* message)
 
 static int RunWalletKeyPoolSelfTest()
 {
+    fflush(stdout);
     printf("wallet-keypool self-test\n");
 
     std::string tmp;
@@ -180,6 +198,9 @@ static int RunWalletKeyPoolSelfTest()
     }
 
     int nFail = 0;
+    // Before anything can open the database or resolve the log path: what the
+    // node itself prints during the test belongs in the temporary directory,
+    // and dies with it. The test's own results are on stdout, above.
     strSetDataDir = tmp;
     printf("  temp datadir: %s\n", tmp.c_str());
 
@@ -261,11 +282,42 @@ static int RunWalletKeyPoolSelfTest()
     RemoveTree(tmp);
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
     return nFail == 0 ? 0 : 1;
+}
+
+// A -mwindows binary starts with no console attached, so stdout goes nowhere
+// even when it was launched from a terminal. Borrow the caller's console for
+// the duration of the self-test. Nothing to do on Linux, where stdout is
+// already connected.
+static void AttachTerminal()
+{
+#ifdef _WIN32
+    // Only when there is nowhere for stdout to go. If the caller redirected it
+    // to a file or a pipe -- which is what `make tests > log` and any CI does --
+    // that handle is inherited and already works, and reopening it on CONOUT$
+    // would take the output away from the file and put it on the screen. That
+    // was the first version of this fix, and it broke the one case that
+    // mattered.
+    HANDLE hOut = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (hOut != NULL && hOut != INVALID_HANDLE_VALUE)
+        return;
+
+    if (AttachConsole(ATTACH_PARENT_PROCESS))
+    {
+        // Return values ignored on purpose: if the reopen fails there is
+        // nowhere left to report it, and the exit status still carries the
+        // result.
+        freopen("CONOUT$", "w", stdout);
+        freopen("CONOUT$", "w", stderr);
+    }
+#endif
 }
 
 int RunSelfTest(const std::string& name)
 {
+    AttachTerminal();
+
     if (name == "wallet-keypool")
         return RunWalletKeyPoolSelfTest();
 
