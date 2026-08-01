@@ -314,14 +314,161 @@ static void AttachTerminal()
 #endif
 }
 
+static int RunWalletHDSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-hd self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    // Test-vector phrases, so nothing here depends on randomness.
+    const std::string strPhraseA =
+        "abandon abandon abandon abandon abandon abandon "
+        "abandon abandon abandon abandon abandon about";
+    const std::string strPhraseB =
+        "legal winner thank year wave sausage worth useful "
+        "legal winner thank yellow";
+
+    try
+    {
+        if (!LoadWallet())
+            throw std::runtime_error("LoadWallet failed");
+
+        std::string strError;
+        nFail += Check(SetHDSeedFromMnemonic(strPhraseA, strError),
+                       "a valid phrase installs a seed") ? 0 : 1;
+        nFail += Check(HaveHDSeed(), "the wallet reports having a seed") ? 0 : 1;
+
+        std::vector<unsigned char> vchBefore = vchHDMaster;
+        nFail += Check(!SetHDSeedFromMnemonic("not a mnemonic at all", strError),
+                       "an invalid phrase is refused") ? 0 : 1;
+        nFail += Check(vchHDMaster == vchBefore,
+                       "a refused phrase leaves the existing seed alone") ? 0 : 1;
+
+        // The property the whole feature exists for: the same words give back
+        // the same keys, in the same order.
+        std::vector<std::string> first;
+        for (unsigned int i = 0; i < 5; i++)
+        {
+            CKey key;
+            if (!DeriveHDKey(i, key, strError))
+                throw std::runtime_error("derivation failed: " + strError);
+            first.push_back(HexStrLocal(key.GetPubKey()));
+        }
+
+        SetHDSeedFromMnemonic(strPhraseA, strError);
+        std::vector<std::string> again;
+        for (unsigned int i = 0; i < 5; i++)
+        {
+            CKey key;
+            if (!DeriveHDKey(i, key, strError))
+                throw std::runtime_error("derivation failed: " + strError);
+            again.push_back(HexStrLocal(key.GetPubKey()));
+        }
+        nFail += Check(first == again,
+                       "the same phrase derives the same keys in the same order") ? 0 : 1;
+
+        SetHDSeedFromMnemonic(strPhraseB, strError);
+        std::vector<std::string> other;
+        for (unsigned int i = 0; i < 5; i++)
+        {
+            CKey key;
+            if (!DeriveHDKey(i, key, strError))
+                throw std::runtime_error("derivation failed: " + strError);
+            other.push_back(HexStrLocal(key.GetPubKey()));
+        }
+        nFail += Check(first != other, "a different phrase derives different keys") ? 0 : 1;
+
+        std::set<std::string> distinct(first.begin(), first.end());
+        nFail += Check(distinct.size() == first.size(),
+                       "consecutive indices give distinct keys") ? 0 : 1;
+
+        // With a seed installed the pool must be derived from it, and the
+        // counter must move exactly once per key.
+        SetHDSeedFromMnemonic(strPhraseA, strError);
+        CRITICAL_BLOCK(cs_keyPool)
+            mapKeyPool.clear();
+        unsigned int nNextBefore = nHDNext;
+        TopUpKeyPool();
+
+        int nPool = 0;
+        CRITICAL_BLOCK(cs_keyPool)
+            nPool = (int)mapKeyPool.size();
+        nFail += Check(nPool == KEYPOOL_SIZE, "the derived pool fills") ? 0 : 1;
+        nFail += Check(nHDNext == nNextBefore + (unsigned int)KEYPOOL_SIZE,
+                       "the derivation counter advances once per pooled key") ? 0 : 1;
+
+        std::set<std::string> derived;
+        for (unsigned int i = nNextBefore; i < nHDNext; i++)
+        {
+            CKey key;
+            if (!DeriveHDKey(i, key, strError))
+                throw std::runtime_error("derivation failed: " + strError);
+            derived.insert(HexStrLocal(key.GetPubKey()));
+        }
+
+        bool fStored = true;
+        bool fFromSeed = true;
+        CRITICAL_BLOCK(cs_keyPool)
+        {
+            for (map<int64, vector<unsigned char> >::const_iterator mi = mapKeyPool.begin();
+                 mi != mapKeyPool.end(); ++mi)
+            {
+                if (!WalletHasPrivateKey(mi->second))
+                    fStored = false;
+                if (!derived.count(HexStrLocal(mi->second)))
+                    fFromSeed = false;
+            }
+        }
+        nFail += Check(fStored, "every derived pooled key is stored in wallet.dat") ? 0 : 1;
+        nFail += Check(fFromSeed, "every pooled key came from the seed, not from chance") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
 
     if (name == "wallet-keypool")
         return RunWalletKeyPoolSelfTest();
+    if (name == "wallet-hd")
+        return RunWalletHDSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd\n");
     return 1;
 }

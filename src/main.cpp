@@ -14,6 +14,7 @@
 #include <atomic>
 #include <mutex>
 #include <thread>
+#include "bip32.h"
 #include "btfaddr.h"
 #include "btftunnel.h"
 #ifndef _WIN32
@@ -178,6 +179,66 @@ vector<unsigned char> GenerateNewKey()
 CCriticalSection cs_keyPool;
 map<int64, vector<unsigned char> > mapKeyPool;
 
+vector<unsigned char> vchHDMaster;
+vector<unsigned char> vchHDChainCode;
+unsigned int nHDNext = 0;
+
+bool DeriveHDKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet)
+{
+    if (!HaveHDSeed())
+    {
+        strErrorRet = "no seed";
+        return false;
+    }
+
+    bitflash::BIP32PrivateNode parent;
+    parent.privateKey = vchHDMaster;
+    parent.chainCode  = vchHDChainCode;
+
+    bitflash::BIP32PrivateNode child;
+    if (!bitflash::BIP32DeriveHardenedChild(parent, nIndex, child, strErrorRet))
+        return false;
+
+    if (!keyRet.SetSecret(child.privateKey))
+    {
+        strErrorRet = "derived scalar is not a usable key";
+        return false;
+    }
+    return true;
+}
+
+bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
+{
+    string strNormalized;
+    if (!bitflash::BIP39ValidateMnemonic(strMnemonic, strNormalized, strErrorRet))
+        return false;
+
+    vector<unsigned char> vchSeed;
+    if (!bitflash::BIP39MnemonicToSeed(strNormalized, "", vchSeed, strErrorRet))
+        return false;
+
+    bitflash::BIP32PrivateNode master;
+    if (!bitflash::BIP32MasterFromSeed(vchSeed, master, strErrorRet))
+        return false;
+
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        // Written before the globals change, so a failed write leaves the
+        // wallet on the seed it already had rather than on one that exists
+        // only in memory.
+        if (!CWalletDB().WriteHDMaster(master.privateKey, master.chainCode) ||
+            !CWalletDB().WriteHDNext(0))
+        {
+            strErrorRet = "could not write the seed to wallet.dat";
+            return false;
+        }
+        vchHDMaster    = master.privateKey;
+        vchHDChainCode = master.chainCode;
+        nHDNext        = 0;
+    }
+    return true;
+}
+
 void TopUpKeyPool()
 {
     CRITICAL_BLOCK(cs_keyPool)
@@ -191,7 +252,30 @@ void TopUpKeyPool()
                 nIndex = (--mapKeyPool.end())->first + 1;
 
             CKey key;
-            key.MakeNewKey();
+            if (HaveHDSeed())
+            {
+                // Derived, so a recovery phrase can reproduce this exact key.
+                // A derivation that fails is not a reason to stop filling the
+                // pool -- fall back to a random key, which is what a wallet
+                // without a seed uses anyway. It will not come back from the
+                // phrase, and that is better than a node that cannot mine.
+                string strError;
+                if (DeriveHDKey(nHDNext, key, strError))
+                {
+                    nHDNext++;
+                    CWalletDB().WriteHDNext(nHDNext);
+                }
+                else
+                {
+                    printf("TopUpKeyPool() : derivation at index %u failed (%s), "
+                           "falling back to a random key\n", nHDNext, strError.c_str());
+                    key.MakeNewKey();
+                }
+            }
+            else
+            {
+                key.MakeNewKey();
+            }
             // AddKey writes the private key. Order matters: the key is in
             // wallet.dat before anything can point at it, so a crash between
             // the two writes costs an unused key, never a usable one.
@@ -307,6 +391,32 @@ bool AddToWalletIfMine(const CTransaction& tx, const CBlock* pblock)
             wtx.SetMerkleBranch(pblock);
         return AddToWallet(wtx);
     }
+    return true;
+}
+
+bool CanScanWalletTransactions(string& strErrorRet)
+{
+    strErrorRet.clear();
+
+    if (pindexGenesisBlock == NULL || pindexBest == NULL || hashBestChain == 0 || nBestHeight < 0)
+    {
+        strErrorRet = "The block index is not loaded, so the wallet scan cannot "
+                      "prove whether imported or restored keys own coins.";
+        return false;
+    }
+
+    if (nBestHeight == 0)
+    {
+        strErrorRet = "The local chain is only at height 0. A wallet scan would "
+                      "inspect only the genesis block and could incorrectly "
+                      "report zero transactions. Start the node and let it sync "
+                      "before scanning. If this happened after copying a data "
+                      "directory, keep wallet.dat safe and rebuild or re-download "
+                      "the block data instead of trusting the copied database/ "
+                      "environment.";
+        return false;
+    }
+
     return true;
 }
 

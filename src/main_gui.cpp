@@ -323,6 +323,16 @@ int main(int argc, char* argv[])
             // import having failed.
             if (nAdded > 0)
             {
+                string strScanError;
+                if (!CanScanWalletTransactions(strScanError))
+                {
+                    fprintf(stderr, "Cannot scan for imported coins: %s\n",
+                            strScanError.c_str());
+                    fprintf(stderr, "The key import was written, but the wallet "
+                                    "balance was not proven against the chain.\n");
+                    DBFlush(true);
+                    return 1;
+                }
                 printf("Looking through the chain for coins belonging to the imported key(s)...\n");
                 int nFound = ScanForWalletTransactions(pindexGenesisBlock);
                 printf("Found %d transaction(s). Start the node normally to see the balance.\n", nFound);
@@ -339,6 +349,14 @@ int main(int argc, char* argv[])
     // balance is wrong for this reason.
     if (arg(argc,argv,"/rescan") || arg(argc,argv,"-rescan"))
     {
+        string strScanError;
+        if (!CanScanWalletTransactions(strScanError))
+        {
+            fprintf(stderr, "Cannot rescan wallet transactions: %s\n",
+                    strScanError.c_str());
+            DBFlush(true);
+            return 1;
+        }
         printf("Rescanning the chain for this wallet's transactions...\n");
         int nFound = ScanForWalletTransactions(pindexGenesisBlock);
         printf("Rescan done: %d transaction(s) added or updated.\n", nFound);

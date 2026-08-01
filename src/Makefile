@@ -50,7 +50,7 @@ IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
 NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/btfrv.o obj/btftunnel.o obj/rpc.o \
-            obj/selftest.o
+            obj/selftest.o obj/bip32.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o
 
@@ -131,3 +131,4 @@ test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 tests: test_bip32 bitflash-node
 	./test_bip32
 	./bitflash-node -selftest=wallet-keypool
+	./bitflash-node -selftest=wallet-hd

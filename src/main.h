@@ -141,6 +141,33 @@ static const int KEYPOOL_SIZE = 100;
 extern CCriticalSection cs_keyPool;
 extern map<int64, vector<unsigned char> > mapKeyPool;
 
+// --- Deterministic wallet (BIP32) -----------------------------------------
+//
+// When a seed is present the key pool is derived from it -- m/0'/n, hardened,
+// n increasing -- instead of being made of random keys. That is what lets a
+// recovery phrase bring a wallet back: the same twelve words reproduce the same
+// keys in the same order.
+//
+// A wallet without a seed keeps working exactly as before. Nothing here
+// migrates an existing wallet on its own: the seed is created only when the
+// user asks for a phrase and confirms they have written it down, because a
+// phrase generated silently is a backup nobody has.
+//
+// Empty until a seed exists.
+extern vector<unsigned char> vchHDMaster;     // 32-byte master private key (IL)
+extern vector<unsigned char> vchHDChainCode;  // 32 bytes (IR)
+extern unsigned int nHDNext;                  // next child index to derive
+inline bool HaveHDSeed() { return vchHDMaster.size() == 32 && vchHDChainCode.size() == 32; }
+
+// Install a seed derived from a mnemonic, replacing any existing one, and reset
+// the derivation counter. Writes to wallet.dat. Returns false and leaves the
+// wallet untouched if the phrase is not valid.
+bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet);
+
+// Derive the child at nIndex and return it as a key. Used by the key pool and
+// by restore, which needs to run ahead of the pool.
+bool DeriveHDKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet);
+
 // Fill the pool back up to KEYPOOL_SIZE. Every key it creates is written to
 // wallet.dat before it is offered to anybody.
 void TopUpKeyPool();
@@ -156,6 +183,7 @@ void ReacceptWalletTransactions();
 // a key this wallet holds. Returns how many were added or updated. Needed by
 // anything that puts a key into the wallet after the fact -- an import, a
 // restored backup, and later a recovery phrase.
+bool CanScanWalletTransactions(string& strErrorRet);
 int  ScanForWalletTransactions(CBlockIndex* pindexStart);
 // Returns how many wallet transactions the chain corrected.
 int  RescanSpentFlags();

@@ -386,6 +386,33 @@ public:
         return Write(string("defaultkey"), vchPubKey);
     }
 
+    // --- Deterministic (BIP32) seed ---------------------------------------
+    //
+    // Stored as the master key and chain code rather than the mnemonic: the
+    // twelve words are the user's to write down, and keeping a copy of them in
+    // the file they are meant to protect defeats the point of having them.
+    //
+    // "hdnext" is the next child index to derive, so the sequence a restore
+    // reproduces is the same one this wallet handed out.
+    bool ReadHDMaster(vector<unsigned char>& vchMasterRet, vector<unsigned char>& vchChainCodeRet)
+    {
+        vchMasterRet.clear();
+        vchChainCodeRet.clear();
+        return Read(string("hdmaster"), vchMasterRet)
+            && Read(string("hdchaincode"), vchChainCodeRet);
+    }
+
+    bool WriteHDMaster(const vector<unsigned char>& vchMaster, const vector<unsigned char>& vchChainCode)
+    {
+        return Write(string("hdmaster"), vchMaster)
+            && Write(string("hdchaincode"), vchChainCode);
+    }
+
+    bool WriteHDNext(unsigned int nNext)
+    {
+        return Write(string("hdnext"), nNext);
+    }
+
     // Keys generated ahead of time and not yet handed out. The private key of
     // each is already stored under its own "key" record by AddKey; a "pool"
     // record only says that this one is still unspoken for.

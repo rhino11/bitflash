@@ -86,6 +86,40 @@ public:
         return true;
     }
 
+    // Load a raw 32-byte scalar, the form BIP32 derivation produces.
+    //
+    // SetPrivKey above takes DER and cannot be used for this: handing it a
+    // scalar makes d2i_ECPrivateKey fail, and if the caller ignores the return
+    // value -- as one attempt at this did -- the key is left with no material
+    // at all and the address it produces has no private half. Coins paid there
+    // are gone. Hence a separate entry point rather than a looser SetPrivKey.
+    //
+    // The public half is computed here rather than read from anywhere:
+    // pub = G * secret.
+    bool SetSecret(const std::vector<unsigned char>& vchSecret)
+    {
+        if (vchSecret.size() != 32)
+            return false;
+
+        bool fOk = false;
+        BIGNUM* bn = BN_bin2bn(&vchSecret[0], 32, NULL);
+        EC_POINT* pubkey = NULL;
+        if (bn && EC_KEY_set_private_key(pkey, bn))
+        {
+            const EC_GROUP* group = EC_KEY_get0_group(pkey);
+            pubkey = EC_POINT_new(group);
+            if (pubkey &&
+                EC_POINT_mul(group, pubkey, bn, NULL, NULL, NULL) &&
+                EC_KEY_set_public_key(pkey, pubkey))
+                fOk = true;
+        }
+        if (pubkey)
+            EC_POINT_free(pubkey);
+        if (bn)
+            BN_clear_free(bn);   // it held the secret
+        return fOk;
+    }
+
     CPrivKey GetPrivKey() const
     {
         unsigned int nSize = i2d_ECPrivateKey(pkey, NULL);

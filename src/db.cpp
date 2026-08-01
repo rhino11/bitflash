@@ -639,6 +639,18 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
             {
                 ssValue >> vchDefaultKeyRet;
             }
+            else if (strType == "hdmaster")
+            {
+                ssValue >> vchHDMaster;
+            }
+            else if (strType == "hdchaincode")
+            {
+                ssValue >> vchHDChainCode;
+            }
+            else if (strType == "hdnext")
+            {
+                ssValue >> nHDNext;
+            }
             else if (strType == "pool")
             {
                 int64 nIndex;
