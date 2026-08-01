@@ -46,6 +46,96 @@ CCriticalSection cs_mapRelay;
 map<CInv, int64> mapAlreadyAskedFor;
 string strBtfConnect; // .btf peer to keep connected to (from /connectbtf)
 
+int   nPeersWatched        = 0;
+int64 nBlocksReceived      = 0;
+int64 nBlocksWithoutParent = 0;
+static int64 nNodeStartTime = 0;
+
+// Defined further down, next to the counter it reads. The miner keeps its own
+// live count -- threads bump it on the way in and on the way out -- which is
+// the honest number here: how many are hashing now, not how many were asked to.
+static int MinersRunningCount();
+
+// Seconds rendered the way a person reads them off a screen.
+static string FormatAge(int64 nSeconds)
+{
+    if (nSeconds < 0)  return "never";
+    if (nSeconds < 60) return strprintf("%llds", (long long)nSeconds);
+    if (nSeconds < 3600)
+        return strprintf("%lldm%02llds", (long long)(nSeconds / 60), (long long)(nSeconds % 60));
+    return strprintf("%lldh%02lldm", (long long)(nSeconds / 3600), (long long)((nSeconds % 3600) / 60));
+}
+
+string GetDiagnosticsText()
+{
+    int64 nNow = GetTime();
+    string str;
+
+    int nInbound = 0, nHeld = 0;
+    vector<CNode*> vCopy;
+    CRITICAL_BLOCK(cs_vNodes)
+    {
+        vCopy = vNodes;
+        nHeld = (int)vNodes.size();
+        foreach(CNode* pnode, vNodes)
+            if (pnode->fInbound)
+                nInbound++;
+    }
+
+    int nMedian = GetPeerMedianHeight();
+
+    str += "Bitflash node diagnostics\n";
+    str += strprintf("  uptime            %s\n",
+                     FormatAge(nNodeStartTime ? nNow - nNodeStartTime : -1).c_str());
+    if (nMedian < 0)
+        str += strprintf("  height            %d  (no peer has said where it is)\n", nBestHeight);
+    else
+        str += strprintf("  height            %d  (peers report %d, %s)\n",
+                         nBestHeight, nMedian,
+                         nBestHeight >= nMedian ? "level or ahead"
+                                                : strprintf("behind by %d", nMedian - nBestHeight).c_str());
+    str += strprintf("  peers held        %d  (%d inbound, %d outbound)\n",
+                     nHeld, nInbound, nHeld - nInbound);
+
+    // The number that would have made the deafness obvious. Anything held but
+    // not watched is a socket this node will never read again.
+    str += strprintf("  peers watched     %d of %d that select() can hold%s\n",
+                     nPeersWatched, (int)FD_SETSIZE - 1,
+                     nHeld > nPeersWatched ? "   <-- NOT ALL PEERS ARE BEING READ" : "");
+
+    if (nBlocksReceived > 0)
+        str += strprintf("  blocks received   %lld  (%lld arrived without a parent, %.1f%%)\n",
+                         (long long)nBlocksReceived, (long long)nBlocksWithoutParent,
+                         100.0 * nBlocksWithoutParent / nBlocksReceived);
+    else
+        str += "  blocks received   0\n";
+
+    int nMining = MinersRunningCount();
+    str += strprintf("  proof of work     %s mode%s\n",
+                     RandomXFastReady() ? "fast (2 GB dataset)" : "light (256 MB cache)",
+                     nMining > 0
+                         ? strprintf(", mining on %d thread(s), about %d MB",
+                                     nMining,
+                                     (RandomXFastReady() ? 2080 : 256) + 2 * nMining).c_str()
+                         : ", not mining");
+
+    str += "\n  peer                          dir  height   last recv   last send   unsent\n";
+    foreach(CNode* pnode, vCopy)
+    {
+        int nSendSize = 0;
+        TRY_CRITICAL_BLOCK(pnode->cs_vSend)
+            nSendSize = (int)pnode->vSend.size();
+        str += strprintf("  %-28s %-4s %6d  %10s  %10s  %7d\n",
+                         pnode->addr.ToString().substr(0, 28).c_str(),
+                         pnode->fInbound ? "in" : "out",
+                         pnode->nStartingHeight,
+                         FormatAge(pnode->nLastRecv ? nNow - pnode->nLastRecv : -1).c_str(),
+                         FormatAge(pnode->nLastSend ? nNow - pnode->nLastSend : -1).c_str(),
+                         nSendSize);
+    }
+    return str;
+}
+
 
 bool GetMyExternalIP(unsigned int& ipRet)
 {
@@ -1058,6 +1148,24 @@ void ThreadSocketHandler2(void* parg)
                            (int)vNodes.size() - (int)FD_SETSIZE + 1);
                 }
             }
+            nPeersWatched = (int)nWatched - 1;   // less the listen socket
+        }
+
+        // Say the state of the node out loud now and then, so a log pulled off
+        // a machine three weeks later still answers "was it hearing anybody".
+        {
+            static int64 nLastReport = 0;
+            // Wound forward on the first pass so the first report lands about a
+            // minute in, once peers have had time to connect. A report written
+            // at second zero says nothing, and waiting ten minutes for the
+            // first one is ten minutes of a log that cannot answer anything.
+            if (nLastReport == 0)
+                nLastReport = GetTime() - 9 * 60;
+            if (GetTime() - nLastReport > 10 * 60)
+            {
+                nLastReport = GetTime();
+                printf("%s\n", GetDiagnosticsText().c_str());
+            }
         }
 
         vfThreadRunning[0] = false;
@@ -1432,6 +1540,14 @@ void ThreadMessageHandler2(void* parg)
 static CCriticalSection cs_nMinersRunning;
 static int nMinersRunning = 0;
 
+static int MinersRunningCount()
+{
+    int n = 0;
+    CRITICAL_BLOCK(cs_nMinersRunning)
+        n = nMinersRunning;
+    return n;
+}
+
 void ThreadBitcoinMiner(void* parg)
 {
     int nThreadId = (int)(intptr_t)parg;
@@ -1490,6 +1606,7 @@ int StartMinerThreads()
 bool StartNode(string& strError)
 {
     strError = "";
+    nNodeStartTime = GetTime();
 
     // Sockets startup
     WSADATA wsadata;

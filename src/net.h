@@ -102,6 +102,25 @@ static const int          BTF_PING_INTERVAL_SECS   = 10 * 60;
 static const int          BTF_BEHIND_GRACE_SECS         = 5 * 60;
 static const int          BTF_BEHIND_WARN_INTERVAL_SECS = 5 * 60;
 
+// --- Self-diagnosis -------------------------------------------------------
+//
+// A node that has stopped working looks exactly like a node with nothing to
+// do. That has cost this project real time more than once: a node deaf to
+// most of its peers, a miner allocating one RandomX dataset per thread, a
+// third of arriving blocks missing their parent -- each was found from
+// outside, by reading the process's sockets or its memory from another
+// machine, because the node itself had no way to say so.
+//
+// These counters exist so it can. Cheap to keep, and they name the failures
+// that actually happened rather than the ones that sound impressive.
+extern int   nPeersWatched;        // peers in the last select() set
+extern int64 nBlocksReceived;      // blocks handed to ProcessBlock
+extern int64 nBlocksWithoutParent; // ...of those, how many arrived orphaned
+
+// One report, rendered the same way for the GUI panel and the log, so what a
+// user pastes into an issue is what a developer already knows how to read.
+string GetDiagnosticsText();
+
 // Defined in main.cpp. Declared here because CNode announces it in the version
 // message, and net.h is included before main.h.
 extern int nBestHeight;

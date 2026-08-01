@@ -50,6 +50,7 @@ static int64       g_lastWalletRefresh = 0;
 static bool        g_showSend          = false;
 static bool        g_showOptions       = false;
 static bool        g_showAbout         = false;
+static bool        g_showDiagnostics   = false;
 static bool        g_needRefresh       = true;
 
 static char        g_sendAddr[128]        = {};
@@ -310,6 +311,7 @@ static void DrawMainWindow()
             ImGui::EndMenu();
         }
         if (ImGui::MenuItem("Options")) g_showOptions = true;
+        if (ImGui::MenuItem("Diagnostics")) g_showDiagnostics = true;
         if (ImGui::MenuItem("About"))   g_showAbout   = true;
         ImGui::EndMenuBar();
     }
@@ -815,6 +817,41 @@ static void DrawOptionsDialog()
 // ---------------------------------------------------------------------------
 // About dialog
 // ---------------------------------------------------------------------------
+// What the node knows about itself, in the words it writes to the log. Same
+// text in both places on purpose: what a user pastes into an issue is then
+// exactly what a developer has already read a hundred times.
+static void DrawDiagnosticsDialog()
+{
+    if (!g_showDiagnostics) return;
+    ImGui::SetNextWindowSize(ImVec2(720.0f, 460.0f), ImGuiCond_FirstUseEver);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_FirstUseEver, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("Diagnostics", &g_showDiagnostics, ImGuiWindowFlags_NoCollapse))
+    {
+        // Rebuilt at most once a second: it walks every peer and takes their
+        // send locks, which is not something to do at frame rate.
+        static std::string strReport;
+        static int64 nLastBuilt = 0;
+        if (GetTime() != nLastBuilt)
+        {
+            nLastBuilt = GetTime();
+            strReport = GetDiagnosticsText();
+        }
+
+        if (ImGui::Button("Copy to clipboard", ImVec2(160.0f, 0.0f)))
+            ImGui::SetClipboardText(strReport.c_str());
+        ImGui::SameLine();
+        ImGui::TextDisabled("The same report goes to debug.log every ten minutes.");
+        ImGui::Separator();
+
+        ImGui::BeginChild("##diagtext", ImVec2(0.0f, 0.0f), false,
+                          ImGuiWindowFlags_HorizontalScrollbar);
+        ImGui::TextUnformatted(strReport.c_str());
+        ImGui::EndChild();
+    }
+    ImGui::End();
+}
+
 static void DrawAboutDialog()
 {
     if (!g_showAbout) return;
@@ -921,6 +958,7 @@ int RunGUI(int argc, char* argv[])
         DrawMainWindow();
         DrawSendDialog();
         DrawOptionsDialog();
+        DrawDiagnosticsDialog();
         DrawAboutDialog();
         DrawStatusBar();
 
