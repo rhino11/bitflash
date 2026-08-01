@@ -46,10 +46,10 @@
 using json = nlohmann::json;
 
 #ifdef _WIN32
-#define sock_close(s)  closesocket(s)
+#define sock_close(s)  BtfCloseSocket(s)
 #define SEND_FLAGS     0
 #else
-#define sock_close(s)  ::close(s)
+#define sock_close(s)  BtfCloseSocket(s)
 #define SEND_FLAGS     MSG_NOSIGNAL
 #endif
 

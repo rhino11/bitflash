@@ -11,7 +11,7 @@
 #ifdef _WIN32
 #include <winsock2.h>
 #include <ws2tcpip.h>
-#define CLOSESOCK closesocket
+#define CLOSESOCK BtfCloseSocket
 #else
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -22,11 +22,13 @@
 typedef int SOCKET;
 #define INVALID_SOCKET (-1)
 #define SOCKET_ERROR (-1)
-#define CLOSESOCK ::close
+#define CLOSESOCK BtfCloseSocket
 #ifndef SD_BOTH
 #define SD_BOTH SHUT_RDWR
 #endif
 #endif
+
+#include "sockcount.h"
 
 #include <cstring>
 #include <cstdio>
@@ -96,7 +98,7 @@ static SOCKET ConnectTo(const char* host, unsigned short port)
     hints.ai_socktype = SOCK_STREAM;
     char portstr[16]; sprintf(portstr, "%u", (unsigned)port);
     if (getaddrinfo(host, portstr, &hints, &res) != 0 || !res) return INVALID_SOCKET;
-    SOCKET s = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+    SOCKET s = BtfSocketTag(socket(res->ai_family, res->ai_socktype, res->ai_protocol), SOCK_RV_DIAL);
     if (s == INVALID_SOCKET) { freeaddrinfo(res); return INVALID_SOCKET; }
 
     // Apply a short timeout only for the connect() and initial handshake so an
@@ -201,7 +203,7 @@ bool RvRelayRun(unsigned short port)
     if (!RvInit()) return false;
     g_stop = false;
 
-    g_listen = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    g_listen = BtfSocketTag(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), SOCK_RV_LISTEN);
     if (g_listen == INVALID_SOCKET) return false;
     int yes = 1;
     setsockopt(g_listen, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
@@ -218,7 +220,7 @@ bool RvRelayRun(unsigned short port)
     {
         struct sockaddr_in cli;
         socklen_t len = sizeof(cli);
-        SOCKET s = accept(g_listen, (struct sockaddr*)&cli, &len);
+        SOCKET s = BtfSocketTag(accept(g_listen, (struct sockaddr*)&cli, &len), SOCK_RV_ACCEPT);
         if (s == INVALID_SOCKET)
         {
             if (g_stop) break;

@@ -23,6 +23,7 @@ typedef int SOCKET;
 #define SD_BOTH SHUT_RDWR
 #endif
 #endif
+#include "sockcount.h"
 #include <cstring>
 #include <vector>
 #include <thread>
@@ -39,7 +40,7 @@ bool TunnelInit()
 // Returns app end and pump end; both are ordinary full-duplex TCP sockets.
 static bool MakeLocalPair(btf_socket_t& appEnd, btf_socket_t& pumpEnd)
 {
-    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET listener = BtfSocketTag(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), SOCK_PAIR_LISTEN);
     if (listener == INVALID_SOCKET) return false;
 
     struct sockaddr_in addr;
@@ -47,23 +48,23 @@ static bool MakeLocalPair(btf_socket_t& appEnd, btf_socket_t& pumpEnd)
     addr.sin_family = AF_INET;
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     addr.sin_port = 0; // ephemeral
-    if (bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(listener); return false; }
-    if (listen(listener, 1) != 0) { closesocket(listener); return false; }
+    if (bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0) { BtfCloseSocket(listener); return false; }
+    if (listen(listener, 1) != 0) { BtfCloseSocket(listener); return false; }
 
 #ifdef _WIN32
     int len = sizeof(addr);
 #else
     socklen_t len = sizeof(addr);
 #endif
-    if (getsockname(listener, (struct sockaddr*)&addr, &len) != 0) { closesocket(listener); return false; }
+    if (getsockname(listener, (struct sockaddr*)&addr, &len) != 0) { BtfCloseSocket(listener); return false; }
 
-    SOCKET a = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (a == INVALID_SOCKET) { closesocket(listener); return false; }
-    if (connect(a, (struct sockaddr*)&addr, sizeof(addr)) != 0) { closesocket(a); closesocket(listener); return false; }
+    SOCKET a = BtfSocketTag(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), SOCK_PAIR_APP);
+    if (a == INVALID_SOCKET) { BtfCloseSocket(listener); return false; }
+    if (connect(a, (struct sockaddr*)&addr, sizeof(addr)) != 0) { BtfCloseSocket(a); BtfCloseSocket(listener); return false; }
 
-    SOCKET b = accept(listener, NULL, NULL);
-    closesocket(listener);
-    if (b == INVALID_SOCKET) { closesocket(a); return false; }
+    SOCKET b = BtfSocketTag(accept(listener, NULL, NULL), SOCK_PAIR_PUMP);
+    BtfCloseSocket(listener);
+    if (b == INVALID_SOCKET) { BtfCloseSocket(a); return false; }
 
     appEnd = a;
     pumpEnd = b;
@@ -129,7 +130,7 @@ static btf_socket_t StartTunnel(RvSocket rv, const unsigned char shared[32])
     std::thread(PumpOut, pumpEnd, rv, key).detach();
     std::thread([pumpEnd, rv, key]() {
         PumpIn(pumpEnd, rv, key);
-        closesocket(pumpEnd);
+        BtfCloseSocket(pumpEnd);
         RvClose(rv);
     }).detach();
     return appEnd;

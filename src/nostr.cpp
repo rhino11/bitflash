@@ -462,7 +462,7 @@ public:
     {
         if (ssl)    { SSL_shutdown(ssl); SSL_free(ssl); ssl = NULL; }
         if (sslctx) { SSL_CTX_free(sslctx); sslctx = NULL; }
-        if (hSocket != INVALID_SOCKET) { closesocket(hSocket); hSocket = INVALID_SOCKET; }
+        if (hSocket != INVALID_SOCKET) { BtfCloseSocket(hSocket); hSocket = INVALID_SOCKET; }
     }
 
     int RawRead(char* buf, int len)
@@ -518,7 +518,7 @@ public:
         bool fConnected = false;
         for (rp = res; rp != NULL; rp = rp->ai_next)
         {
-            hSocket = socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol);
+            hSocket = BtfSocketTag(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol), SOCK_NOSTR);
             if (hSocket == INVALID_SOCKET)
                 continue;
 
@@ -542,7 +542,7 @@ public:
                 break;
             }
 
-            closesocket(hSocket);
+            BtfCloseSocket(hSocket);
             hSocket = INVALID_SOCKET;
         }
         freeaddrinfo(res);

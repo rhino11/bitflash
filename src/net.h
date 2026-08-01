@@ -121,6 +121,8 @@ extern int64 nBlocksWithoutParent; // ...of those, how many arrived orphaned
 // user pastes into an issue is what a developer already knows how to read.
 string GetDiagnosticsText();
 
+#include "sockcount.h"
+
 // Defined in main.cpp. Declared here because CNode announces it in the version
 // message, and net.h is included before main.h.
 extern int nBestHeight;

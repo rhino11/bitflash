@@ -51,6 +51,33 @@ int64 nBlocksReceived      = 0;
 int64 nBlocksWithoutParent = 0;
 static int64 nNodeStartTime = 0;
 
+// --- Socket accounting (implementation lives in sockcount.h) --------------
+static const char* pszSockSite[SOCK_SITES] = {
+    "external-ip probe", "listen socket", "inbound accept",
+    "rendezvous dial", "rendezvous listen", "rendezvous accept",
+    "loopback pair listener", "loopback pair app end", "loopback pair pump end",
+    "nostr relay"
+};
+
+static string SockAccountingText()
+{
+    long long nOpened[SOCK_SITES], nClosed[SOCK_SITES], nFailed[SOCK_SITES], nUntagged = 0;
+    BtfSockSnapshot(nOpened, nClosed, nFailed, &nUntagged);
+
+    string str = "\n  sockets by where they were created\n";
+    str += "  site                       opened   closed     live  close failed\n";
+    for (int i = 0; i < SOCK_SITES; i++)
+    {
+        if (nOpened[i] == 0)
+            continue;
+        str += strprintf("  %-24s %8lld %8lld %8lld %13lld\n", pszSockSite[i],
+                         nOpened[i], nClosed[i], nOpened[i] - nClosed[i], nFailed[i]);
+    }
+    str += strprintf("  %-24s %8s %8lld %8s %13s\n", "closed but never tagged",
+                     "-", nUntagged, "-", "-");
+    return str;
+}
+
 // Defined further down, next to the counter it reads. The miner keeps its own
 // live count -- threads bump it on the way in and on the way out -- which is
 // the honest number here: how many are hashing now, not how many were asked to.
@@ -119,6 +146,8 @@ string GetDiagnosticsText()
                                      (RandomXFastReady() ? 2080 : 256) + 2 * nMining).c_str()
                          : ", not mining");
 
+    str += SockAccountingText();
+
     str += "\n  peer                          dir  height   last recv   last send   unsent\n";
     foreach(CNode* pnode, vCopy)
     {
@@ -157,7 +186,7 @@ bool GetMyExternalIP(unsigned int& ipRet)
         if (getaddrinfo(svc.host, "80", &hints, &res) != 0 || !res)
             continue;
 
-        SOCKET hSocket = socket(res->ai_family, res->ai_socktype, res->ai_protocol);
+        SOCKET hSocket = BtfSocketTag(socket(res->ai_family, res->ai_socktype, res->ai_protocol), SOCK_EXTIP);
         if (hSocket == INVALID_SOCKET) { freeaddrinfo(res); continue; }
 
         // 5-second timeout so a dead service doesn't stall startup
@@ -173,7 +202,7 @@ bool GetMyExternalIP(unsigned int& ipRet)
 
         if (connect(hSocket, res->ai_addr, (int)res->ai_addrlen) != 0)
         {
-            freeaddrinfo(res); closesocket(hSocket); continue;
+            freeaddrinfo(res); BtfCloseSocket(hSocket); continue;
         }
         freeaddrinfo(res);
 
@@ -190,7 +219,7 @@ bool GetMyExternalIP(unsigned int& ipRet)
             response += buf;
             if (response.size() > 4096) break;
         }
-        closesocket(hSocket);
+        BtfCloseSocket(hSocket);
 
         // Find blank line separating headers from body
         size_t bodyPos = response.find("\r\n\r\n");
@@ -950,7 +979,7 @@ void CNode::Disconnect()
 {
     LogPrint("net", "disconnecting node %s\n", addr.ToString().c_str());
 
-    closesocket(hSocket);
+    BtfCloseSocket(hSocket);
 
     // All of a nodes broadcasts and subscriptions are automatically torn down
     // when it goes down, so a node has to stay up to keep its broadcast going.
@@ -1230,7 +1259,7 @@ void ThreadSocketHandler2(void* parg)
 #else
             socklen_t len = sizeof(sockaddr);
 #endif
-            SOCKET hSocket = accept(hListenSocket, (struct sockaddr*)&sockaddr, &len);
+            SOCKET hSocket = BtfSocketTag(accept(hListenSocket, (struct sockaddr*)&sockaddr, &len), SOCK_ACCEPT);
             CAddress addr(sockaddr);
             if (hSocket == INVALID_SOCKET)
             {
@@ -1251,7 +1280,7 @@ void ThreadSocketHandler2(void* parg)
                 {
                     LogPrint("net", "refusing connection from %s, already at %u\n",
                              addr.ToString().c_str(), nNodes);
-                    closesocket(hSocket);
+                    BtfCloseSocket(hSocket);
                 }
                 else
                 {
@@ -1639,7 +1668,7 @@ bool StartNode(string& strError)
     printf("addrLocalHost = %s\n", addrLocalHost.ToString().c_str());
 
     // Create socket for listening for incoming connections
-    SOCKET hListenSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    SOCKET hListenSocket = BtfSocketTag(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP), SOCK_LISTEN);
     if (hListenSocket == INVALID_SOCKET)
     {
         strError = strprintf("Error: Couldn't open socket for incoming connections (socket returned error %d)", WSAGetLastError());
