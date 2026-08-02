@@ -40,6 +40,12 @@ static string argval2(int argc, char* argv[], const char* keySlash, const char* 
     return argval(argc, argv, keyDash);
 }
 
+// The real printf, not the one util.h remaps to OutputDebugStringF. Help that
+// goes to debug.log is help nobody asked for: `-help` printed a full page into
+// the data directory and returned 0 with an empty terminal, which reads as a
+// command that does nothing. Same reason walletcmd.cpp undefines it.
+#undef printf
+
 static void PrintUsage()
 {
     printf("Bitflash command-line options\n");
@@ -50,7 +56,7 @@ static void PrintUsage()
     printf("  /debug\n");
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
-    printf("  /selftest=wallet-keypool\n");
+    printf("  /selftest=wallet-keypool or /selftest=wallet-hd\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -84,11 +90,17 @@ static void PrintUsage()
     printf("                              wallet that has none, show it once, exit)\n");
     printf("  /restorephrase=\"WORDS\"     (rebuild this wallet from a phrase and scan\n");
     printf("                              the chain for its coins, then exit)\n");
+    printf("  /restoredepth=N            (with /restorephrase: derive at least N\n");
+    printf("                              addresses before giving up)\n");
+    printf("  /showderived=N             (list the first N addresses a phrase\n");
+    printf("                              produces, without installing it)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
     printf("Each option also accepts '-' instead of '/'.\n");
 }
+
+#define printf OutputDebugStringF
 
 static void ParseStartupArguments(int argc, char* argv[])
 {
@@ -221,6 +233,11 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/help") || arg(argc,argv,"-help") ||
         arg(argc,argv,"--help") || arg(argc,argv,"/?"))
     {
+        // Without this the help prints into nothing. A -mwindows binary starts
+        // with no console, so every one of those printfs went nowhere and the
+        // one command whose entire job is to tell you something told you
+        // nothing at all -- exit code 0, not a byte of output.
+        AttachTerminal();
         PrintUsage();
         return 0;
     }

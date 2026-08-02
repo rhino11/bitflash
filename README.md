@@ -62,6 +62,17 @@ added a per-block signature-operation cap. A node on an older build will accept
 blocks that current nodes reject, which puts it on a different chain without any
 warning.
 
+Two more reasons, both measured rather than theorised:
+
+- **Before 1.2.13** a node closed a disconnected peer's socket twice and left the
+  closed handle in its `select()` set, where it made `select()` fail on every
+  iteration. The node then spent its socket loop in an error path instead of
+  reading its peers. Two nodes side by side on the same machine, same network:
+  the one without the fix held 11 peers, the one with it held 21.
+- **Before 1.2.11** a long-running Windows node accumulated sockets it never
+  released — 1262 of them in 26 hours on one machine, each holding an ephemeral
+  port.
+
 Your wallet and chain data live in `%APPDATA%\Bitflash` (Windows) or
 `~/.bitflash` (Linux) and are shared by every version, so upgrading is just
 replacing the binary. Never delete that directory to "fix" something without a
@@ -69,10 +80,47 @@ backup — it holds your keys.
 
 ---
 
-## Backing up your wallet
+## Your wallet: the phrase and the file
 
-Two things about this wallet will cost you money if you do not know them. Both
-are consequences of the 0.1.0 wallet format, and neither is obvious.
+Since 1.2.12 a wallet can hold twelve words that rebuild it. Since 1.2.13 those
+words also cover the address the window shows you. **Both still matter** — the
+phrase and the file back up different things, and the difference is where people
+lose money.
+
+### The recovery phrase
+
+```
+bitflash -newphrase                          # create it, show it once, exit
+bitflash -restorephrase="twelve words here"  # rebuild a wallet from it
+```
+
+`-newphrase` installs a BIP32 seed, derives the wallet's key pool and default
+receiving address from it, and prints the words once. It refuses if a phrase
+already exists: replacing one silently would strand every coin on addresses the
+written-down words no longer describe.
+
+`-restorephrase` installs the seed and walks forward in batches of a hundred
+addresses, rescanning the chain after each and stopping when a whole batch turns
+up nothing. `-restoredepth=N` looks further. `-showderived=N` lists the addresses
+a phrase produces, so you can check one before trusting it.
+
+The same two operations are in the window, under **Wallet Safety**.
+
+**The words are printed to the terminal and nowhere else** — never to
+`debug.log`, which is the file people are routinely asked to attach to an issue.
+
+**What the phrase does not cover.** Keys that existed *before* the seed was
+installed are random. They are not derived from it and they do not come back
+from the words. The wallet names such an address `Your Address (created before
+the recovery phrase)` so you can tell them apart. This is why file backups still
+matter.
+
+> **If you created a phrase on 1.2.12, run `-restorephrase` with the same twelve
+> words.** That release installed the seed but left the visible address and the
+> key pool random, so the wallet went on handing out addresses the words cannot
+> reproduce while the window said a phrase existed. Restoring repairs it.
+
+### The file
 
 **Copying `wallet.dat` on its own is not a backup.** Berkeley DB ties the file
 to the environment in the `database/` subdirectory beside it, so a lone
@@ -88,20 +136,26 @@ It loads the wallet, writes the copy, and exits without starting the node. If
 you would rather copy by hand, shut the node down first and take the **whole**
 data directory, not just `wallet.dat`.
 
-**Every backup is still a snapshot, but it now has a safety margin.** The wallet
-keeps a pool of 100 pre-generated keys. A backup contains those keys, so it
-covers the next 100 mining rewards or receive addresses the node hands out after
-the backup. That makes a normal backup much safer than the original 0.1.0
-wallet, where the very next block could land on a key the backup did not have.
+A file backup covers what a phrase cannot: keys from before the seed, and any
+key the wallet acquired by import. It also has a margin of its own — the wallet
+keeps a pool of 100 pre-generated keys, so a backup covers the next 100 mining
+rewards or receive addresses. Take a fresh one after mining for a while, after
+creating many receive addresses, and before moving the wallet to another machine.
 
-It is not a seed phrase. Heavy use can drain the key pool, and deterministic
-wallet restore is still tracked in [#47](https://github.com/Bitflash-sh/bitflash/issues/47).
-Back up again after mining for a while, after creating many receive addresses,
-and before moving the wallet to another machine.
+The GUI has a **Backup Wallet** button and a **Wallet Safety** view, which fills
+the key pool before writing the backup.
 
-The GUI has a **Backup Wallet** button and a **Wallet Safety** view. Use that if
-you do not want to run the command by hand; it fills the key pool before writing
-the backup.
+### Finding coins the wallet never recorded
+
+```
+bitflash -rescan
+```
+
+Walks the chain for coins a key of yours owns but the wallet has no record of —
+after importing keys, or after restoring a file from another machine.
+`-importwallet` runs this automatically. A scan asked for with no chain data
+loaded is refused rather than reported as "no transactions found", which reads
+as a verdict to somebody who has just lost a wallet.
 
 ### When wallet.dat itself will not open
 
@@ -153,27 +207,47 @@ xmrig -a rx/0 -o POOL_BTF_ADDRESS -u YOUR_BTF_ADDRESS -p x
 ## Headless / server mode
 
 ```bash
-./bitflash /nogui                     # node only
-./bitflash /nogui /gen                # node + solo mining
-./bitflash /nogui /gen /operator      # pool operator
-./bitflash /nogui /gen /participant=POOL_BTF_ADDRESS  # mine to pool
+./bitflash -nogui                     # node only
+./bitflash -nogui -gen                # node + solo mining
+./bitflash -nogui -gen -operator      # pool operator
+./bitflash -nogui -gen -participant=POOL_BTF_ADDRESS  # mine to pool
 ```
 
-Mining is off unless you pass `/gen` — it is not remembered between restarts, so
-put the flag in whatever starts the node rather than enabling it in the window.
+Every option takes `-` or `/`. **Under MSYS2 use the `-` form** — the shell
+rewrites a leading slash into a path before the node ever sees it.
+
+**The mining mode is remembered between restarts** since 1.2.11, so a node that
+was mining comes back mining. A `-gen`, `-operator` or `-participant` flag always
+wins over what was stored, and the log says on every start which of the two
+decided. Passing the flag anyway is the safe habit: it survives a wallet that
+came from an older build.
 
 Other options worth knowing:
 
 ```bash
-/datadir=PATH    # wallet and chain data elsewhere
-/port=N          # P2P listen port, default 8433
-/debug           # verbose log; without it debug.log is nearly silent
-/help            # full list
+-datadir=PATH    # wallet and chain data elsewhere
+-port=N          # P2P listen port, default 8433
+-debug           # verbose log; without it debug.log is nearly silent
+-help            # full list
 ```
 
-`/port` plus `/datadir` is what lets two nodes share one machine. Both are
+`-port` plus `-datadir` is what lets two nodes share one machine. Both are
 needed — the data directory takes an exclusive lock, so a second node pointed at
 the same one will refuse to start.
+
+### When something looks wrong
+
+**Menu > Diagnostics**, and the same report in `debug.log` every ten minutes:
+peers held against peers `select()` is actually watching, blocks received and how
+many arrived without a parent, the proof-of-work mode with the live miner thread
+count, sockets by the part of the program that opened them, and per peer how long
+since the last message each way. There is a copy button — if you open an issue,
+paste that.
+
+It exists because every hard problem in this project so far was found from
+*outside* the node: sockets read over WMI from another machine, memory compared
+against a number in a README, a `grep` over somebody's log. In each case the node
+knew and had no way to say so.
 
 As a systemd service:
 
@@ -183,7 +257,7 @@ Description=Bitflash node
 After=network.target
 
 [Service]
-ExecStart=/opt/bitflash/bitflash /nogui /gen /operator
+ExecStart=/opt/bitflash/bitflash -nogui -gen -operator
 Restart=always
 User=bitcoin
 WorkingDirectory=/opt/bitflash
@@ -225,7 +299,7 @@ Relays are the meeting points that let nodes behind NAT connect to each other. M
 
 ```bash
 sudo bash relay/install-bitflash-relay.sh 8434
-./bitflash /nogui /announcerelay=YOUR_PUBLIC_IP:8434
+./bitflash -nogui -announcerelay=YOUR_PUBLIC_IP:8434
 ```
 
 Relays forward encrypted bytes and cannot read or modify traffic.
@@ -265,6 +339,7 @@ Installs deps via pacman, produces `Bitflash-*-windows.zip`.
 | Addressing | `.btf` rendezvous — see the caveats above |
 | Premine | None |
 | Pool server | Built-in — `.btf` rendezvous only |
+| Wallet recovery | Twelve-word phrase (BIP39 + BIP32), plus file backup |
 
 The halving interval is the number most people get wrong coming from Bitcoin.
 Same 210,000 blocks, but at two minutes instead of ten, so it arrives in about
