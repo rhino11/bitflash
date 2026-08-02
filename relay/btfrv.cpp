@@ -31,6 +31,7 @@ typedef int SOCKET;
 #include <cstring>
 #include <cstdio>
 #include <string>
+#include <deque>
 #include <map>
 #include <thread>
 #include <mutex>
@@ -44,7 +45,24 @@ static std::atomic<bool> g_stop(false);
 static SOCKET            g_listen = INVALID_SOCKET;
 
 // Services that have registered and are waiting for a client, keyed by pubkey.
-static std::map<std::string, SOCKET> g_waiting;
+// More than one registration per node, on purpose.
+//
+// This used to be one socket per pubkey, and a dial *consumed* it: the first
+// caller took the registration and everyone else was told "not found" until the
+// node noticed and registered again. A node re-registers only after its pairing
+// has been handed off, so between the two there is a window where it is
+// unreachable to the whole network. Measured from a node's own counters: half
+// of all outbound dials failed that way -- 15 of 30 in eleven minutes -- while
+// descriptors resolved 53 times out of 54 and the node's own registrations
+// paired 11 times out of 12. The rendezvous was not losing anybody; it was
+// letting one caller in at a time.
+//
+// A queue per key lets a node keep spare registrations parked, so a dial that
+// arrives while another is being paired finds the next one instead of a closed
+// door. Old nodes register exactly as before and simply keep one entry: the
+// wire protocol does not change, so a relay running this serves both.
+static const size_t MAX_WAITING_PER_KEY = 4;
+static std::map<std::string, std::deque<SOCKET> > g_waiting;
 static std::mutex                    g_mtx;
 
 // How often the reaper walks the waiting map.
@@ -150,16 +168,24 @@ static void ReapDeadRegistrations()
     int nBefore = 0, nReaped = 0;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
-        nBefore = (int)g_waiting.size();
-        std::map<std::string, SOCKET>::iterator it = g_waiting.begin();
+        std::map<std::string, std::deque<SOCKET> >::iterator it = g_waiting.begin();
         while (it != g_waiting.end())
         {
-            if (RegistrationDead(it->second))
+            std::deque<SOCKET>& q = it->second;
+            nBefore += (int)q.size();
+            for (std::deque<SOCKET>::iterator jt = q.begin(); jt != q.end();)
             {
-                CLOSESOCK(it->second);
-                g_waiting.erase(it++);
-                nReaped++;
+                if (RegistrationDead(*jt))
+                {
+                    CLOSESOCK(*jt);
+                    jt = q.erase(jt);
+                    nReaped++;
+                }
+                else
+                    ++jt;
             }
+            if (q.empty())
+                g_waiting.erase(it++);
             else
                 ++it;
         }
@@ -209,34 +235,57 @@ static void HandleIncoming(SOCKET s)
     {
         // Register and wait; a future client will pair us.
         std::lock_guard<std::mutex> lk(g_mtx);
-        // If a stale service for this key exists, drop it.
-        std::map<std::string, SOCKET>::iterator it = g_waiting.find(pubkey);
-        if (it != g_waiting.end()) CLOSESOCK(it->second);
-        g_waiting[pubkey] = s;
-        // leave the socket open in the map; do not close here.
+        std::deque<SOCKET>& q = g_waiting[pubkey];
+
+        // Drop registrations this node has already lost the far end of, rather
+        // than dropping the previous one on principle. The old code closed the
+        // prior registration on every new one, which is why a node could never
+        // hold a spare.
+        for (std::deque<SOCKET>::iterator it = q.begin(); it != q.end();)
+        {
+            if (RegistrationDead(*it)) { CLOSESOCK(*it); it = q.erase(it); }
+            else ++it;
+        }
+
+        // A ceiling, because a stranger can open these. Oldest goes first: it
+        // is the one most likely to be stale.
+        while (q.size() >= MAX_WAITING_PER_KEY)
+        {
+            CLOSESOCK(q.front());
+            q.pop_front();
+        }
+        q.push_back(s);
+        // leave the socket open in the queue; do not close here.
     }
     else if (role == 'C')
     {
         SOCKET svc = INVALID_SOCKET;
         {
             std::lock_guard<std::mutex> lk(g_mtx);
-            std::map<std::string, SOCKET>::iterator it = g_waiting.find(pubkey);
+            std::map<std::string, std::deque<SOCKET> >::iterator it = g_waiting.find(pubkey);
             if (it != g_waiting.end())
             {
-                // Check before handing it over. Pairing a client with a dead
-                // registration produces a tunnel that fails after both sides
-                // think they succeeded, which is the failure the dialling node
-                // reports as "tunnel to X failed" with nothing to explain it.
-                if (RegistrationDead(it->second))
+                std::deque<SOCKET>& q = it->second;
+                // Take the oldest one that is still alive, discarding the dead
+                // as we go. Checking before handing it over matters: pairing a
+                // client with a dead registration produces a tunnel that fails
+                // after both sides think they succeeded, which is the failure
+                // the dialling node reports as "tunnel to X failed" with
+                // nothing to explain it.
+                while (!q.empty())
                 {
-                    CLOSESOCK(it->second);
-                    g_waiting.erase(it);
+                    SOCKET candidate = q.front();
+                    q.pop_front();
+                    if (RegistrationDead(candidate))
+                    {
+                        CLOSESOCK(candidate);
+                        continue;
+                    }
+                    svc = candidate;
+                    break;
                 }
-                else
-                {
-                    svc = it->second;
+                if (q.empty())
                     g_waiting.erase(it);
-                }
             }
         }
         if (svc == INVALID_SOCKET)

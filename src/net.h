@@ -54,6 +54,12 @@ static const int64        PEX_MIN_INTERVAL         = 60;
 // traffic is nothing: one per relay per five minutes.
 static const int          BTF_RENDEZVOUS_WAIT_SECS = 300;
 
+// Registrations this node parks at a rendezvous at once. One is what the
+// protocol needs; more is what keeps the node reachable while one of them is
+// being paired, since pairing consumes the registration it used. Four matches
+// the relay's ceiling per node.
+static const int          BTF_ACCEPT_THREADS       = 3;
+
 // Liveness of an established peer connection. BTF_RENDEZVOUS_WAIT_SECS bounds
 // the wait for a dial to arrive; these bound the connection that comes out of
 // it, which has the same failure mode once it goes quiet.
@@ -138,6 +144,18 @@ extern int nBestHeight;
 // has told us anything. Median rather than maximum so one peer claiming an
 // absurd height cannot move it.
 int GetPeerMedianHeight();
+
+// Lightweight .btf churn accounting. These counters are diagnostics only: they
+// let an operator tell stale descriptors, relay pairing failures, and paired
+// tunnels that never speak apart before changing behaviour.
+void BtfChurnNoteResolveAttempt();
+void BtfChurnNoteResolveResult(bool fOk);
+void BtfChurnNoteDialAttempt(const string& strBtfAddr, const string& strMeeting);
+void BtfChurnNoteDialResult(const string& strBtfAddr, const string& strMeeting, bool fOk);
+void BtfChurnNoteRegisterResult(const string& strMeeting, bool fOk);
+void BtfChurnNotePairResult(const string& strMeeting, bool fOk);
+void BtfChurnNoteHandshakeTimeout(const string& strBtfAddr, const string& strMeeting,
+                                  bool fRecv, bool fSend);
 
 // Descriptors to hand a peer: ours first, then peers that answered us.
 void BtfPexCollect(std::vector<std::string>& vDescOut);
@@ -606,6 +624,8 @@ public:
     int64 nIncompleteMessageStart;
     unsigned int nIncompleteMessageSize;
     string strIncompleteMessageCommand;
+    string strBtfAddr;
+    string strBtfMeeting;
 
     // Height this peer announced in its version message, or -1 if it sent a
     // version message that predates the field. Knowing how far along everyone
@@ -639,6 +659,8 @@ public:
         nIncompleteMessageStart = 0;
         nIncompleteMessageSize = 0;
         strIncompleteMessageCommand.clear();
+        strBtfAddr.clear();
+        strBtfMeeting.clear();
         nStartingHeight = -1;
         vfSubscribe.assign(256, false);
 

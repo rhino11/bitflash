@@ -51,6 +51,103 @@ int64 nBlocksReceived      = 0;
 int64 nBlocksWithoutParent = 0;
 static int64 nNodeStartTime = 0;
 
+static CCriticalSection cs_btfChurn;
+static int64 nBtfResolveAttempts = 0;
+static int64 nBtfResolveOk = 0;
+static int64 nBtfResolveMiss = 0;
+static int64 nBtfDialAttempts = 0;
+static int64 nBtfDialOk = 0;
+static int64 nBtfDialFailed = 0;
+static int64 nBtfRegisterOk = 0;
+static int64 nBtfRegisterFailed = 0;
+static int64 nBtfPairOk = 0;
+static int64 nBtfPairFailed = 0;
+static int64 nBtfHandshakeNoRecv = 0;
+static int64 nBtfHandshakeNoSend = 0;
+static int64 nBtfHandshakeSilent = 0;
+static string strBtfLastDialFail;
+static string strBtfLastHandshakeTimeout;
+
+void BtfChurnNoteResolveAttempt()
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+        nBtfResolveAttempts++;
+}
+
+void BtfChurnNoteResolveResult(bool fOk)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        if (fOk) nBtfResolveOk++;
+        else    nBtfResolveMiss++;
+    }
+}
+
+void BtfChurnNoteDialAttempt(const string& strBtfAddr, const string& strMeeting)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+        nBtfDialAttempts++;
+    LogPrint("net", "btfchurn: dial attempt addr=%s meeting=%s\n",
+             strBtfAddr.c_str(), strMeeting.c_str());
+}
+
+void BtfChurnNoteDialResult(const string& strBtfAddr, const string& strMeeting, bool fOk)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        if (fOk)
+            nBtfDialOk++;
+        else
+        {
+            nBtfDialFailed++;
+            strBtfLastDialFail = strBtfAddr + " via " + strMeeting;
+        }
+    }
+    LogPrint("net", "btfchurn: dial %s addr=%s meeting=%s\n",
+             fOk ? "ok" : "failed", strBtfAddr.c_str(), strMeeting.c_str());
+}
+
+void BtfChurnNoteRegisterResult(const string& strMeeting, bool fOk)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        if (fOk) nBtfRegisterOk++;
+        else    nBtfRegisterFailed++;
+    }
+    LogPrint("net", "btfchurn: register %s meeting=%s\n",
+             fOk ? "ok" : "failed", strMeeting.c_str());
+}
+
+void BtfChurnNotePairResult(const string& strMeeting, bool fOk)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        if (fOk) nBtfPairOk++;
+        else    nBtfPairFailed++;
+    }
+    LogPrint("net", "btfchurn: pair %s meeting=%s\n",
+             fOk ? "ok" : "timeout-or-drop", strMeeting.c_str());
+}
+
+void BtfChurnNoteHandshakeTimeout(const string& strBtfAddr, const string& strMeeting,
+                                  bool fRecv, bool fSend)
+{
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        if (!fRecv && !fSend)
+            nBtfHandshakeSilent++;
+        else
+        {
+            if (!fRecv) nBtfHandshakeNoRecv++;
+            if (!fSend) nBtfHandshakeNoSend++;
+        }
+        strBtfLastHandshakeTimeout = strprintf("%s via %s recv=%d send=%d",
+                                               strBtfAddr.empty() ? "unknown" : strBtfAddr.c_str(),
+                                               strMeeting.empty() ? "unknown" : strMeeting.c_str(),
+                                               fRecv, fSend);
+    }
+}
+
 // --- Socket accounting (implementation lives in sockcount.h) --------------
 static const char* pszSockSite[SOCK_SITES] = {
     "external-ip probe", "listen socket", "inbound accept",
@@ -199,19 +296,64 @@ string GetDiagnosticsText()
 
     str += SockAccountingText();
 
-    str += "\n  peer                          dir  height   last recv   last send   unsent\n";
+    int64 nResolveAttempts, nResolveOk, nResolveMiss;
+    int64 nDialAttempts, nDialOk, nDialFailed;
+    int64 nRegisterOk, nRegisterFailed, nPairOk, nPairFailed;
+    int64 nHandshakeNoRecv, nHandshakeNoSend, nHandshakeSilent;
+    string strLastDialFail, strLastHandshakeTimeout;
+    CRITICAL_BLOCK(cs_btfChurn)
+    {
+        nResolveAttempts = nBtfResolveAttempts;
+        nResolveOk = nBtfResolveOk;
+        nResolveMiss = nBtfResolveMiss;
+        nDialAttempts = nBtfDialAttempts;
+        nDialOk = nBtfDialOk;
+        nDialFailed = nBtfDialFailed;
+        nRegisterOk = nBtfRegisterOk;
+        nRegisterFailed = nBtfRegisterFailed;
+        nPairOk = nBtfPairOk;
+        nPairFailed = nBtfPairFailed;
+        nHandshakeNoRecv = nBtfHandshakeNoRecv;
+        nHandshakeNoSend = nBtfHandshakeNoSend;
+        nHandshakeSilent = nBtfHandshakeSilent;
+        strLastDialFail = strBtfLastDialFail;
+        strLastHandshakeTimeout = strBtfLastHandshakeTimeout;
+    }
+    str += "\n  .btf churn\n";
+    str += strprintf("  resolves          %lld attempts, %lld ok, %lld no descriptor\n",
+                     (long long)nResolveAttempts, (long long)nResolveOk,
+                     (long long)nResolveMiss);
+    str += strprintf("  outbound dials    %lld attempts, %lld ok, %lld failed\n",
+                     (long long)nDialAttempts, (long long)nDialOk,
+                     (long long)nDialFailed);
+    str += strprintf("  rendezvous local  register ok/fail %lld/%lld, pair ok/drop %lld/%lld\n",
+                     (long long)nRegisterOk, (long long)nRegisterFailed,
+                     (long long)nPairOk, (long long)nPairFailed);
+    str += strprintf("  handshake grace   silent %lld, no recv %lld, no send %lld\n",
+                     (long long)nHandshakeSilent, (long long)nHandshakeNoRecv,
+                     (long long)nHandshakeNoSend);
+    if (!strLastDialFail.empty())
+        str += strprintf("  last dial failure %s\n", strLastDialFail.c_str());
+    if (!strLastHandshakeTimeout.empty())
+        str += strprintf("  last handshake    %s\n", strLastHandshakeTimeout.c_str());
+
+    str += "\n  peer                          dir  height   last recv   last send   unsent  via\n";
     foreach(CNode* pnode, vCopy)
     {
         int nSendSize = 0;
         TRY_CRITICAL_BLOCK(pnode->cs_vSend)
             nSendSize = (int)pnode->vSend.size();
-        str += strprintf("  %-28s %-4s %6d  %10s  %10s  %7d\n",
+        string strVia;
+        if (!pnode->strBtfMeeting.empty())
+            strVia = pnode->strBtfMeeting;
+        str += strprintf("  %-28s %-4s %6d  %10s  %10s  %7d  %s\n",
                          pnode->addr.ToString().substr(0, 28).c_str(),
                          pnode->fInbound ? "in" : "out",
                          pnode->nStartingHeight,
                          FormatAge(pnode->nLastRecv ? nNow - pnode->nLastRecv : -1).c_str(),
                          FormatAge(pnode->nLastSend ? nNow - pnode->nLastSend : -1).c_str(),
-                         nSendSize);
+                         nSendSize,
+                         strVia.substr(0, 28).c_str());
     }
     return str;
 }
@@ -814,30 +956,41 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
         return pnode;
     }
 
+    BtfChurnNoteDialAttempt(strBtfAddr, strMeeting);
     size_t colon = strMeeting.rfind(':');
     if (colon == string::npos)
+    {
+        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
         return NULL;
+    }
     string strHost = strMeeting.substr(0, colon);
     int nPort = atoi(strMeeting.substr(colon + 1).c_str());
     if (nPort <= 0 || nPort > 65535)
+    {
+        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
         return NULL;
+    }
 
     btf_socket_t hSocket = btf::BtfClientTunnel(strHost.c_str(), (unsigned short)nPort, pk, enc_pub);
     if (hSocket == INVALID_SOCKET)
     {
         if (fDebug)
             LogPrint("net", "ConnectNodeBtf: tunnel to %s via %s failed\n", strBtfAddr.c_str(), strMeeting.c_str());
+        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
         return NULL;
     }
 
     if (fDebug)
         LogPrint("net", "connected %s via rendezvous %s\n", strBtfAddr.c_str(), strMeeting.c_str());
+    BtfChurnNoteDialResult(strBtfAddr, strMeeting, true);
 
     // This one answered -- worth trying first next time we start.
     RememberBtfPeer(strBtfAddr, strMeeting, enc_pub);
 
     // Add node
     pnode = new CNode(hSocket, addr, false);
+    pnode->strBtfAddr = strBtfAddr;
+    pnode->strBtfMeeting = strMeeting;
     pnode->AddRef();
     CRITICAL_BLOCK(cs_vNodes)
         vNodes.push_back(pnode);
@@ -863,12 +1016,15 @@ CNode* ConnectNodeBtf(const string& strBtfAddr)
 
     string strMeeting;
     unsigned char enc_pub[32];
+    BtfChurnNoteResolveAttempt();
     if (!BtfResolve(strBtfAddr, strMeeting, enc_pub))
     {
+        BtfChurnNoteResolveResult(false);
         if (fDebug)
             LogPrint("net", "ConnectNodeBtf: could not resolve a descriptor for %s\n", strBtfAddr.c_str());
         return NULL;
     }
+    BtfChurnNoteResolveResult(true);
     return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, enc_pub);
 }
 
@@ -951,12 +1107,14 @@ void ThreadBtfAccept(void* parg)
         }
         if (rv == btf::RV_INVALID)
         {
+            BtfChurnNoteRegisterResult(strMeeting, false);
             LogPrint("net", "rendezvous: could not register at %s, trying another\n",
                      strMeeting.c_str());
             iRelay++;       // this relay is down/attacked -> try the next one
             Sleep(3000);
             continue;
         }
+        BtfChurnNoteRegisterResult(strMeeting, true);
 
         // Registered. Advertise THIS relay now, while we are listed and before
         // anybody dials -- a descriptor naming it is what makes a dial possible
@@ -971,7 +1129,9 @@ void ThreadBtfAccept(void* parg)
         // here, the node stopped being reachable, and nothing in the log said
         // so. Re-registering every few minutes when nobody has dialled costs
         // one reconnect and removes the whole failure mode.
-        if (!btf::RvServiceWaitPaired(rv, BTF_RENDEZVOUS_WAIT_SECS))
+        bool fPaired = btf::RvServiceWaitPaired(rv, BTF_RENDEZVOUS_WAIT_SECS);
+        BtfChurnNotePairResult(strMeeting, fPaired);
+        if (!fPaired)
         {
             btf::RvClose(rv);
             LogPrint("net", "rendezvous: no dial at %s within %ds (or it dropped us), "
@@ -981,7 +1141,11 @@ void ThreadBtfAccept(void* parg)
 
         btf_socket_t hSocket = btf::BtfServiceWrap(rv, sk);
         if (hSocket == INVALID_SOCKET)
+        {
+            LogPrint("net", "rendezvous: paired at %s but channel setup failed\n",
+                     strMeeting.c_str());
             continue;
+        }
 
         // The dialer is anonymous (its pubkey never reaches us), so tag the
         // connection with a random marker address.
@@ -991,6 +1155,8 @@ void ThreadBtfAccept(void* parg)
 
         LogPrint("net", "accepted .btf connection via rendezvous %s\n", strMeeting.c_str());
         CNode* pnode = new CNode(hSocket, addr, true);
+        pnode->strBtfAddr = "inbound";
+        pnode->strBtfMeeting = strMeeting;
         pnode->AddRef();
         CRITICAL_BLOCK(cs_vNodes)
             vNodes.push_back(pnode);
@@ -1457,6 +1623,9 @@ void ThreadSocketHandler2(void* parg)
             {
                 if (pnode->nLastRecv == 0 || pnode->nLastSend == 0)
                 {
+                    if (!pnode->strBtfMeeting.empty())
+                        BtfChurnNoteHandshakeTimeout(pnode->strBtfAddr, pnode->strBtfMeeting,
+                                                     pnode->nLastRecv != 0, pnode->nLastSend != 0);
                     LogPrint("net", "socket no message in first %d seconds, recv=%d send=%d\n",
                              BTF_HANDSHAKE_GRACE_SECS, pnode->nLastRecv != 0, pnode->nLastSend != 0);
                     pnode->fDisconnect = true;
@@ -1803,9 +1972,22 @@ bool StartNode(string& strError)
 
     // Anonymous inbound: this node's .btf hidden service, reachable through the
     // meeting relay without exposing our IP or needing a public port.
+    //
+    // Several of these, not one. Each holds its own registration at a
+    // rendezvous, and a registration is consumed the moment a caller is paired
+    // with it -- so with a single thread the node is unreachable for the whole
+    // gap between being paired and registering again. Measured from a node's
+    // own counters: half of all outbound dials failed for exactly that reason,
+    // 15 of 30 in eleven minutes, while descriptors resolved 53 times out of
+    // 54. Spares parked at the relay close that gap.
+    //
+    // Needs a relay that keeps more than one registration per node; against an
+    // older relay the extra threads are harmless, because it drops the previous
+    // registration on each new one and the node ends up where it started.
     if (!vBtfMeetingRelays.empty())
-        if (_beginthread(ThreadBtfAccept, 0, NULL) == -1)
-            printf("Error: _beginthread(ThreadBtfAccept) failed\n");
+        for (int i = 0; i < BTF_ACCEPT_THREADS; i++)
+            if (_beginthread(ThreadBtfAccept, 0, NULL) == -1)
+                printf("Error: _beginthread(ThreadBtfAccept) failed\n");
 
     // Anonymous outbound: keep a connection to a specific .btf peer, if asked.
     if (!strBtfConnect.empty())

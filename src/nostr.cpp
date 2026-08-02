@@ -1596,6 +1596,8 @@ static void ConnectDiscoveredBtfPeers()
     // handshakes refused, which then looks exactly like "dead peers" even
     // though the descriptors were perfectly resolvable.
     map<string, BtfResolvedPeer> resolved;
+    for (const string& addr : candidates)
+        BtfChurnNoteResolveAttempt();
     BtfResolveMany(candidates, resolved);
 
     // Candidates whose descriptor didn't resolve this pass are recorded as a
@@ -1608,9 +1610,11 @@ static void ConnectDiscoveredBtfPeers()
         {
             if (resolved.count(addr))
             {
+                BtfChurnNoteResolveResult(true);
                 toDial.push_back(addr);
                 continue;
             }
+            BtfChurnNoteResolveResult(false);
             int n = ++g_btfPeerFails[addr];
             int64 cap = (n >= BTF_CHRONIC_FAIL_THRESHOLD) ? BTF_BACKOFF_CAP_SECS_DEAD
                                                            : BTF_BACKOFF_CAP_SECS;
