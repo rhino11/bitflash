@@ -67,11 +67,14 @@ Two more reasons, both measured rather than theorised:
 - **Before 1.2.13** a node closed a disconnected peer's socket twice and left the
   closed handle in its `select()` set, where it made `select()` fail on every
   iteration. The node then spent its socket loop in an error path instead of
-  reading its peers. Two nodes side by side on the same machine, same network:
-  the one without the fix held 11 peers, the one with it held 21.
+  reading its peers — the deaf-node behaviour reported since 1.2.7. Two nodes
+  side by side on one machine, same network: the one without the fix held 11
+  peers and logged 741 spurious disconnections; the one with it held 21 and
+  logged none. On 1.2.13 in production, two mining nodes hold 13 and 18 peers
+  with zero.
 - **Before 1.2.11** a long-running Windows node accumulated sockets it never
   released — 1262 of them in 26 hours on one machine, each holding an ephemeral
-  port.
+  port. Restarting returned them; upgrading stops them accumulating.
 
 Your wallet and chain data live in `%APPDATA%\Bitflash` (Windows) or
 `~/.bitflash` (Linux) and are shared by every version, so upgrading is just
