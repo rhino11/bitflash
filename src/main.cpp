@@ -1719,7 +1719,7 @@ bool CBlock::CheckBlock() const
     // that can be verified before saving an orphan block.
 
     // Size limits
-    if (vtx.empty() || vtx.size() > MAX_SIZE || ::GetSerializeSize(*this, SER_DISK) > MAX_SIZE)
+    if (!CheckSizeLimits())
         return error("CheckBlock() : size limits failed");
 
     // Check timestamp

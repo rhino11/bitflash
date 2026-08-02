@@ -29,6 +29,10 @@ static const unsigned int MAX_ORPHAN_BLOCKS = 200;
 // so a block within the size limit could still hold millions of them and take
 // the network minutes of CPU to reject. Same value Bitcoin settled on.
 static const unsigned int MAX_BLOCK_SIGOPS = 20000;
+// Consensus block-size ceiling. MAX_SIZE is the serializer's generic safety
+// limit (32 MB), not a block rule. Bitcoin 0.1.0 predated the later 1 MB block
+// cap, so this tree inherited no real block-size consensus limit.
+static const unsigned int MAX_BLOCK_SIZE = 1000000;
 static const int64 COIN = 100000000;
 // Total Bitflash emission: identical to Bitcoin (21 million).
 // MAX_MONEY guards against the value overflow bug (CVE-2010-5139), which in
@@ -1051,6 +1055,23 @@ public:
         // Memory-hard PROOF-OF-WORK hash (RandomX) over the 80-byte header.
         // This is the one that must be <= target (nBits).
         return RandomXPoWHash((const void*)BEGIN(nVersion), END(nNonce) - BEGIN(nVersion));
+    }
+
+    bool CheckSizeLimits() const
+    {
+        // The middle test compares a transaction *count* against a *byte*
+        // limit. It is inherited from 0.1.0, where the same line compared
+        // vtx.size() against MAX_SIZE, and it is inert: the smallest possible
+        // transaction serializes to more than sixty bytes, so a block holding
+        // over a million of them cannot also weigh under a megabyte.
+        //
+        // Kept rather than removed. This is consensus code, and a rewrite that
+        // reads better is still a rewrite that can change what the network
+        // accepts. Written down so the next reader does not have to derive it,
+        // or "fix" it into something that does.
+        return (!vtx.empty() &&
+                vtx.size() <= MAX_BLOCK_SIZE &&
+                ::GetSerializeSize(*this, SER_DISK) <= MAX_BLOCK_SIZE);
     }
 
 

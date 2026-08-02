@@ -531,6 +531,64 @@ static int RunNetMessageSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static CBlock MakeSizedConsensusBlock(size_t nScriptBytes)
+{
+    CTransaction tx;
+    tx.vin.push_back(CTxIn(COutPoint(), CScript() << 1 << 1));
+    tx.vout.push_back(CTxOut(0, CScript()));
+    tx.vout[0].scriptPubKey.insert(tx.vout[0].scriptPubKey.end(), nScriptBytes, 0);
+
+    CBlock block;
+    block.vtx.push_back(tx);
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    block.nVersion = 1;
+    block.nTime = GetAdjustedTime();
+    block.nBits = bnProofOfWorkLimit.GetCompact();
+    block.nNonce = 0;
+    return block;
+}
+
+static int RunConsensusLimitsSelfTest()
+{
+    fflush(stdout);
+    printf("consensus-limits self-test\n");
+
+    int nFail = 0;
+    try
+    {
+        nFail += Check(MAX_BLOCK_SIZE == 1000000,
+                       "the consensus block-size cap is 1 MB") ? 0 : 1;
+        nFail += Check(MAX_BLOCK_SIZE < MAX_SIZE,
+                       "the block cap is tighter than the serializer cap") ? 0 : 1;
+
+        CBlock small = MakeSizedConsensusBlock(100);
+        nFail += Check(small.CheckSizeLimits(),
+                       "a small block is within the consensus size limit") ? 0 : 1;
+
+        CBlock oversized = MakeSizedConsensusBlock(MAX_BLOCK_SIZE);
+        unsigned int nSerialized = ::GetSerializeSize(oversized, SER_DISK);
+        nFail += Check(nSerialized > MAX_BLOCK_SIZE && nSerialized <= MAX_SIZE,
+                       "the test block sits between 1 MB and the old 32 MB cap") ? 0 : 1;
+        nFail += Check(!oversized.CheckSizeLimits(),
+                       "a block above 1 MB is outside the consensus size limit") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -541,8 +599,10 @@ int RunSelfTest(const std::string& name)
         return RunWalletHDSelfTest();
     if (name == "net-message")
         return RunNetMessageSelfTest();
+    if (name == "consensus-limits")
+        return RunConsensusLimitsSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, net-message\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, net-message, consensus-limits\n");
     return 1;
 }

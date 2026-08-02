@@ -140,3 +140,4 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=wallet-keypool
 	./bitflash-node -selftest=wallet-hd
 	./bitflash-node -selftest=net-message
+	./bitflash-node -selftest=consensus-limits
