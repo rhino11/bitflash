@@ -638,10 +638,26 @@ public:
         PushMessage("version", VERSION, nLocalServices, nTime, addr, nBestHeight);
     }
 
+    // Disconnect() closes the socket and sets this to INVALID_SOCKET, so by the
+    // time a node is deleted there is normally nothing left to do here. It used
+    // not to: Disconnect() closed the handle and left the number in place, and
+    // this destructor closed that same number a second time -- with a raw
+    // closesocket() that the socket accounting never saw, so neither the double
+    // close nor the stale claim showed up in any report.
+    //
+    // A double close is not a harmless no-op. Between the two, the operating
+    // system is free to hand that number to a new socket -- this node opens
+    // hundreds a minute -- and the second close then takes down a connection
+    // that belongs to somebody else, which the log can only report as a peer
+    // vanishing for no reason. `dropping node: its socket is no longer valid`
+    // is what that looks like from the outside.
     ~CNode()
     {
         if (hSocket != INVALID_SOCKET)
-            closesocket(hSocket);
+        {
+            BtfCloseSocket(hSocket);
+            hSocket = INVALID_SOCKET;
+        }
     }
 
 private:

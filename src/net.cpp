@@ -1030,7 +1030,12 @@ void CNode::Disconnect()
 {
     LogPrint("net", "disconnecting node %s\n", addr.ToString().c_str());
 
+    // Invalidate before anything else can look at it. This used to close the
+    // socket and leave the handle number sitting in the object, so ~CNode
+    // closed it a second time and the select loop kept arming it in the
+    // meantime. See the note on ~CNode in net.h.
     BtfCloseSocket(hSocket);
+    hSocket = INVALID_SOCKET;
 
     // All of a nodes broadcasts and subscriptions are automatically torn down
     // when it goes down, so a node has to stay up to keep its broadcast going.
@@ -1210,6 +1215,11 @@ void ThreadSocketHandler2(void* parg)
             {
                 if (nWatched >= FD_SETSIZE)
                     break;
+                // A disconnected node stays in vNodes until its references go.
+                // Arming its closed handle asks select() to watch a number the
+                // operating system may already have given to somebody else.
+                if (pnode->hSocket == INVALID_SOCKET)
+                    continue;
                 FD_SET(pnode->hSocket, &fdsetRecv);
                 nWatched++;
                 hSocketMax = max(hSocketMax, pnode->hSocket);
@@ -1272,6 +1282,11 @@ void ThreadSocketHandler2(void* parg)
             {
                 foreach(CNode* pnode, vNodes)
                 {
+                    // Already disconnected: its handle is gone on purpose, and
+                    // reporting it here would name the wrong node for a select()
+                    // failure it did not cause.
+                    if (pnode->hSocket == INVALID_SOCKET)
+                        continue;
                     int nType = 0;
 #ifdef _WIN32
                     int nTypeLen = sizeof(nType);
