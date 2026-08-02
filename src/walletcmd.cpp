@@ -30,6 +30,12 @@ static const int RESTORE_MAX     = 10000;
 // can stop just before that change output.
 static const int RESTORE_MIN_SCAN = KEYPOOL_SIZE + RESTORE_BATCH;
 
+// Quiet batches required before giving up. Three, because the wallet's own
+// bookkeeping can leave a gap of two hundred used-nothing indices between one
+// used address and the next -- see the note at the stop condition. One was not
+// enough and cost a real balance in testing.
+static const int RESTORE_QUIET_BATCHES = 3;
+
 int CmdNewPhrase()
 {
     AttachTerminal();
@@ -110,6 +116,7 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
     // because the scan asks the wallet what belongs to it.
     int nTotalDerived = (int)nHDNext;
     int nStopDepth = max(nMinDepth, RESTORE_MIN_SCAN);
+    int nQuietBatches = 0;
     while (nTotalDerived < RESTORE_MAX)
     {
         // Count wallet transactions, not scan hits.
@@ -149,9 +156,22 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             fnProgress(pArg, nTotalDerived, (int)nRecoveredNow);
         }
 
-        // A whole batch with nothing in it means far enough -- unless the
-        // caller asked to look deeper anyway.
-        if (nWalletAfter == nWalletBefore && nTotalDerived >= nStopDepth)
+        // Stopping needs more than one quiet batch, because this wallet digs
+        // gaps in its own derivation. A restore leaves nHDNext at the depth it
+        // scanned, the key pool then derives KEYPOOL_SIZE more, and change
+        // takes the index after that -- so the address used *after* a restore
+        // can sit two hundred indices past the last one used before it, with
+        // nothing in between.
+        //
+        // Measured, on a real wallet with real coin: restore, spend once, and
+        // the coins land at indices 201 and 302. Restoring again with the old
+        // one-batch rule stopped at 201 and reported a single transaction. The
+        // money was derived, covered by the phrase, and invisible.
+        if (nWalletAfter == nWalletBefore)
+            nQuietBatches++;
+        else
+            nQuietBatches = 0;
+        if (nQuietBatches >= RESTORE_QUIET_BATCHES && nTotalDerived >= nStopDepth)
             break;
     }
 
@@ -248,6 +268,80 @@ int CmdShowDerived(int nCount)
         }
         printf("%6d  %s\n", i, PubKeyToAddress(key.GetPubKey()).c_str());
     }
+    fflush(stdout);
+    return 0;
+}
+
+// Spend, from the command line.
+//
+// SendMoney() has been in this tree since 0.1.0 and only the window ever called
+// it, so a headless node could be paid and could never pay: it held a balance
+// with no way to move it. Found while trying to prove that change from a wallet
+// with a recovery phrase lands on a key the phrase can reproduce -- a test that
+// needs a spend, and there was no way to make one without a screen.
+//
+// Deliberately strict, because this moves money and there is nobody to click
+// "are you sure": the address must decode, the amount must parse and be
+// positive, and anything else refuses before touching the wallet.
+int CmdSendTo(const std::string& strArg)
+{
+    AttachTerminal();
+
+    std::string::size_type comma = strArg.rfind(',');
+    if (comma == std::string::npos)
+    {
+        fprintf(stderr, "Usage: -sendto=ADDRESS,AMOUNT   (for example -sendto=B7kQ...,1.5)\n");
+        return 1;
+    }
+    std::string strAddr   = strArg.substr(0, comma);
+    std::string strAmount = strArg.substr(comma + 1);
+
+    // Trim, so a quoted argument with stray spaces does not silently become an
+    // invalid address and send nothing.
+    while (!strAddr.empty()   && isspace((unsigned char)strAddr[0]))                strAddr.erase(0, 1);
+    while (!strAddr.empty()   && isspace((unsigned char)strAddr[strAddr.size()-1])) strAddr.erase(strAddr.size()-1);
+    while (!strAmount.empty() && isspace((unsigned char)strAmount[0]))              strAmount.erase(0, 1);
+    while (!strAmount.empty() && isspace((unsigned char)strAmount[strAmount.size()-1])) strAmount.erase(strAmount.size()-1);
+
+    uint160 hash160;
+    if (!AddressToHash160(strAddr, hash160))
+    {
+        fprintf(stderr, "Not a valid address: %s\n", strAddr.c_str());
+        return 1;
+    }
+
+    int64 nValue = 0;
+    if (!ParseMoney(strAmount.c_str(), nValue) || nValue <= 0)
+    {
+        fprintf(stderr, "Not a valid amount: %s\n", strAmount.c_str());
+        return 1;
+    }
+
+    std::string strWhy;
+    if (!CanScanWalletTransactions(strWhy))
+    {
+        // Spending needs the chain: without it the wallet cannot tell which of
+        // its outputs are still unspent, and a transaction built on that guess
+        // is one the network will reject.
+        fprintf(stderr, "The block chain is not loaded, so this wallet cannot tell "
+                        "which coins it still has. Start the node and let it sync first.\n");
+        return 1;
+    }
+
+    CScript scriptPubKey;
+    scriptPubKey << OP_DUP << OP_HASH160 << hash160 << OP_EQUALVERIFY << OP_CHECKSIG;
+
+    CWalletTx wtx;
+    if (!SendMoney(scriptPubKey, nValue, wtx))
+    {
+        fprintf(stderr, "The transaction was not created. Usually that means the "
+                        "balance is too low once the fee is counted.\n");
+        return 1;
+    }
+
+    printf("Sent %s to %s\n", FormatMoney(nValue).c_str(), strAddr.c_str());
+    printf("  transaction %s\n", wtx.GetHash().ToString().c_str());
+    printf("  it needs to be relayed and mined before the other side sees it.\n");
     fflush(stdout);
     return 0;
 }
