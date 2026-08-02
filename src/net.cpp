@@ -61,8 +61,9 @@ static const char* pszSockSite[SOCK_SITES] = {
 
 static string SockAccountingText()
 {
-    long long nOpened[SOCK_SITES], nClosed[SOCK_SITES], nFailed[SOCK_SITES], nUntagged = 0;
-    BtfSockSnapshot(nOpened, nClosed, nFailed, &nUntagged);
+    long long nOpened[SOCK_SITES], nClosed[SOCK_SITES], nFailed[SOCK_SITES];
+    long long nCollided[SOCK_SITES], nUntagged = 0;
+    BtfSockSnapshot(nOpened, nClosed, nFailed, nCollided, &nUntagged);
 
     long long nUnconn[SOCK_SITES];
     BtfSockLiveUnconnected(nUnconn);
@@ -111,6 +112,19 @@ static string SockAccountingText()
                                       mi->first, mi->second);
             str += strprintf("  %-24s %s\n", pszSockSite[i], strCodes.c_str());
         }
+    }
+
+    // A handle number handed out again while a site still claimed it. Windows
+    // only reuses a number after the last close, so this says that site's
+    // bookkeeping outlived its socket -- and it will close that number again,
+    // on somebody else's connection. Any value above zero is a bug with a name
+    // attached.
+    for (int i = 0; i < SOCK_SITES; i++)
+    {
+        if (nCollided[i] == 0)
+            continue;
+        str += strprintf("  handle reused while %s still claimed it: %lld\n",
+                         pszSockSite[i], nCollided[i]);
     }
     return str;
 }

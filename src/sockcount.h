@@ -79,10 +79,18 @@ struct BtfSockAccount
     // leak -- see the note at the top of this file -- but it is the one number
     // that would say so if it ever became the leak.
     std::map<int, long long> mapCloseErr[SOCK_SITES];
+    // A handle number arriving from socket()/accept() while some site still
+    // claims it. The operating system only hands a number back out after the
+    // last close of it, so a collision means somebody's bookkeeping outlived
+    // its socket -- and whoever still believes they own that number will
+    // eventually close it, taking down a connection that now belongs to
+    // someone else. Counted against the site that was still holding it, which
+    // is the one to go and read.
+    long long nCollided[SOCK_SITES];
     long long nClosedUntagged;
     BtfSockAccount() : nClosedUntagged(0)
     {
-        for (int i = 0; i < SOCK_SITES; i++) { nOpened[i] = 0; nClosed[i] = 0; nCloseFailed[i] = 0; }
+        for (int i = 0; i < SOCK_SITES; i++) { nOpened[i] = 0; nClosed[i] = 0; nCloseFailed[i] = 0; nCollided[i] = 0; }
     }
 };
 
@@ -102,6 +110,9 @@ inline SOCKET BtfSocketTag(SOCKET hSocket, int nSite)
         return hSocket;
     BtfSockAccount& a = BtfSockAccounting();
     std::lock_guard<std::mutex> lock(a.mtx);
+    std::map<SOCKET, int>::iterator mi = a.mapSite.find(hSocket);
+    if (mi != a.mapSite.end())
+        a.nCollided[mi->second]++;
     a.mapSite[hSocket] = nSite;
     a.nOpened[nSite]++;
     return hSocket;
@@ -151,7 +162,8 @@ inline int BtfCloseSocket(SOCKET hSocket)
 
 // Copy the counters out. Formatting lives in net.cpp, which has strprintf --
 // and which the relay build does not compile.
-inline void BtfSockSnapshot(long long* pOpened, long long* pClosed, long long* pFailed, long long* pUntagged)
+inline void BtfSockSnapshot(long long* pOpened, long long* pClosed, long long* pFailed,
+                            long long* pCollided, long long* pUntagged)
 {
     BtfSockAccount& a = BtfSockAccounting();
     std::lock_guard<std::mutex> lock(a.mtx);
@@ -160,6 +172,7 @@ inline void BtfSockSnapshot(long long* pOpened, long long* pClosed, long long* p
         pOpened[i] = a.nOpened[i];
         pClosed[i] = a.nClosed[i];
         pFailed[i] = a.nCloseFailed[i];
+        pCollided[i] = a.nCollided[i];
     }
     *pUntagged = a.nClosedUntagged;
 }
