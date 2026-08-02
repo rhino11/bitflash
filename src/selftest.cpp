@@ -334,6 +334,10 @@ static int RunWalletHDSelfTest()
         nFail += Check(nRandomPoolSize == KEYPOOL_SIZE,
                        "a wallet can start with a random key pool") ? 0 : 1;
 
+        // The address the wallet was showing before any of this. It has to
+        // survive under a name that says it is not covered by the phrase.
+        std::string strPreSeedAddr = PubKeyToAddress(keyUser.GetPubKey());
+
         nFail += Check(SetHDSeedFromMnemonic(strPhraseA, strError),
                        "a valid phrase installs a seed") ? 0 : 1;
         nFail += Check(HaveHDSeed(), "the wallet reports having a seed") ? 0 : 1;
@@ -355,6 +359,14 @@ static int RunWalletHDSelfTest()
                        "the default receiving key is derived from the phrase") ? 0 : 1;
         nFail += Check(WalletHasPrivateKey(vchDefaultKey),
                        "the derived default key is stored in wallet.dat") ? 0 : 1;
+
+        std::string strNewAddr = PubKeyToAddress(vchDefaultKey);
+        nFail += Check(strPreSeedAddr != strNewAddr,
+                       "the visible address stops being the pre-seed one") ? 0 : 1;
+        nFail += Check(mapAddressBook.count(strPreSeedAddr) > 0 &&
+                       mapAddressBook[strPreSeedAddr] !=
+                           mapAddressBook[strNewAddr],
+                       "the pre-seed address is kept, named apart from the new one") ? 0 : 1;
 
         std::vector<unsigned char> vchBefore = vchHDMaster;
         nFail += Check(!SetHDSeedFromMnemonic("not a mnemonic at all", strError),

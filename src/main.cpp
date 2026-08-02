@@ -254,21 +254,46 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
 
     CRITICAL_BLOCK(cs_keyPool)
     {
-        // Old private keys stay in wallet.dat, but old unused pool records must
-        // not survive the seed. Otherwise the next address can still be random
-        // while the UI says a recovery phrase exists.
+        // The pool is cleared before the seed is written, and the order is the
+        // safe one of the two. Old private keys stay in wallet.dat either way;
+        // what is at stake is which half-finished state a failure can leave.
+        //
+        //   clear, then write -- a failed write leaves the old seed and an
+        //   empty pool. TopUpKeyPool refills it, and nothing was promised to
+        //   anybody.
+        //
+        //   write, then clear -- a failed clear leaves a seed installed and the
+        //   old random pool intact. The user has just been shown twelve words
+        //   and the wallet goes on handing out addresses those words cannot
+        //   reproduce. That is the bug this function exists to prevent.
+        //
+        // An earlier comment here said the seed was written first so a failure
+        // left the wallet untouched. That was true of the seed alone and stops
+        // being true once the pool has to move with it.
         if (!ClearKeyPoolRecords(strErrorRet))
             return false;
 
         if (!CWalletDB().WriteHDMaster(master.privateKey, master.chainCode) ||
-            !CWalletDB().WriteHDNext(0))
+            !CWalletDB().WriteHDNext(1))
         {
             strErrorRet = "could not write the seed to wallet.dat";
             return false;
         }
         vchHDMaster    = master.privateKey;
         vchHDChainCode = master.chainCode;
-        nHDNext        = 0;
+
+        // Index 0 is spoken for before it is derived, so a failure below cannot
+        // leave the pool free to hand it out as an ordinary key. The cost of
+        // the counter being ahead of the derivation is one unused index; the
+        // cost of the reverse is the default address and a pool key sharing a
+        // derivation path.
+        nHDNext = 1;
+
+        // Remember which address stops being the default, so it can be named
+        // for what it is. Two entries reading "Your Address" -- one covered by
+        // the phrase and one not -- is the wrong thing to find at the moment a
+        // person has just written twelve words down.
+        vector<unsigned char> vchOldDefault = keyUser.GetPubKey();
 
         CKey key;
         if (!DeriveHDKey(0, key, strErrorRet))
@@ -280,14 +305,15 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
         }
         vector<unsigned char> vchPubKey = key.GetPubKey();
         if (!CWalletDB().WriteDefaultKey(vchPubKey) ||
-            !SetAddressBookName(PubKeyToAddress(vchPubKey), "Your Address") ||
-            !CWalletDB().WriteHDNext(1))
+            !SetAddressBookName(PubKeyToAddress(vchPubKey), "Your Address"))
         {
             strErrorRet = "could not set the default derived receiving key";
             return false;
         }
+        if (!vchOldDefault.empty() && vchOldDefault != vchPubKey)
+            SetAddressBookName(PubKeyToAddress(vchOldDefault),
+                               "Your Address (created before the recovery phrase)");
         keyUser = key;
-        nHDNext = 1;
     }
     return true;
 }
