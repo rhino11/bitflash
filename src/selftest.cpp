@@ -327,9 +327,34 @@ static int RunWalletHDSelfTest()
             throw std::runtime_error("LoadWallet failed");
 
         std::string strError;
+        TopUpKeyPool();
+        int nRandomPoolSize = 0;
+        CRITICAL_BLOCK(cs_keyPool)
+            nRandomPoolSize = (int)mapKeyPool.size();
+        nFail += Check(nRandomPoolSize == KEYPOOL_SIZE,
+                       "a wallet can start with a random key pool") ? 0 : 1;
+
         nFail += Check(SetHDSeedFromMnemonic(strPhraseA, strError),
                        "a valid phrase installs a seed") ? 0 : 1;
         nFail += Check(HaveHDSeed(), "the wallet reports having a seed") ? 0 : 1;
+
+        int nPoolAfterSeed = 0;
+        CRITICAL_BLOCK(cs_keyPool)
+            nPoolAfterSeed = (int)mapKeyPool.size();
+        nFail += Check(nPoolAfterSeed == 0,
+                       "installing a phrase clears the old random key pool") ? 0 : 1;
+        nFail += Check(nHDNext == 1,
+                       "installing a phrase reserves one derived default key") ? 0 : 1;
+
+        CKey keyFirstDerived;
+        if (!DeriveHDKey(0, keyFirstDerived, strError))
+            throw std::runtime_error("default derivation failed: " + strError);
+        std::vector<unsigned char> vchDefaultKey;
+        bool fDefaultRead = CWalletDB("r").ReadDefaultKey(vchDefaultKey);
+        nFail += Check(fDefaultRead && vchDefaultKey == keyFirstDerived.GetPubKey(),
+                       "the default receiving key is derived from the phrase") ? 0 : 1;
+        nFail += Check(WalletHasPrivateKey(vchDefaultKey),
+                       "the derived default key is stored in wallet.dat") ? 0 : 1;
 
         std::vector<unsigned char> vchBefore = vchHDMaster;
         nFail += Check(!SetHDSeedFromMnemonic("not a mnemonic at all", strError),
@@ -378,8 +403,6 @@ static int RunWalletHDSelfTest()
         // With a seed installed the pool must be derived from it, and the
         // counter must move exactly once per key.
         SetHDSeedFromMnemonic(strPhraseA, strError);
-        CRITICAL_BLOCK(cs_keyPool)
-            mapKeyPool.clear();
         unsigned int nNextBefore = nHDNext;
         TopUpKeyPool();
 

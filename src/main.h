@@ -159,8 +159,9 @@ extern vector<unsigned char> vchHDChainCode;  // 32 bytes (IR)
 extern unsigned int nHDNext;                  // next child index to derive
 inline bool HaveHDSeed() { return vchHDMaster.size() == 32 && vchHDChainCode.size() == 32; }
 
-// Install a seed derived from a mnemonic, replacing any existing one, and reset
-// the derivation counter. Writes to wallet.dat. Returns false and leaves the
+// Install a seed derived from a mnemonic, replacing any existing one. The
+// default receiving key is derived immediately, so the next visible address is
+// covered by the phrase. Writes to wallet.dat. Returns false and leaves the
 // wallet untouched if the phrase is not valid.
 bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet);
 

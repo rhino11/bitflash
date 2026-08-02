@@ -94,13 +94,17 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
     if (!CanScanWalletTransactions(strErrorRet))
         return false;
 
+    size_t nWalletStart = 0;
+    CRITICAL_BLOCK(cs_mapWallet)
+        nWalletStart = mapWallet.size();
+
     if (!SetHDSeedFromMnemonic(strMnemonic, strErrorRet))
         return false;
 
     // Derive forward in batches, scanning after each, until a whole batch turns
     // up nothing. Every derived key is written to the wallet before the scan,
     // because the scan asks the wallet what belongs to it.
-    int nTotalDerived = 0;
+    int nTotalDerived = (int)nHDNext;
     while (nTotalDerived < RESTORE_MAX)
     {
         // Count wallet transactions, not scan hits.
@@ -134,7 +138,11 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             nWalletAfter = mapWallet.size();
 
         if (fnProgress)
-            fnProgress(pArg, nTotalDerived, (int)nWalletAfter);
+        {
+            size_t nRecoveredNow = nWalletAfter > nWalletStart ?
+                                   nWalletAfter - nWalletStart : 0;
+            fnProgress(pArg, nTotalDerived, (int)nRecoveredNow);
+        }
 
         // A whole batch with nothing in it means far enough -- unless the
         // caller asked to look deeper anyway.
@@ -148,8 +156,11 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
         mapKeyPool.clear();
     TopUpKeyPool();
 
+    size_t nWalletEnd = 0;
     CRITICAL_BLOCK(cs_mapWallet)
-        nRecoveredRet = (int)mapWallet.size();
+        nWalletEnd = mapWallet.size();
+    nRecoveredRet = (int)(nWalletEnd > nWalletStart ?
+                          nWalletEnd - nWalletStart : 0);
     nDerivedRet = nTotalDerived;
     return true;
 }

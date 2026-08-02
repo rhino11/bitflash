@@ -167,6 +167,20 @@ bool AddKey(const CKey& key)
     return CWalletDB().WriteKey(key.GetPubKey(), key.GetPrivKey());
 }
 
+static bool WalletAlreadyHasKey(const vector<unsigned char>& vchPubKey)
+{
+    CRITICAL_BLOCK(cs_mapKeys)
+        return mapKeys.count(vchPubKey) > 0;
+    return false;
+}
+
+static bool AddKeyIfMissing(const CKey& key)
+{
+    if (WalletAlreadyHasKey(key.GetPubKey()))
+        return true;
+    return AddKey(key);
+}
+
 vector<unsigned char> GenerateNewKey()
 {
     CKey key;
@@ -182,6 +196,23 @@ map<int64, vector<unsigned char> > mapKeyPool;
 vector<unsigned char> vchHDMaster;
 vector<unsigned char> vchHDChainCode;
 unsigned int nHDNext = 0;
+
+static bool ClearKeyPoolRecords(string& strErrorRet)
+{
+    CWalletDB walletdb;
+    for (map<int64, vector<unsigned char> >::const_iterator mi = mapKeyPool.begin();
+         mi != mapKeyPool.end(); ++mi)
+    {
+        if (!walletdb.ErasePool(mi->first))
+        {
+            strErrorRet = strprintf("could not clear old key-pool entry %lld",
+                                    (long long)mi->first);
+            return false;
+        }
+    }
+    mapKeyPool.clear();
+    return true;
+}
 
 bool DeriveHDKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet)
 {
@@ -223,9 +254,12 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
 
     CRITICAL_BLOCK(cs_keyPool)
     {
-        // Written before the globals change, so a failed write leaves the
-        // wallet on the seed it already had rather than on one that exists
-        // only in memory.
+        // Old private keys stay in wallet.dat, but old unused pool records must
+        // not survive the seed. Otherwise the next address can still be random
+        // while the UI says a recovery phrase exists.
+        if (!ClearKeyPoolRecords(strErrorRet))
+            return false;
+
         if (!CWalletDB().WriteHDMaster(master.privateKey, master.chainCode) ||
             !CWalletDB().WriteHDNext(0))
         {
@@ -235,6 +269,25 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
         vchHDMaster    = master.privateKey;
         vchHDChainCode = master.chainCode;
         nHDNext        = 0;
+
+        CKey key;
+        if (!DeriveHDKey(0, key, strErrorRet))
+            return false;
+        if (!AddKeyIfMissing(key))
+        {
+            strErrorRet = "could not write the default derived key to wallet.dat";
+            return false;
+        }
+        vector<unsigned char> vchPubKey = key.GetPubKey();
+        if (!CWalletDB().WriteDefaultKey(vchPubKey) ||
+            !SetAddressBookName(PubKeyToAddress(vchPubKey), "Your Address") ||
+            !CWalletDB().WriteHDNext(1))
+        {
+            strErrorRet = "could not set the default derived receiving key";
+            return false;
+        }
+        keyUser = key;
+        nHDNext = 1;
     }
     return true;
 }
@@ -279,7 +332,7 @@ void TopUpKeyPool()
             // AddKey writes the private key. Order matters: the key is in
             // wallet.dat before anything can point at it, so a crash between
             // the two writes costs an unused key, never a usable one.
-            if (!AddKey(key))
+            if (!AddKeyIfMissing(key))
                 return;
             vector<unsigned char> vchPubKey = key.GetPubKey();
             if (!CWalletDB().WritePool(nIndex, vchPubKey))
