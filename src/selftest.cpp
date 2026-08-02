@@ -470,6 +470,67 @@ static int RunWalletHDSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunNetMessageSelfTest()
+{
+    fflush(stdout);
+    printf("net-message self-test\n");
+
+    int nFail = 0;
+    try
+    {
+        CNode complete(INVALID_SOCKET, CAddress("127.0.0.1"));
+        complete.nVersion = VERSION;
+        complete.vRecv << CMessageHeader("ping", 0);
+        nFail += Check(ProcessMessages(&complete), "a complete empty message processes") ? 0 : 1;
+        nFail += Check(complete.vRecv.empty(), "a complete message is consumed") ? 0 : 1;
+        nFail += Check(!complete.fDisconnect, "a valid ping does not disconnect the peer") ? 0 : 1;
+
+        CNode partial(INVALID_SOCKET, CAddress("127.0.0.1"));
+        partial.nVersion = VERSION;
+        partial.vRecv << CMessageHeader("block", 100);
+        unsigned int nPartialBefore = partial.vRecv.size();
+        nFail += Check(ProcessMessages(&partial), "an incomplete message returns cleanly") ? 0 : 1;
+        nFail += Check(partial.vRecv.size() == nPartialBefore,
+                       "an incomplete message keeps one header in the buffer") ? 0 : 1;
+        nFail += Check(partial.nIncompleteMessageStart != 0,
+                       "an incomplete message starts a timeout clock") ? 0 : 1;
+        nFail += Check(!partial.fDisconnect,
+                       "a fresh incomplete message does not disconnect immediately") ? 0 : 1;
+
+        CNode stale(INVALID_SOCKET, CAddress("127.0.0.1"));
+        stale.nVersion = VERSION;
+        stale.vRecv << CMessageHeader("block", 100);
+        stale.nIncompleteMessageStart = GetTime() - BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS - 1;
+        stale.nIncompleteMessageSize = 100;
+        stale.strIncompleteMessageCommand = "block";
+        ProcessMessages(&stale);
+        nFail += Check(stale.fDisconnect,
+                       "a stale incomplete message disconnects the peer") ? 0 : 1;
+
+        CNode oversized(INVALID_SOCKET, CAddress("127.0.0.1"));
+        oversized.nVersion = VERSION;
+        oversized.vRecv << CMessageHeader("block", MAX_PROTOCOL_MESSAGE_SIZE + 1);
+        ProcessMessages(&oversized);
+        nFail += Check(oversized.fDisconnect,
+                       "an oversized message header disconnects the peer") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -478,8 +539,10 @@ int RunSelfTest(const std::string& name)
         return RunWalletKeyPoolSelfTest();
     if (name == "wallet-hd")
         return RunWalletHDSelfTest();
+    if (name == "net-message")
+        return RunNetMessageSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, net-message\n");
     return 1;
 }

@@ -67,6 +67,13 @@ static const int          BTF_RECV_TIMEOUT_SECS    = 30 * 60;
 static const int          BTF_SEND_STALL_SECS      = 10 * 60;
 static const int          BTF_HANDSHAKE_GRACE_SECS = 60;
 
+// A serialized object cannot be larger than MAX_SIZE, so no valid network
+// message needs the old 256 MB header allowance. Keep the wire cap aligned with
+// what the deserializer can accept and bound how long one peer may sit on a
+// partial payload after a complete header has arrived.
+static const unsigned int MAX_PROTOCOL_MESSAGE_SIZE = MAX_SIZE;
+static const int          BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS = 2 * 60;
+
 // Ceiling on simultaneous connections.
 //
 // ThreadSocketHandler watches every peer through one select(), and select()
@@ -225,7 +232,7 @@ public:
         }
 
         // Message size
-        if (nMessageSize > 0x10000000)
+        if (nMessageSize > MAX_PROTOCOL_MESSAGE_SIZE)
         {
             if (LogAcceptsCategory("net")) printf("CMessageHeader::IsValid() : nMessageSize too large %u\n", nMessageSize);
             return false;
@@ -596,6 +603,9 @@ public:
     int64 nLastSend;
     int64 nLastRecv;
     int64 nLastSendEmpty;
+    int64 nIncompleteMessageStart;
+    unsigned int nIncompleteMessageSize;
+    string strIncompleteMessageCommand;
 
     // Height this peer announced in its version message, or -1 if it sent a
     // version message that predates the field. Knowing how far along everyone
@@ -626,6 +636,9 @@ public:
         nLastSend = 0;
         nLastRecv = 0;
         nLastSendEmpty = GetTime();
+        nIncompleteMessageStart = 0;
+        nIncompleteMessageSize = 0;
+        strIncompleteMessageCommand.clear();
         nStartingHeight = -1;
         vfSubscribe.assign(256, false);
 

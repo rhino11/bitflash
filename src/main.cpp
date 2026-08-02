@@ -181,6 +181,39 @@ static bool AddKeyIfMissing(const CKey& key)
     return AddKey(key);
 }
 
+static bool DeriveNextHDWalletKey(vector<unsigned char>& vchPubKeyRet, string& strErrorRet)
+{
+    vchPubKeyRet.clear();
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        if (!HaveHDSeed())
+        {
+            strErrorRet = "no seed";
+            return false;
+        }
+
+        CKey key;
+        if (!DeriveHDKey(nHDNext, key, strErrorRet))
+            return false;
+        if (!AddKeyIfMissing(key))
+        {
+            strErrorRet = "could not write the derived key to wallet.dat";
+            return false;
+        }
+
+        unsigned int nNext = nHDNext + 1;
+        if (!CWalletDB().WriteHDNext(nNext))
+        {
+            strErrorRet = "could not advance the derivation counter";
+            return false;
+        }
+
+        nHDNext = nNext;
+        vchPubKeyRet = key.GetPubKey();
+    }
+    return true;
+}
+
 vector<unsigned char> GenerateNewKey()
 {
     CKey key;
@@ -2310,27 +2343,55 @@ bool ProcessMessages(CNode* pfrom)
             if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE SKIPPED %d BYTES\n\n", (int)(pstart - vRecv.begin()));
         vRecv.erase(vRecv.begin(), pstart);
 
-        // Read header
+        // Read the header from a copy first. The old path consumed the header,
+        // noticed the payload was incomplete, inserted the header back at the
+        // front of the receive buffer, then slept inside the shared message
+        // thread. A peer could announce a large payload and drip bytes forever,
+        // making every pass pay for an O(n) insert and a 100 ms stall.
         CMessageHeader hdr;
-        vRecv >> hdr;
+        CDataStream vHeader(vRecv.begin(), vRecv.begin() + sizeof(CMessageHeader),
+                            vRecv.nType, vRecv.nVersion);
+        vHeader >> hdr;
         if (!hdr.IsValid())
         {
             if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE: ERRORS IN HEADER %s\n\n\n", hdr.GetCommand().c_str());
+            if (hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_SIZE)
+                pfrom->fDisconnect = true;
+            pfrom->nIncompleteMessageStart = 0;
+            vRecv.ignore(sizeof(CMessageHeader));
             continue;
         }
         string strCommand = hdr.GetCommand();
 
         // Message size
         unsigned int nMessageSize = hdr.nMessageSize;
-        if (nMessageSize > vRecv.size())
+        unsigned int nPayloadAvailable = vRecv.size() - sizeof(CMessageHeader);
+        if (nMessageSize > nPayloadAvailable)
         {
-            // Rewind and wait for rest of message
-            ///// need a mechanism to give up waiting for overlong message size error
-            if (LogAcceptsCategory("net")) printf("MESSAGE-BREAK 2\n");
-            vRecv.insert(vRecv.begin(), BEGIN(hdr), END(hdr));
-            Sleep(100);
+            if (pfrom->nIncompleteMessageStart == 0 ||
+                pfrom->nIncompleteMessageSize != nMessageSize ||
+                pfrom->strIncompleteMessageCommand != strCommand)
+            {
+                pfrom->nIncompleteMessageStart = GetTime();
+                pfrom->nIncompleteMessageSize = nMessageSize;
+                pfrom->strIncompleteMessageCommand = strCommand;
+            }
+            else if (GetTime() - pfrom->nIncompleteMessageStart >
+                     BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS)
+            {
+                LogPrint("net",
+                         "disconnecting %s: incomplete %s message, %u of %u bytes after %d seconds\n",
+                         pfrom->addr.ToString().c_str(), strCommand.c_str(),
+                         nPayloadAvailable, nMessageSize,
+                         BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS);
+                pfrom->fDisconnect = true;
+            }
             break;
         }
+        pfrom->nIncompleteMessageStart = 0;
+        pfrom->nIncompleteMessageSize = 0;
+        pfrom->strIncompleteMessageCommand.clear();
+        vRecv.ignore(sizeof(CMessageHeader));
 
         // Copy message to its own buffer
         CDataStream vMsg(vRecv.begin(), vRecv.begin() + nMessageSize, vRecv.nType, vRecv.nVersion);
@@ -3774,13 +3835,28 @@ bool CreateTransaction(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, in
                 // Fill vout[1] back to self with any change
                 if (nValueIn > nTotalValue)
                 {
-                    // Use the same key as one of the coins
                     vector<unsigned char> vchPubKey;
-                    CTransaction& txFirst = *(*setCoins.begin());
-                    foreach(const CTxOut& txout, txFirst.vout)
-                        if (txout.IsMine())
-                            if (ExtractPubKey(txout.scriptPubKey, true, vchPubKey))
-                                break;
+                    if (HaveHDSeed())
+                    {
+                        string strError;
+                        if (!DeriveNextHDWalletKey(vchPubKey, strError))
+                        {
+                            printf("CreateTransaction() : could not derive a phrase-backed change key: %s\n",
+                                   strError.c_str());
+                            return false;
+                        }
+                    }
+                    else
+                    {
+                        // Legacy wallets have no deterministic seed. Preserve
+                        // the 0.1.0 behaviour for them: return change to a key
+                        // already proven to belong to this wallet.
+                        CTransaction& txFirst = *(*setCoins.begin());
+                        foreach(const CTxOut& txout, txFirst.vout)
+                            if (txout.IsMine())
+                                if (ExtractPubKey(txout.scriptPubKey, true, vchPubKey))
+                                    break;
+                    }
                     if (vchPubKey.empty())
                         return false;
 

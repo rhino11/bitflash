@@ -111,3 +111,4 @@ tests: test_bip32.exe bitflash.exe
 	./test_bip32.exe
 	./bitflash.exe -selftest=wallet-keypool
 	./bitflash.exe -selftest=wallet-hd
+	./bitflash.exe -selftest=net-message

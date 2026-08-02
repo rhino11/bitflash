@@ -25,6 +25,10 @@
 // would restore a wallet that looks empty.
 static const int RESTORE_BATCH   = 100;
 static const int RESTORE_MAX     = 10000;
+// The wallet may have a full unused key pool in front of a change address
+// created while spending pre-phrase coins. Looking only one empty batch ahead
+// can stop just before that change output.
+static const int RESTORE_MIN_SCAN = KEYPOOL_SIZE + RESTORE_BATCH;
 
 int CmdNewPhrase()
 {
@@ -105,6 +109,7 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
     // up nothing. Every derived key is written to the wallet before the scan,
     // because the scan asks the wallet what belongs to it.
     int nTotalDerived = (int)nHDNext;
+    int nStopDepth = max(nMinDepth, RESTORE_MIN_SCAN);
     while (nTotalDerived < RESTORE_MAX)
     {
         // Count wallet transactions, not scan hits.
@@ -146,7 +151,7 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
 
         // A whole batch with nothing in it means far enough -- unless the
         // caller asked to look deeper anyway.
-        if (nWalletAfter == nWalletBefore && nTotalDerived >= nMinDepth)
+        if (nWalletAfter == nWalletBefore && nTotalDerived >= nStopDepth)
             break;
     }
 
