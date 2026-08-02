@@ -39,10 +39,17 @@ LIBS = -L$(SECP_LIB) -lsecp256k1 \
        -lsodium -lssl -lcrypto -ldb_cxx -lpthread \
        -lglfw -lGL
 
+# Every header a .cpp here includes has to be listed, not just the interesting
+# ones. sockcount.h was missing, and it declares a struct that lives in a
+# function-local static shared across translation units: editing it rebuilt
+# some objects and not others, and the linker said so in a warning easy to walk
+# past -- "duplicate section ... has different size". That is one object
+# indexing a struct by the old layout and another by the new one, in the same
+# binary. Nothing crashed here, and nothing would say so if it had.
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
           randomx_pow.h btfaddr.h btfchan.h btfrv.h btftunnel.h market.h \
-          selftest.h walletcmd.h compat.h
+          selftest.h walletcmd.h compat.h sockcount.h font_roboto.h
 
 IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
              obj/imgui_widgets.o obj/imgui_impl_glfw.o obj/imgui_impl_opengl3.o
