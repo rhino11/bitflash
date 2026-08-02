@@ -54,11 +54,27 @@ static const int64        PEX_MIN_INTERVAL         = 60;
 // traffic is nothing: one per relay per five minutes.
 static const int          BTF_RENDEZVOUS_WAIT_SECS = 300;
 
-// Registrations this node parks at a rendezvous at once. One is what the
-// protocol needs; more is what keeps the node reachable while one of them is
-// being paired, since pairing consumes the registration it used. Four matches
-// the relay's ceiling per node.
-static const int          BTF_ACCEPT_THREADS       = 3;
+// Registrations this node parks at a rendezvous at once.
+//
+// Back to one, and it stays at one until every relay in vBtfMeetingRelays runs
+// the queue from #113. More than one is what keeps a node reachable while one
+// registration is being paired -- but only against a relay that accepts more
+// than one. An older relay closes the previous registration whenever the same
+// node registers again, so several accept threads pointed at one of those
+// evict each other in a loop: thread 2 registers and kills thread 1, thread 3
+// kills thread 2, thread 1 sees its socket die and kills thread 3.
+//
+// #113 called that harmless. It is not. Measured on a node running three
+// threads against the un-upgraded New Jersey relay: 189 registrations in about
+// fifteen minutes -- roughly twelve a minute -- and not one pairing. The node
+// was not merely failing to benefit, it was unreachable through that relay and
+// hammering it. A node with one thread does none of this.
+//
+// The bench that approved #113 could not see it: its harness re-registers by
+// design, which is exactly what hides an eviction loop.
+//
+// Raise this to 3 only when the other two relays are upgraded.
+static const int          BTF_ACCEPT_THREADS       = 1;
 
 // Liveness of an established peer connection. BTF_RENDEZVOUS_WAIT_SECS bounds
 // the wait for a dial to arrive; these bound the connection that comes out of
