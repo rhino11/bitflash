@@ -64,30 +64,38 @@ static string SockAccountingText()
     long long nOpened[SOCK_SITES], nClosed[SOCK_SITES], nFailed[SOCK_SITES], nUntagged = 0;
     BtfSockSnapshot(nOpened, nClosed, nFailed, &nUntagged);
 
+    long long nUnconn[SOCK_SITES];
+    BtfSockLiveUnconnected(nUnconn);
+
     string str = "\n  sockets by where they were created\n";
-    str += "  site                       opened   closed     live  close failed\n";
-    long long nTotalOpened = 0, nTotalClosed = 0, nTotalFailed = 0;
+    str += "  site                       opened   closed     live  close failed  live unconn\n";
+    long long nTotalOpened = 0, nTotalClosed = 0, nTotalFailed = 0, nTotalUnconn = 0;
     for (int i = 0; i < SOCK_SITES; i++)
     {
         nTotalOpened += nOpened[i];
         nTotalClosed += nClosed[i];
         nTotalFailed += nFailed[i];
+        nTotalUnconn += nUnconn[i];
         if (nOpened[i] == 0)
             continue;
-        str += strprintf("  %-24s %8lld %8lld %8lld %13lld\n", pszSockSite[i],
-                         nOpened[i], nClosed[i], nOpened[i] - nClosed[i], nFailed[i]);
+        str += strprintf("  %-24s %8lld %8lld %8lld %13lld %12lld\n", pszSockSite[i],
+                         nOpened[i], nClosed[i], nOpened[i] - nClosed[i], nFailed[i], nUnconn[i]);
     }
-    str += strprintf("  %-24s %8s %8lld %8s %13s\n", "closed but never tagged",
-                     "-", nUntagged, "-", "-");
-    str += strprintf("  %-24s %8lld %8lld %8lld %13lld\n", "TOTAL",
-                     nTotalOpened, nTotalClosed, nTotalOpened - nTotalClosed, nTotalFailed);
+    str += strprintf("  %-24s %8s %8lld %8s %13s %12s\n", "closed but never tagged",
+                     "-", nUntagged, "-", "-", "-");
+    str += strprintf("  %-24s %8lld %8lld %8lld %13lld %12lld\n", "TOTAL",
+                     nTotalOpened, nTotalClosed, nTotalOpened - nTotalClosed,
+                     nTotalFailed, nTotalUnconn);
 
-    // The live total above is what this program believes it is holding. Compare
-    // it against what the operating system attributes to the process: on
-    // Windows, `Get-NetTCPConnection | ? OwningProcess -eq <pid>`. A gap there
-    // is the leak, and the codes below say what the failed closes hit -- 10038
-    // (WSAENOTSOCK) means the handle was already gone and this close was a
-    // second one, which is a different bug from a descriptor that stayed.
+    // The live total is what this program believes it is holding. Comparing it
+    // against `Get-NetTCPConnection | ? OwningProcess -eq <pid>` needs the note
+    // in sockcount.h first: that table lists a wildcard-bound socket twice, so
+    // a raw row count always looks larger than this. Count orphans, not rows.
+    //
+    // "live unconn" is a getpeername on every tagged socket. Anything above 1
+    // -- the listening socket -- means this program is holding a socket it
+    // never connected, which is the shape the leak hunt was looking for and
+    // never found.
     if (nTotalFailed > 0)
     {
         str += "  close failures by code\n";

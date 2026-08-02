@@ -4,15 +4,35 @@
 // Socket accounting -- which part of the program is holding the sockets.
 //
 // A node on a 32-core machine was found with 1502 sockets in Windows' "bound"
-// state: created, never connected, never closed, each holding a distinct
-// ephemeral port. That is 9% of the machine's whole dynamic port range gone in
-// nineteen hours, and when the range runs out nothing on that machine can open
-// an outbound connection -- not just this program.
+// state, each apparently holding a distinct ephemeral port. Reading the code
+// did not find it: every connect() failure path in this tree closes its socket.
+// So count instead -- tag each socket where it is created, untag it where it is
+// closed, report the difference per site.
 //
-// Reading the code did not find it. Every connect() failure path in this tree
-// closes its socket. So count instead: tag each socket where it is created,
-// untag it where it is closed, and report the difference per site. Whichever
-// site's live count tracks the leak is the answer.
+// The counting is what showed the counting was wrong. Windows lists a socket
+// bound to the wildcard address TWICE in MSFT_NetTCPConnection: once for the
+// binding (0.0.0.0:port, state "Bound") and once for the connection itself
+// (state "Established"). Measured: 35 of a node's 38 "Bound" rows had the same
+// local port as one of its established connections. The bound count therefore
+// rises because the node is talking to more peers, not because it is leaking,
+// which is why a fix that plainly worked looked like it had done nothing.
+//
+// The honest metric is the ORPHAN: a "Bound" row whose port appears nowhere
+// else in that process's table.
+//
+//   $b = $c | ? State -eq 'Bound'
+//   $rest = ($c | ? State -ne 'Bound').LocalPort
+//   ($b | ? { $rest -notcontains $_.LocalPort }).Count
+//
+// By that metric, measured the same evening on three machines: a node on 1.2.10
+// with 26h of uptime had 1262 orphans and was still taking on 30-90 an hour; a
+// node on 1.2.11 with 4h40m had 3; a node on 1.2.12 had 3, all from its first
+// half minute. At the 1.2.10 rate the 1.2.11 node would have had ~230.
+//
+// So the leak was real and 1.2.11 ended it -- most likely the 60-second reaper
+// for undeliverable nodes, which was written for a different problem. The
+// counters below stay: they are how the question got answered, and they are how
+// it would be answered again.
 //
 // Header-only on purpose. btfrv.cpp is compiled a second time, on its own, into
 // the standalone rendezvous relay -- a separate tree that does not link net.cpp.
@@ -53,12 +73,11 @@ struct BtfSockAccount
     long long nOpened[SOCK_SITES];
     long long nClosed[SOCK_SITES];
     long long nCloseFailed[SOCK_SITES];
-    // Why the close failed, counted per code per site. Measured on a node with
-    // 3h51m of uptime: the program believed it held 58 sockets and Windows
-    // attributed 112 to the process, 47 of them bound to an ephemeral port and
-    // never connected -- against 55 closes that had returned an error. The
-    // shapes match, and the error code is the piece that says whether the
-    // descriptor is still there or was already gone.
+    // Why the close failed, counted per code per site. Kept because nothing in
+    // this codebase had ever looked at what closesocket returns, and a close
+    // that fails leaves the descriptor and its port in place. It is not the
+    // leak -- see the note at the top of this file -- but it is the one number
+    // that would say so if it ever became the leak.
     std::map<int, long long> mapCloseErr[SOCK_SITES];
     long long nClosedUntagged;
     BtfSockAccount() : nClosedUntagged(0)
@@ -143,6 +162,33 @@ inline void BtfSockSnapshot(long long* pOpened, long long* pClosed, long long* p
         pFailed[i] = a.nCloseFailed[i];
     }
     *pUntagged = a.nClosedUntagged;
+}
+
+// Of the sockets still tagged live, how many have no peer on the other end.
+//
+// This is the check that ended the socket hunt, by answering it with a zero.
+// The suspicion was that some site created sockets, never connected them and
+// never let go. Run against a live node it reports 1 -- the listening socket,
+// which has no peer by definition. Every other tagged socket is connected.
+//
+// See the note at the top of this file for what the pile actually was.
+inline void BtfSockLiveUnconnected(long long* pUnconnected)
+{
+    for (int i = 0; i < SOCK_SITES; i++)
+        pUnconnected[i] = 0;
+    BtfSockAccount& a = BtfSockAccounting();
+    std::lock_guard<std::mutex> lock(a.mtx);
+    for (std::map<SOCKET, int>::const_iterator mi = a.mapSite.begin(); mi != a.mapSite.end(); ++mi)
+    {
+        struct sockaddr_storage ss;
+#ifdef _WIN32
+        int len = sizeof(ss);
+#else
+        socklen_t len = sizeof(ss);
+#endif
+        if (getpeername(mi->first, (struct sockaddr*)&ss, &len) != 0)
+            pUnconnected[mi->second]++;
+    }
 }
 
 // The close-failure codes for one site, newest counts included. Separate call
