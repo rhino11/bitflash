@@ -217,6 +217,37 @@ extern CCriticalSection cs_mapTransactions;
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv);
 bool SendMessages(CNode* pto);
 int64 GetBalance();
+struct WalletRecoveryAudit
+{
+    bool fHaveSeed;
+    bool fDeriveComplete;
+    unsigned int nDerivedKnown;
+    int nRecoverableTx;
+    int nLegacyTx;
+    int nRecoverableImmatureTx;
+    int nLegacyImmatureTx;
+    int64 nRecoverableCredit;
+    int64 nLegacyCredit;
+    int64 nRecoverableImmatureCredit;
+    int64 nLegacyImmatureCredit;
+    string strDeriveError;
+
+    WalletRecoveryAudit()
+    {
+        fHaveSeed = false;
+        fDeriveComplete = true;
+        nDerivedKnown = 0;
+        nRecoverableTx = 0;
+        nLegacyTx = 0;
+        nRecoverableImmatureTx = 0;
+        nLegacyImmatureTx = 0;
+        nRecoverableCredit = 0;
+        nLegacyCredit = 0;
+        nRecoverableImmatureCredit = 0;
+        nLegacyImmatureCredit = 0;
+    }
+};
+WalletRecoveryAudit GetWalletRecoveryAudit();
 bool CreateTransaction(CScript scriptPubKey, int64 nValue, CWalletTx& txNew, int64& nFeeRequiredRet);
 bool CommitTransactionSpent(const CWalletTx& wtxNew);
 bool SendMoney(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew);

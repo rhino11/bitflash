@@ -40,4 +40,8 @@ int CmdNewAddress();
 // Diagnostic: print the first nCount addresses this wallet's phrase derives.
 int CmdShowDerived(int nCount);
 
+// Diagnostic: print whether the currently spendable wallet balance is covered
+// by the installed recovery phrase or still depends on wallet.dat-only keys.
+int CmdRecoveryAudit();
+
 #endif

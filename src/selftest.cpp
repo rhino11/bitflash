@@ -336,6 +336,7 @@ static int RunWalletHDSelfTest()
 
         // The address the wallet was showing before any of this. It has to
         // survive under a name that says it is not covered by the phrase.
+        std::vector<unsigned char> vchPreSeedKey = keyUser.GetPubKey();
         std::string strPreSeedAddr = PubKeyToAddress(keyUser.GetPubKey());
 
         nFail += Check(SetHDSeedFromMnemonic(strPhraseA, strError),
@@ -449,6 +450,41 @@ static int RunWalletHDSelfTest()
         }
         nFail += Check(fStored, "every derived pooled key is stored in wallet.dat") ? 0 : 1;
         nFail += Check(fFromSeed, "every pooled key came from the seed, not from chance") ? 0 : 1;
+
+        // A recovery phrase is only useful if the wallet can tell the user
+        // what today's spendable balance would actually come back from it.
+        CKey keyAuditDerived;
+        if (!DeriveHDKey(0, keyAuditDerived, strError))
+            throw std::runtime_error("audit derivation failed: " + strError);
+
+        CWalletTx wtxLegacy;
+        wtxLegacy.vout.push_back(CTxOut(5 * COIN, CScript() << vchPreSeedKey << OP_CHECKSIG));
+        CWalletTx wtxDerived;
+        wtxDerived.vout.push_back(CTxOut(7 * COIN, CScript() << keyAuditDerived.GetPubKey() << OP_CHECKSIG));
+        CWalletTx wtxImmatureLegacy;
+        wtxImmatureLegacy.vin.push_back(CTxIn());
+        wtxImmatureLegacy.vout.push_back(CTxOut(11 * COIN, CScript() << vchPreSeedKey << OP_CHECKSIG));
+
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            mapWallet.clear();
+            mapWallet[wtxLegacy.GetHash()] = wtxLegacy;
+            mapWallet[wtxDerived.GetHash()] = wtxDerived;
+            mapWallet[wtxImmatureLegacy.GetHash()] = wtxImmatureLegacy;
+        }
+
+        WalletRecoveryAudit audit = GetWalletRecoveryAudit();
+        nFail += Check(audit.fHaveSeed, "the recovery audit reports the phrase") ? 0 : 1;
+        nFail += Check(audit.nLegacyCredit == 5 * COIN,
+                       "the recovery audit finds wallet.dat-only balance") ? 0 : 1;
+        nFail += Check(audit.nRecoverableCredit == 7 * COIN,
+                       "the recovery audit finds phrase-backed balance") ? 0 : 1;
+        nFail += Check(audit.nLegacyTx == 1 && audit.nRecoverableTx == 1,
+                       "the recovery audit counts legacy and phrase-backed transactions") ? 0 : 1;
+        nFail += Check(audit.nLegacyImmatureCredit == 11 * COIN,
+                       "the recovery audit finds wallet.dat-only immature mining rewards") ? 0 : 1;
+        nFail += Check(audit.nLegacyImmatureTx == 1,
+                       "the recovery audit counts wallet.dat-only immature mining rewards") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

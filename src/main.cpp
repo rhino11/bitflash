@@ -3660,6 +3660,93 @@ bool BitcoinMiner(int nThreadId)
 //
 
 
+WalletRecoveryAudit GetWalletRecoveryAudit()
+{
+    WalletRecoveryAudit audit;
+    set<vector<unsigned char> > setDerivedPubKeys;
+
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        audit.fHaveSeed = HaveHDSeed();
+        audit.nDerivedKnown = nHDNext;
+        if (audit.fHaveSeed)
+        {
+            string strError;
+            for (unsigned int i = 0; i < nHDNext; i++)
+            {
+                CKey key;
+                if (!DeriveHDKey(i, key, strError))
+                {
+                    audit.fDeriveComplete = false;
+                    audit.strDeriveError = strprintf("derivation failed at index %u: %s",
+                                                      i, strError.c_str());
+                    break;
+                }
+                setDerivedPubKeys.insert(key.GetPubKey());
+            }
+        }
+    }
+
+    CRITICAL_BLOCK(cs_mapWallet)
+    {
+        for (map<uint256, CWalletTx>::iterator it = mapWallet.begin(); it != mapWallet.end(); ++it)
+        {
+            CWalletTx& wtx = (*it).second;
+            if (!wtx.IsFinal() || wtx.fSpent)
+                continue;
+            bool fImmature = wtx.IsCoinBase() && wtx.GetBlocksToMaturity() > 0;
+
+            bool fTxRecoverable = false;
+            bool fTxLegacy = false;
+            for (int i = 0; i < (int)wtx.vout.size(); i++)
+            {
+                const CTxOut& txout = wtx.vout[i];
+                if (!txout.IsMine())
+                    continue;
+
+                vector<unsigned char> vchPubKey;
+                bool fRecoverable = false;
+                if (audit.fHaveSeed && ExtractPubKey(txout.scriptPubKey, true, vchPubKey))
+                    fRecoverable = setDerivedPubKeys.count(vchPubKey) > 0;
+
+                if (fRecoverable)
+                {
+                    if (fImmature)
+                        audit.nRecoverableImmatureCredit += txout.nValue;
+                    else
+                        audit.nRecoverableCredit += txout.nValue;
+                    fTxRecoverable = true;
+                }
+                else
+                {
+                    if (fImmature)
+                        audit.nLegacyImmatureCredit += txout.nValue;
+                    else
+                        audit.nLegacyCredit += txout.nValue;
+                    fTxLegacy = true;
+                }
+            }
+
+            if (fTxRecoverable)
+            {
+                if (fImmature)
+                    audit.nRecoverableImmatureTx++;
+                else
+                    audit.nRecoverableTx++;
+            }
+            if (fTxLegacy)
+            {
+                if (fImmature)
+                    audit.nLegacyImmatureTx++;
+                else
+                    audit.nLegacyTx++;
+            }
+        }
+    }
+
+    return audit;
+}
+
 int64 GetBalance()
 {
     int64 nStart, nEnd;

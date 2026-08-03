@@ -272,6 +272,65 @@ int CmdShowDerived(int nCount)
     return 0;
 }
 
+int CmdRecoveryAudit()
+{
+    AttachTerminal();
+
+    WalletRecoveryAudit audit = GetWalletRecoveryAudit();
+    int64 nTotal = audit.nRecoverableCredit + audit.nLegacyCredit;
+    int64 nImmatureTotal = audit.nRecoverableImmatureCredit + audit.nLegacyImmatureCredit;
+
+    printf("Wallet recovery audit\n");
+    printf("  recovery phrase: %s\n", audit.fHaveSeed ? "present" : "not installed");
+    if (audit.fHaveSeed)
+        printf("  derived keys known to this wallet: %u\n", audit.nDerivedKnown);
+    if (!audit.fDeriveComplete)
+        printf("  derivation warning: %s\n", audit.strDeriveError.c_str());
+    printf("  total spendable balance:      %s BTF\n", FormatMoney(nTotal).c_str());
+    printf("  covered by recovery phrase:   %s BTF (%d transaction(s))\n",
+           FormatMoney(audit.nRecoverableCredit).c_str(), audit.nRecoverableTx);
+    printf("  wallet.dat-only balance:      %s BTF (%d transaction(s))\n",
+           FormatMoney(audit.nLegacyCredit).c_str(), audit.nLegacyTx);
+    printf("  immature mining rewards:      %s BTF\n", FormatMoney(nImmatureTotal).c_str());
+    printf("    phrase-backed immature:     %s BTF (%d transaction(s))\n",
+           FormatMoney(audit.nRecoverableImmatureCredit).c_str(),
+           audit.nRecoverableImmatureTx);
+    printf("    wallet.dat-only immature:   %s BTF (%d transaction(s))\n",
+           FormatMoney(audit.nLegacyImmatureCredit).c_str(),
+           audit.nLegacyImmatureTx);
+
+    if (!audit.fHaveSeed)
+    {
+        printf("\n");
+        printf("This wallet has no recovery phrase. A file backup is the only backup.\n");
+        fflush(stdout);
+        return nTotal + nImmatureTotal > 0 ? 2 : 0;
+    }
+    if (!audit.fDeriveComplete)
+    {
+        printf("\n");
+        printf("Warning: the audit could not derive every known phrase key, so coverage is incomplete.\n");
+        fflush(stdout);
+        return 2;
+    }
+    if (audit.nLegacyCredit > 0 || audit.nLegacyImmatureCredit > 0)
+    {
+        printf("\n");
+        printf("Warning: some coins are on keys the phrase does not reproduce.\n");
+        printf("Keep wallet.dat backups until that balance has been moved to a phrase-backed address.\n");
+        fflush(stdout);
+        return 2;
+    }
+
+    printf("\n");
+    if (nTotal + nImmatureTotal > 0)
+        printf("All known wallet balance is covered by the recovery phrase.\n");
+    else
+        printf("No wallet balance found yet.\n");
+    fflush(stdout);
+    return 0;
+}
+
 // Spend, from the command line.
 //
 // SendMoney() has been in this tree since 0.1.0 and only the window ever called

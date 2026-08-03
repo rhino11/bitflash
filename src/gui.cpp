@@ -65,6 +65,8 @@ static std::string g_sendStatus;
 static char        g_backupPath[512]      = {};
 static std::string g_backupStatus;
 static int64       g_lastWalletBackup     = 0;
+static WalletRecoveryAudit g_recoveryAudit;
+static int64       g_recoveryAuditTime    = 0;
 static bool        g_walletSafetyLoaded   = false;
 static char        g_participantPool[256] = {};
 static char        g_poolName[128]        = {};
@@ -184,6 +186,15 @@ static void LoadWalletSafetyState()
     g_walletSafetyLoaded = true;
 }
 
+static void RefreshRecoveryAudit(bool fForce=false)
+{
+    int64 nNow = GetTime();
+    if (!fForce && g_recoveryAuditTime != 0 && nNow - g_recoveryAuditTime < 5)
+        return;
+    g_recoveryAudit = GetWalletRecoveryAudit();
+    g_recoveryAuditTime = nNow;
+}
+
 static int KeyPoolCount()
 {
     int n = 0;
@@ -267,7 +278,11 @@ static void RefreshWallet()
     g_lastWalletRefresh = GetTime();
 }
 
-void MainFrameRepaint() { g_needRefresh = true; }
+void MainFrameRepaint()
+{
+    g_needRefresh = true;
+    g_recoveryAuditTime = 0;
+}
 
 // DateTimeStr moved to util.cpp: main.cpp logs block times with it, so it is
 // needed by builds that have no GUI at all.
@@ -967,6 +982,7 @@ static void RestoreThread(std::string strPhrase)
                 "Check the words and their order.", nDerived);
     }
     g_restoreRunning.store(false);
+    g_recoveryAuditTime = 0;
     g_needRefresh = true;
 }
 
@@ -1021,6 +1037,7 @@ static void DrawCreatePhraseDialog()
             if (SetHDSeedFromMnemonic(g_pendingMnemonic, strError))
             {
                 TopUpKeyPool();
+                g_recoveryAuditTime = 0;
                 g_phraseStatus = "Recovery phrase created. New addresses come from it.";
             }
             else
@@ -1141,8 +1158,9 @@ static void DrawWalletSafetyDialog()
 {
     if (!g_showWalletSafety) return;
     LoadWalletSafetyState();
+    RefreshRecoveryAudit();
 
-    ImGui::SetNextWindowSize(ImVec2(650.0f, 390.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(650.0f, 450.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("Wallet Safety", &g_showWalletSafety,
@@ -1228,6 +1246,38 @@ static void DrawWalletSafetyDialog()
         else
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
                                "No recovery phrase. Only a file backup can rebuild this wallet.");
+
+        ImGui::Text("Phrase-backed spendable balance: %s BTF",
+                    FmtMoney(g_recoveryAudit.nRecoverableCredit).c_str());
+        ImGui::Text("Wallet.dat-only spendable balance: %s BTF",
+                    FmtMoney(g_recoveryAudit.nLegacyCredit).c_str());
+        ImGui::Text("Phrase-backed immature mining rewards: %s BTF",
+                    FmtMoney(g_recoveryAudit.nRecoverableImmatureCredit).c_str());
+        ImGui::Text("Wallet.dat-only immature mining rewards: %s BTF",
+                    FmtMoney(g_recoveryAudit.nLegacyImmatureCredit).c_str());
+        if (!g_recoveryAudit.fDeriveComplete)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+            ImGui::TextWrapped("%s", g_recoveryAudit.strDeriveError.c_str());
+            ImGui::PopStyleColor();
+        }
+        if (g_recoveryAudit.nLegacyCredit > 0 ||
+            g_recoveryAudit.nLegacyImmatureCredit > 0)
+        {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
+            ImGui::TextWrapped(
+                "Some coins are on keys the phrase does not reproduce. "
+                "Keep wallet.dat backups until that balance has been moved to a "
+                "phrase-backed address.");
+            ImGui::PopStyleColor();
+        }
+        else if (HaveHDSeed() &&
+                 g_recoveryAudit.nRecoverableCredit +
+                 g_recoveryAudit.nRecoverableImmatureCredit > 0)
+        {
+            ImGui::TextColored(ImVec4(0.55f, 1.0f, 0.6f, 1.0f),
+                               "All known wallet balance is covered by the phrase.");
+        }
 
         if (!HaveHDSeed())
         {

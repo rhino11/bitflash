@@ -93,7 +93,10 @@ static void PrintUsage()
     printf("  /restoredepth=N            (with /restorephrase: derive at least N\n");
     printf("                              addresses before giving up)\n");
     printf("  /showderived=N             (list the first N addresses a phrase\n");
-    printf("                              produces, without installing it)\n");
+    printf("                              installed in this wallet derives)\n");
+    printf("  /recoveryaudit             (show how much spendable balance is\n");
+    printf("                              covered by the recovery phrase;\n");
+    printf("                              exits 2 when wallet.dat is still needed)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -381,6 +384,13 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/newaddress") || arg(argc,argv,"-newaddress"))
     {
         int nRet = CmdNewAddress();
+        DBFlush(true);
+        return nRet;
+    }
+
+    if (arg(argc,argv,"/recoveryaudit") || arg(argc,argv,"-recoveryaudit"))
+    {
+        int nRet = CmdRecoveryAudit();
         DBFlush(true);
         return nRet;
     }
