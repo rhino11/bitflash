@@ -1,2 +1,8 @@
-// Bitflash application icon
-bitflash ICON "rc/bitcoin.ico"
+// Bitflash application icon.
+//
+// The name matters. GLFW registers its own window class and fills hIcon with
+// LoadImageW(module, L"GLFW_ICON", ...), falling back to IDI_APPLICATION when
+// that exact resource name is missing. It was named "bitflash" here, so every
+// window this program has ever opened wore the generic Windows icon in its
+// title bar and in the taskbar, while the correct icon sat unused in the exe.
+GLFW_ICON ICON "rc/bitcoin.ico"
