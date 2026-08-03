@@ -392,8 +392,11 @@ public:
     // twelve words are the user's to write down, and keeping a copy of them in
     // the file they are meant to protect defeats the point of having them.
     //
-    // "hdnext" is the next child index to derive, so the sequence a restore
-    // reproduces is the same one this wallet handed out.
+    // "hdschema" identifies the derivation layout. Wallets created before the
+    // field existed are inferred as HD_SCHEMA_LEGACY when a seed is present.
+    // "hdnext" is that legacy layout's next child index. The receive/change
+    // counters and coin type are reserved for the BIP44 layout that uses
+    // separate chains.
     bool ReadHDMaster(vector<unsigned char>& vchMasterRet, vector<unsigned char>& vchChainCodeRet)
     {
         vchMasterRet.clear();
@@ -411,6 +414,26 @@ public:
     bool WriteHDNext(unsigned int nNext)
     {
         return Write(string("hdnext"), nNext);
+    }
+
+    bool WriteHDSchema(int nSchema)
+    {
+        return Write(string("hdschema"), nSchema);
+    }
+
+    bool WriteHDCoinType(unsigned int nCoinType)
+    {
+        return Write(string("hdcointype"), nCoinType);
+    }
+
+    bool WriteHDReceiveNext(unsigned int nNext)
+    {
+        return Write(string("hdreceivenext"), nNext);
+    }
+
+    bool WriteHDChangeNext(unsigned int nNext)
+    {
+        return Write(string("hdchangenext"), nNext);
     }
 
     // Keys generated ahead of time and not yet handed out. The private key of

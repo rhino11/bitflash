@@ -181,7 +181,7 @@ static bool AddKeyIfMissing(const CKey& key)
     return AddKey(key);
 }
 
-static bool DeriveNextHDWalletKey(vector<unsigned char>& vchPubKeyRet, string& strErrorRet)
+static bool DeriveNextHDReceiveKey(vector<unsigned char>& vchPubKeyRet, string& strErrorRet)
 {
     vchPubKeyRet.clear();
     CRITICAL_BLOCK(cs_keyPool)
@@ -193,7 +193,12 @@ static bool DeriveNextHDWalletKey(vector<unsigned char>& vchPubKeyRet, string& s
         }
 
         CKey key;
-        if (!DeriveHDKey(nHDNext, key, strErrorRet))
+        unsigned int nIndex = 0;
+        if (nHDKeySchema == HD_SCHEMA_BIP44)
+            nIndex = nHDReceiveNext;
+        else
+            nIndex = nHDNext;
+        if (!DeriveHDKey(nIndex, key, strErrorRet))
             return false;
         if (!AddKeyIfMissing(key))
         {
@@ -201,14 +206,77 @@ static bool DeriveNextHDWalletKey(vector<unsigned char>& vchPubKeyRet, string& s
             return false;
         }
 
-        unsigned int nNext = nHDNext + 1;
-        if (!CWalletDB().WriteHDNext(nNext))
+        unsigned int nNext = nIndex + 1;
+        if (nHDKeySchema == HD_SCHEMA_BIP44)
         {
-            strErrorRet = "could not advance the derivation counter";
+            if (!CWalletDB().WriteHDReceiveNext(nNext))
+            {
+                strErrorRet = "could not advance the receive derivation counter";
+                return false;
+            }
+            nHDReceiveNext = nNext;
+        }
+        else
+        {
+            if (!CWalletDB().WriteHDNext(nNext))
+            {
+                strErrorRet = "could not advance the derivation counter";
+                return false;
+            }
+            nHDNext = nNext;
+        }
+
+        vchPubKeyRet = key.GetPubKey();
+    }
+    return true;
+}
+
+static bool DeriveNextHDChangeKey(vector<unsigned char>& vchPubKeyRet, string& strErrorRet)
+{
+    vchPubKeyRet.clear();
+    CRITICAL_BLOCK(cs_keyPool)
+    {
+        if (!HaveHDSeed())
+        {
+            strErrorRet = "no seed";
             return false;
         }
 
-        nHDNext = nNext;
+        CKey key;
+        if (nHDKeySchema == HD_SCHEMA_BIP44)
+        {
+            if (!DeriveHDChangeKey(nHDChangeNext, key, strErrorRet))
+                return false;
+            if (!AddKeyIfMissing(key))
+            {
+                strErrorRet = "could not write the derived change key to wallet.dat";
+                return false;
+            }
+            unsigned int nNext = nHDChangeNext + 1;
+            if (!CWalletDB().WriteHDChangeNext(nNext))
+            {
+                strErrorRet = "could not advance the change derivation counter";
+                return false;
+            }
+            nHDChangeNext = nNext;
+        }
+        else
+        {
+            if (!DeriveHDKey(nHDNext, key, strErrorRet))
+                return false;
+            if (!AddKeyIfMissing(key))
+            {
+                strErrorRet = "could not write the derived change key to wallet.dat";
+                return false;
+            }
+            unsigned int nNext = nHDNext + 1;
+            if (!CWalletDB().WriteHDNext(nNext))
+            {
+                strErrorRet = "could not advance the derivation counter";
+                return false;
+            }
+            nHDNext = nNext;
+        }
         vchPubKeyRet = key.GetPubKey();
     }
     return true;
@@ -229,6 +297,40 @@ map<int64, vector<unsigned char> > mapKeyPool;
 vector<unsigned char> vchHDMaster;
 vector<unsigned char> vchHDChainCode;
 unsigned int nHDNext = 0;
+int nHDKeySchema = HD_SCHEMA_NONE;
+unsigned int nHDReceiveNext = 0;
+unsigned int nHDChangeNext = 0;
+unsigned int nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+
+string HDKeySchemaName(int nSchema)
+{
+    if (nSchema == HD_SCHEMA_LEGACY)
+        return "legacy-hd";
+    if (nSchema == HD_SCHEMA_BIP44)
+        return "bip44";
+    return "none";
+}
+
+std::vector<unsigned int> HDLegacyPath(unsigned int nIndex)
+{
+    std::vector<unsigned int> path;
+    path.push_back(nIndex | bitflash::BIP32_HARDENED);
+    return path;
+}
+
+std::vector<unsigned int> HDBIP44Path(unsigned int nCoinType,
+                                      unsigned int nAccount,
+                                      unsigned int nChain,
+                                      unsigned int nIndex)
+{
+    std::vector<unsigned int> path;
+    path.push_back(HD_BIP44_PURPOSE | bitflash::BIP32_HARDENED);
+    path.push_back(nCoinType | bitflash::BIP32_HARDENED);
+    path.push_back(nAccount | bitflash::BIP32_HARDENED);
+    path.push_back(nChain);
+    path.push_back(nIndex);
+    return path;
+}
 
 static bool ClearKeyPoolRecords(string& strErrorRet)
 {
@@ -254,13 +356,59 @@ bool DeriveHDKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet)
         strErrorRet = "no seed";
         return false;
     }
+    if (nIndex >= bitflash::BIP32_HARDENED)
+    {
+        strErrorRet = "child index must be non-hardened; hardening is applied here";
+        return false;
+    }
 
     bitflash::BIP32PrivateNode parent;
     parent.privateKey = vchHDMaster;
     parent.chainCode  = vchHDChainCode;
 
     bitflash::BIP32PrivateNode child;
-    if (!bitflash::BIP32DeriveHardenedChild(parent, nIndex, child, strErrorRet))
+    std::vector<unsigned int> path = nHDKeySchema == HD_SCHEMA_BIP44
+        ? HDBIP44Path(nHDCoinType, HD_BIP44_ACCOUNT, HD_BIP44_CHAIN_RECEIVE, nIndex)
+        : HDLegacyPath(nIndex);
+    if (!bitflash::BIP32DerivePath(parent, path, child, strErrorRet))
+        return false;
+
+    if (!keyRet.SetSecret(child.privateKey))
+    {
+        strErrorRet = "derived scalar is not a usable key";
+        return false;
+    }
+    return true;
+}
+
+bool DeriveHDChangeKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet)
+{
+    if (!HaveHDSeed())
+    {
+        strErrorRet = "no seed";
+        return false;
+    }
+    if (nIndex >= bitflash::BIP32_HARDENED)
+    {
+        strErrorRet = "child index must be non-hardened; hardening is applied here";
+        return false;
+    }
+
+    if (nHDKeySchema != HD_SCHEMA_BIP44)
+        return DeriveHDKey(nIndex, keyRet, strErrorRet);
+
+    bitflash::BIP32PrivateNode parent;
+    parent.privateKey = vchHDMaster;
+    parent.chainCode  = vchHDChainCode;
+
+    bitflash::BIP32PrivateNode child;
+    if (!bitflash::BIP32DerivePath(parent,
+                                   HDBIP44Path(nHDCoinType,
+                                               HD_BIP44_ACCOUNT,
+                                               HD_BIP44_CHAIN_CHANGE,
+                                               nIndex),
+                                   child,
+                                   strErrorRet))
         return false;
 
     if (!keyRet.SetSecret(child.privateKey))
@@ -307,20 +455,28 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
             return false;
 
         if (!CWalletDB().WriteHDMaster(master.privateKey, master.chainCode) ||
-            !CWalletDB().WriteHDNext(1))
+            !CWalletDB().WriteHDSchema(HD_SCHEMA_BIP44) ||
+            !CWalletDB().WriteHDCoinType(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL) ||
+            !CWalletDB().WriteHDNext(0) ||
+            !CWalletDB().WriteHDReceiveNext(1) ||
+            !CWalletDB().WriteHDChangeNext(0))
         {
-            strErrorRet = "could not write the seed to wallet.dat";
+            strErrorRet = "could not write the seed metadata to wallet.dat";
             return false;
         }
         vchHDMaster    = master.privateKey;
         vchHDChainCode = master.chainCode;
+        nHDKeySchema   = HD_SCHEMA_BIP44;
+        nHDReceiveNext = 1;
+        nHDChangeNext  = 0;
+        nHDCoinType    = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
 
         // Index 0 is spoken for before it is derived, so a failure below cannot
         // leave the pool free to hand it out as an ordinary key. The cost of
         // the counter being ahead of the derivation is one unused index; the
         // cost of the reverse is the default address and a pool key sharing a
         // derivation path.
-        nHDNext = 1;
+        nHDNext = 0;
 
         // Remember which address stops being the default, so it can be named
         // for what it is. Two entries reading "Your Address" -- one covered by
@@ -372,15 +528,18 @@ void TopUpKeyPool()
                 // without a seed uses anyway. It will not come back from the
                 // phrase, and that is better than a node that cannot mine.
                 string strError;
-                if (DeriveHDKey(nHDNext, key, strError))
+                vector<unsigned char> vchPubKey;
+                if (DeriveNextHDReceiveKey(vchPubKey, strError))
                 {
-                    nHDNext++;
-                    CWalletDB().WriteHDNext(nHDNext);
+                    if (!CWalletDB().WritePool(nIndex, vchPubKey))
+                        return;
+                    mapKeyPool[nIndex] = vchPubKey;
+                    continue;
                 }
                 else
                 {
-                    printf("TopUpKeyPool() : derivation at index %u failed (%s), "
-                           "falling back to a random key\n", nHDNext, strError.c_str());
+                    printf("TopUpKeyPool() : receive derivation failed (%s), "
+                           "falling back to a random key\n", strError.c_str());
                     key.MakeNewKey();
                 }
             }
@@ -3668,11 +3827,20 @@ WalletRecoveryAudit GetWalletRecoveryAudit()
     CRITICAL_BLOCK(cs_keyPool)
     {
         audit.fHaveSeed = HaveHDSeed();
+        audit.nSchema = nHDKeySchema;
         audit.nDerivedKnown = nHDNext;
+        audit.nReceiveNext = nHDReceiveNext;
+        audit.nChangeNext = nHDChangeNext;
+        audit.nCoinType = nHDCoinType;
+        if (nHDKeySchema == HD_SCHEMA_BIP44)
+            audit.nDerivedKnown = nHDReceiveNext + nHDChangeNext + nHDNext;
         if (audit.fHaveSeed)
         {
             string strError;
-            for (unsigned int i = 0; i < nHDNext; i++)
+            unsigned int nReceiveDepth = nHDKeySchema == HD_SCHEMA_BIP44
+                ? nHDReceiveNext
+                : nHDNext;
+            for (unsigned int i = 0; i < nReceiveDepth; i++)
             {
                 CKey key;
                 if (!DeriveHDKey(i, key, strError))
@@ -3683,6 +3851,36 @@ WalletRecoveryAudit GetWalletRecoveryAudit()
                     break;
                 }
                 setDerivedPubKeys.insert(key.GetPubKey());
+            }
+            if (nHDKeySchema == HD_SCHEMA_BIP44)
+            {
+                int nSavedSchema = nHDKeySchema;
+                for (unsigned int i = 0; i < nHDChangeNext; i++)
+                {
+                    CKey key;
+                    if (!DeriveHDChangeKey(i, key, strError))
+                    {
+                        audit.fDeriveComplete = false;
+                        audit.strDeriveError = strprintf("change derivation failed at index %u: %s",
+                                                          i, strError.c_str());
+                        break;
+                    }
+                    setDerivedPubKeys.insert(key.GetPubKey());
+                }
+                nHDKeySchema = HD_SCHEMA_LEGACY;
+                for (unsigned int i = 0; i < nHDNext; i++)
+                {
+                    CKey key;
+                    if (!DeriveHDKey(i, key, strError))
+                    {
+                        audit.fDeriveComplete = false;
+                        audit.strDeriveError = strprintf("legacy compatibility derivation failed at index %u: %s",
+                                                          i, strError.c_str());
+                        break;
+                    }
+                    setDerivedPubKeys.insert(key.GetPubKey());
+                }
+                nHDKeySchema = nSavedSchema;
             }
         }
     }
@@ -3926,7 +4124,7 @@ bool CreateTransaction(CScript scriptPubKey, int64 nValue, CWalletTx& wtxNew, in
                     if (HaveHDSeed())
                     {
                         string strError;
-                        if (!DeriveNextHDWalletKey(vchPubKey, strError))
+                        if (!DeriveNextHDChangeKey(vchPubKey, strError))
                         {
                             printf("CreateTransaction() : could not derive a phrase-backed change key: %s\n",
                                    strError.c_str());

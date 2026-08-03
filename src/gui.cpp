@@ -1247,6 +1247,11 @@ static void DrawWalletSafetyDialog()
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.25f, 1.0f),
                                "No recovery phrase. Only a file backup can rebuild this wallet.");
 
+        if (g_recoveryAudit.fHaveSeed)
+        {
+            ImGui::Text("Derivation schema: %s", HDKeySchemaName(g_recoveryAudit.nSchema).c_str());
+            ImGui::Text("BIP44 coin type: %u (provisional BITFLASH)", g_recoveryAudit.nCoinType);
+        }
         ImGui::Text("Phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableCredit).c_str());
         ImGui::Text("Wallet.dat-only spendable balance: %s BTF",

@@ -5,7 +5,7 @@
 //
 // This module is deliberately independent from wallet.dat and GUI code. It is
 // the auditable foundation: mnemonic generation/validation, seed derivation,
-// and hardened private child derivation over secp256k1.
+// and private child derivation over secp256k1.
 
 #ifndef BITFLASH_BIP32_H
 #define BITFLASH_BIP32_H
@@ -15,6 +15,8 @@
 
 namespace bitflash
 {
+
+static const unsigned int BIP32_HARDENED = 0x80000000U;
 
 struct BIP32PrivateNode
 {
@@ -42,6 +44,16 @@ bool BIP39MnemonicToSeed(const std::string& mnemonic,
 bool BIP32MasterFromSeed(const std::vector<unsigned char>& seed,
                          BIP32PrivateNode& nodeOut,
                          std::string& errorOut);
+
+bool BIP32DeriveChild(const BIP32PrivateNode& parent,
+                      unsigned int childNumber,
+                      BIP32PrivateNode& childOut,
+                      std::string& errorOut);
+
+bool BIP32DerivePath(const BIP32PrivateNode& root,
+                     const std::vector<unsigned int>& path,
+                     BIP32PrivateNode& nodeOut,
+                     std::string& errorOut);
 
 bool BIP32DeriveHardenedChild(const BIP32PrivateNode& parent,
                               unsigned int childIndex,

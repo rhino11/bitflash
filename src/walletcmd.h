@@ -32,6 +32,15 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
                        int& nRecoveredRet,
                        int& nDerivedRet);
 
+// Restore scans stop only after the requested depth is reached. BIP44 has more
+// than one branch, so the depth has to be satisfied per branch, not by summing
+// receive + change + compatibility keys.
+bool RestoreScanReachedDepth(int nSchema,
+                             unsigned int nReceiveNext,
+                             unsigned int nChangeNext,
+                             unsigned int nLegacyNext,
+                             int nStopDepth);
+
 // Take the next address from the key pool and print it. With a recovery phrase
 // installed the address is derived, so the phrase can bring back whatever is
 // paid to it.

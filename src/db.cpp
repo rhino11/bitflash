@@ -554,6 +554,7 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
     // Whether wallet.dat actually carried a mining mode, as opposed to just the
     // ancient fGenerateBitcoins flag. See the reconciliation further down.
     bool fHaveStoredMineMode = false;
+    bool fHaveStoredHDCoinType = false;
     vchDefaultKeyRet.clear();
 
     // Satoshi's "todo: shouldn't we catch exceptions" sat here since 2009, and
@@ -651,6 +652,23 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
             {
                 ssValue >> nHDNext;
             }
+            else if (strType == "hdschema")
+            {
+                ssValue >> nHDKeySchema;
+            }
+            else if (strType == "hdcointype")
+            {
+                ssValue >> nHDCoinType;
+                fHaveStoredHDCoinType = true;
+            }
+            else if (strType == "hdreceivenext")
+            {
+                ssValue >> nHDReceiveNext;
+            }
+            else if (strType == "hdchangenext")
+            {
+                ssValue >> nHDChangeNext;
+            }
             else if (strType == "pool")
             {
                 int64 nIndex;
@@ -705,6 +723,38 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         printf("LoadWallet: wallet.dat could not be read. Unknown failure while "
                "handling a '%s' record.\n", strLastType.c_str());
         return false;
+    }
+
+    if (HaveHDSeed())
+    {
+        if (nHDKeySchema == HD_SCHEMA_NONE)
+        {
+            nHDKeySchema = HD_SCHEMA_LEGACY;
+            printf("LoadWallet: deterministic seed has no schema metadata; "
+                   "treating it as legacy m/index'\n");
+        }
+        else if (nHDKeySchema != HD_SCHEMA_LEGACY &&
+                 nHDKeySchema != HD_SCHEMA_BIP44)
+        {
+            printf("LoadWallet: deterministic wallet schema %d (%s) is not "
+                   "supported by this build\n",
+                   nHDKeySchema, HDKeySchemaName(nHDKeySchema).c_str());
+            return false;
+        }
+        if (!fHaveStoredHDCoinType)
+        {
+            nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+            printf("LoadWallet: deterministic seed has no BIP44 coin type metadata; "
+                   "using provisional Bitflash coin type %u\n", nHDCoinType);
+        }
+    }
+    else
+    {
+        nHDKeySchema = HD_SCHEMA_NONE;
+        nHDNext = 0;
+        nHDReceiveNext = 0;
+        nHDChangeNext = 0;
+        nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
     }
 
     // fGenerateBitcoins and nMineMode only mean anything together, and a

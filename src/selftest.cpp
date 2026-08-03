@@ -6,7 +6,9 @@
 // and against a temporary data directory.
 
 #include "headers_core.h"
+#include "bip32.h"
 #include "selftest.h"
+#include "walletcmd.h"
 
 // Test results go to the terminal, not to debug.log.
 //
@@ -342,18 +344,68 @@ static int RunWalletHDSelfTest()
         nFail += Check(SetHDSeedFromMnemonic(strPhraseA, strError),
                        "a valid phrase installs a seed") ? 0 : 1;
         nFail += Check(HaveHDSeed(), "the wallet reports having a seed") ? 0 : 1;
+        nFail += Check(nHDKeySchema == HD_SCHEMA_BIP44,
+                       "a new recovery phrase records the BIP44 HD schema") ? 0 : 1;
+        nFail += Check(nHDCoinType == HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+                       "a new recovery phrase records the provisional BIP44 coin type") ? 0 : 1;
+        nFail += Check(nHDReceiveNext == 1 && nHDChangeNext == 0,
+                       "BIP44 receive/change counters reserve the default receive key") ? 0 : 1;
+        std::vector<unsigned int> vBIP44Path = HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+                                                           HD_BIP44_ACCOUNT,
+                                                           HD_BIP44_CHAIN_RECEIVE,
+                                                           0);
+        nFail += Check(vBIP44Path.size() == 5 &&
+                       vBIP44Path[0] == (HD_BIP44_PURPOSE | bitflash::BIP32_HARDENED) &&
+                       vBIP44Path[1] == (HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL | bitflash::BIP32_HARDENED) &&
+                       vBIP44Path[2] == (HD_BIP44_ACCOUNT | bitflash::BIP32_HARDENED) &&
+                       vBIP44Path[3] == HD_BIP44_CHAIN_RECEIVE &&
+                       vBIP44Path[4] == 0,
+                       "the BIP44 helper builds m/44'/coin_type'/account'/change/index") ? 0 : 1;
 
         int nPoolAfterSeed = 0;
         CRITICAL_BLOCK(cs_keyPool)
             nPoolAfterSeed = (int)mapKeyPool.size();
         nFail += Check(nPoolAfterSeed == 0,
                        "installing a phrase clears the old random key pool") ? 0 : 1;
-        nFail += Check(nHDNext == 1,
-                       "installing a phrase reserves one derived default key") ? 0 : 1;
+        nFail += Check(nHDNext == 0,
+                       "installing a BIP44 phrase leaves the legacy counter unused") ? 0 : 1;
 
         CKey keyFirstDerived;
         if (!DeriveHDKey(0, keyFirstDerived, strError))
             throw std::runtime_error("default derivation failed: " + strError);
+        bitflash::BIP32PrivateNode hdParent;
+        hdParent.privateKey = vchHDMaster;
+        hdParent.chainCode = vchHDChainCode;
+        bitflash::BIP32PrivateNode hdBIP44ReceiveChild;
+        if (!bitflash::BIP32DerivePath(hdParent,
+                                       HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+                                                   HD_BIP44_ACCOUNT,
+                                                   HD_BIP44_CHAIN_RECEIVE,
+                                                   0),
+                                       hdBIP44ReceiveChild,
+                                       strError))
+            throw std::runtime_error("BIP44 receive path derivation failed: " + strError);
+        CKey keyBIP44ReceivePath;
+        if (!keyBIP44ReceivePath.SetSecret(hdBIP44ReceiveChild.privateKey))
+            throw std::runtime_error("BIP44 receive path produced an unusable key");
+        nFail += Check(keyBIP44ReceivePath.GetPubKey() == keyFirstDerived.GetPubKey(),
+                       "the default HD key path is m/44'/coin_type'/0'/0/0") ? 0 : 1;
+
+        bitflash::BIP32PrivateNode hdLegacyChild;
+        int nSchemaForLegacyCheck = nHDKeySchema;
+        nHDKeySchema = HD_SCHEMA_LEGACY;
+        CKey keyLegacyDerived;
+        if (!DeriveHDKey(0, keyLegacyDerived, strError))
+            throw std::runtime_error("legacy derivation failed: " + strError);
+        nHDKeySchema = nSchemaForLegacyCheck;
+        if (!bitflash::BIP32DerivePath(hdParent, HDLegacyPath(0), hdLegacyChild, strError))
+            throw std::runtime_error("legacy path derivation failed: " + strError);
+        CKey keyLegacyPath;
+        if (!keyLegacyPath.SetSecret(hdLegacyChild.privateKey))
+            throw std::runtime_error("legacy path produced an unusable key");
+        nFail += Check(keyLegacyPath.GetPubKey() == keyLegacyDerived.GetPubKey(),
+                       "the legacy HD key path remains m/index'") ? 0 : 1;
+
         std::vector<unsigned char> vchDefaultKey;
         bool fDefaultRead = CWalletDB("r").ReadDefaultKey(vchDefaultKey);
         nFail += Check(fDefaultRead && vchDefaultKey == keyFirstDerived.GetPubKey(),
@@ -370,10 +422,16 @@ static int RunWalletHDSelfTest()
                        "the pre-seed address is kept, named apart from the new one") ? 0 : 1;
 
         std::vector<unsigned char> vchBefore = vchHDMaster;
+        int nSchemaBefore = nHDKeySchema;
+        unsigned int nCoinTypeBefore = nHDCoinType;
         nFail += Check(!SetHDSeedFromMnemonic("not a mnemonic at all", strError),
                        "an invalid phrase is refused") ? 0 : 1;
         nFail += Check(vchHDMaster == vchBefore,
                        "a refused phrase leaves the existing seed alone") ? 0 : 1;
+        nFail += Check(nHDKeySchema == nSchemaBefore,
+                       "a refused phrase leaves the derivation schema alone") ? 0 : 1;
+        nFail += Check(nHDCoinType == nCoinTypeBefore,
+                       "a refused phrase leaves the BIP44 coin type alone") ? 0 : 1;
 
         // The property the whole feature exists for: the same words give back
         // the same keys, in the same order.
@@ -416,18 +474,26 @@ static int RunWalletHDSelfTest()
         // With a seed installed the pool must be derived from it, and the
         // counter must move exactly once per key.
         SetHDSeedFromMnemonic(strPhraseA, strError);
-        unsigned int nNextBefore = nHDNext;
+        unsigned int nReceiveNextBefore = nHDReceiveNext;
         TopUpKeyPool();
 
         int nPool = 0;
         CRITICAL_BLOCK(cs_keyPool)
             nPool = (int)mapKeyPool.size();
         nFail += Check(nPool == KEYPOOL_SIZE, "the derived pool fills") ? 0 : 1;
-        nFail += Check(nHDNext == nNextBefore + (unsigned int)KEYPOOL_SIZE,
-                       "the derivation counter advances once per pooled key") ? 0 : 1;
+        nFail += Check(nHDReceiveNext == nReceiveNextBefore + (unsigned int)KEYPOOL_SIZE,
+                       "the BIP44 receive counter advances once per pooled key") ? 0 : 1;
+        nFail += Check(nHDChangeNext == 0,
+                       "filling the receive pool leaves the BIP44 change counter alone") ? 0 : 1;
+        nFail += Check(!RestoreScanReachedDepth(HD_SCHEMA_BIP44, 600, 400, 600, 600),
+                       "BIP44 restore depth is not satisfied by receive plus legacy alone") ? 0 : 1;
+        nFail += Check(RestoreScanReachedDepth(HD_SCHEMA_BIP44, 600, 600, 600, 600),
+                       "BIP44 restore depth is satisfied on each branch") ? 0 : 1;
+        nFail += Check(RestoreScanReachedDepth(HD_SCHEMA_LEGACY, 0, 0, 600, 600),
+                       "legacy restore depth still follows the legacy counter") ? 0 : 1;
 
         std::set<std::string> derived;
-        for (unsigned int i = nNextBefore; i < nHDNext; i++)
+        for (unsigned int i = nReceiveNextBefore; i < nHDReceiveNext; i++)
         {
             CKey key;
             if (!DeriveHDKey(i, key, strError))
@@ -456,11 +522,32 @@ static int RunWalletHDSelfTest()
         CKey keyAuditDerived;
         if (!DeriveHDKey(0, keyAuditDerived, strError))
             throw std::runtime_error("audit derivation failed: " + strError);
+        CKey keyAuditChange;
+        if (!DeriveHDChangeKey(0, keyAuditChange, strError))
+            throw std::runtime_error("audit change derivation failed: " + strError);
+        nFail += Check(keyAuditChange.GetPubKey() != keyAuditDerived.GetPubKey(),
+                       "BIP44 receive and change chains derive different keys") ? 0 : 1;
+        if (!AddKey(keyAuditChange))
+            throw std::runtime_error("could not store the audit change key");
+        nHDChangeNext = 1;
+        int nSchemaForLegacyAudit = nHDKeySchema;
+        nHDKeySchema = HD_SCHEMA_LEGACY;
+        CKey keyAuditLegacyHD;
+        if (!DeriveHDKey(0, keyAuditLegacyHD, strError))
+            throw std::runtime_error("audit legacy compatibility derivation failed: " + strError);
+        nHDKeySchema = nSchemaForLegacyAudit;
+        if (!AddKey(keyAuditLegacyHD))
+            throw std::runtime_error("could not store the audit legacy compatibility key");
+        nHDNext = 1;
 
         CWalletTx wtxLegacy;
         wtxLegacy.vout.push_back(CTxOut(5 * COIN, CScript() << vchPreSeedKey << OP_CHECKSIG));
         CWalletTx wtxDerived;
         wtxDerived.vout.push_back(CTxOut(7 * COIN, CScript() << keyAuditDerived.GetPubKey() << OP_CHECKSIG));
+        CWalletTx wtxChange;
+        wtxChange.vout.push_back(CTxOut(13 * COIN, CScript() << keyAuditChange.GetPubKey() << OP_CHECKSIG));
+        CWalletTx wtxLegacyHD;
+        wtxLegacyHD.vout.push_back(CTxOut(17 * COIN, CScript() << keyAuditLegacyHD.GetPubKey() << OP_CHECKSIG));
         CWalletTx wtxImmatureLegacy;
         wtxImmatureLegacy.vin.push_back(CTxIn());
         wtxImmatureLegacy.vout.push_back(CTxOut(11 * COIN, CScript() << vchPreSeedKey << OP_CHECKSIG));
@@ -470,17 +557,25 @@ static int RunWalletHDSelfTest()
             mapWallet.clear();
             mapWallet[wtxLegacy.GetHash()] = wtxLegacy;
             mapWallet[wtxDerived.GetHash()] = wtxDerived;
+            mapWallet[wtxChange.GetHash()] = wtxChange;
+            mapWallet[wtxLegacyHD.GetHash()] = wtxLegacyHD;
             mapWallet[wtxImmatureLegacy.GetHash()] = wtxImmatureLegacy;
         }
 
         WalletRecoveryAudit audit = GetWalletRecoveryAudit();
         nFail += Check(audit.fHaveSeed, "the recovery audit reports the phrase") ? 0 : 1;
+        nFail += Check(audit.nSchema == HD_SCHEMA_BIP44,
+                       "the recovery audit reports the derivation schema") ? 0 : 1;
+        nFail += Check(audit.nCoinType == HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+                       "the recovery audit reports the BIP44 coin type") ? 0 : 1;
+        nFail += Check(audit.nReceiveNext == nHDReceiveNext && audit.nChangeNext == 1,
+                       "the recovery audit reports receive/change counters") ? 0 : 1;
         nFail += Check(audit.nLegacyCredit == 5 * COIN,
                        "the recovery audit finds wallet.dat-only balance") ? 0 : 1;
-        nFail += Check(audit.nRecoverableCredit == 7 * COIN,
-                       "the recovery audit finds phrase-backed balance") ? 0 : 1;
-        nFail += Check(audit.nLegacyTx == 1 && audit.nRecoverableTx == 1,
-                       "the recovery audit counts legacy and phrase-backed transactions") ? 0 : 1;
+        nFail += Check(audit.nRecoverableCredit == 37 * COIN,
+                       "the recovery audit finds BIP44 and legacy-HD phrase balance") ? 0 : 1;
+        nFail += Check(audit.nLegacyTx == 1 && audit.nRecoverableTx == 3,
+                       "the recovery audit counts wallet.dat-only and phrase-backed transactions") ? 0 : 1;
         nFail += Check(audit.nLegacyImmatureCredit == 11 * COIN,
                        "the recovery audit finds wallet.dat-only immature mining rewards") ? 0 : 1;
         nFail += Check(audit.nLegacyImmatureTx == 1,

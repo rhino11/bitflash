@@ -5,6 +5,8 @@
 
 #include "bip32.h"
 
+#include <openssl/sha.h>
+
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -55,6 +57,76 @@ static std::string ToHex(const std::vector<unsigned char>& v)
         out.push_back(hex[c & 0x0f]);
     }
     return out;
+}
+
+static bool DecodeBase58Check(const std::string& str, std::vector<unsigned char>& out)
+{
+    static const char* pszBase58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    out.clear();
+
+    std::vector<unsigned char> b256(str.size() * 733 / 1000 + 1);
+    for (char c : str)
+    {
+        const char* p = strchr(pszBase58, c);
+        if (!p)
+            return false;
+        int carry = (int)(p - pszBase58);
+        for (std::vector<unsigned char>::reverse_iterator it = b256.rbegin();
+             it != b256.rend(); ++it)
+        {
+            carry += 58 * (*it);
+            *it = (unsigned char)(carry & 0xff);
+            carry >>= 8;
+        }
+        if (carry != 0)
+            return false;
+    }
+
+    size_t zeros = 0;
+    while (zeros < str.size() && str[zeros] == '1')
+        zeros++;
+    std::vector<unsigned char>::iterator it = b256.begin();
+    while (it != b256.end() && *it == 0)
+        ++it;
+
+    std::vector<unsigned char> full;
+    full.assign(zeros, 0);
+    while (it != b256.end())
+        full.push_back(*it++);
+    if (full.size() < 4)
+        return false;
+
+    std::vector<unsigned char> payload(full.begin(), full.end() - 4);
+    unsigned char h1[SHA256_DIGEST_LENGTH];
+    unsigned char h2[SHA256_DIGEST_LENGTH];
+    SHA256(&payload[0], payload.size(), h1);
+    SHA256(h1, sizeof(h1), h2);
+    if (memcmp(h2, &full[full.size() - 4], 4) != 0)
+        return false;
+
+    out = payload;
+    return true;
+}
+
+static bool DecodeXPrvNode(const std::string& xprv, BIP32PrivateNode& nodeOut)
+{
+    nodeOut.privateKey.clear();
+    nodeOut.chainCode.clear();
+
+    std::vector<unsigned char> payload;
+    if (!DecodeBase58Check(xprv, payload))
+        return false;
+    if (payload.size() != 78)
+        return false;
+    if (payload[0] != 0x04 || payload[1] != 0x88 ||
+        payload[2] != 0xad || payload[3] != 0xe4)
+        return false;
+    if (payload[45] != 0x00)
+        return false;
+
+    nodeOut.chainCode.assign(payload.begin() + 13, payload.begin() + 45);
+    nodeOut.privateKey.assign(payload.begin() + 46, payload.end());
+    return true;
 }
 
 int main()
@@ -122,6 +194,53 @@ int main()
               "child differs from parent");
         CHECK(!BIP32DeriveHardenedChild(master, 0x80000000U, childA, err),
               "pre-hardened index rejected");
+    }
+
+    printf("bip32_paths\n");
+    {
+        std::vector<unsigned char> seed = FromHex("000102030405060708090a0b0c0d0e0f");
+        BIP32PrivateNode master;
+        CHECK(BIP32MasterFromSeed(seed, master, err), "path test master derives");
+
+        struct PathVector
+        {
+            const char* name;
+            std::vector<unsigned int> path;
+            const char* xprv;
+        };
+
+        std::vector<PathVector> vectors;
+        vectors.push_back({"m",
+            {},
+            "xprv9s21ZrQH143K3QTDL4LXw2F7HEK3wJUD2nW2nRk4stbPy6cq3jPPqjiChkVvvNKmPGJxWUtg6LnF5kejMRNNU3TGtRBeJgk33yuGBxrMPHi"});
+        vectors.push_back({"m/0'",
+            {0 | BIP32_HARDENED},
+            "xprv9uHRZZhk6KAJC1avXpDAp4MDc3sQKNxDiPvvkX8Br5ngLNv1TxvUxt4cV1rGL5hj6KCesnDYUhd7oWgT11eZG7XnxHrnYeSvkzY7d2bhkJ7"});
+        vectors.push_back({"m/0'/1",
+            {0 | BIP32_HARDENED, 1},
+            "xprv9wTYmMFdV23N2TdNG573QoEsfRrWKQgWeibmLntzniatZvR9BmLnvSxqu53Kw1UmYPxLgboyZQaXwTCg8MSY3H2EU4pWcQDnRnrVA1xe8fs"});
+        vectors.push_back({"m/0'/1/2'",
+            {0 | BIP32_HARDENED, 1, 2 | BIP32_HARDENED},
+            "xprv9z4pot5VBttmtdRTWfWQmoH1taj2axGVzFqSb8C9xaxKymcFzXBDptWmT7FwuEzG3ryjH4ktypQSAewRiNMjANTtpgP4mLTj34bhnZX7UiM"});
+        vectors.push_back({"m/0'/1/2'/2",
+            {0 | BIP32_HARDENED, 1, 2 | BIP32_HARDENED, 2},
+            "xprvA2JDeKCSNNZky6uBCviVfJSKyQ1mDYahRjijr5idH2WwLsEd4Hsb2Tyh8RfQMuPh7f7RtyzTtdrbdqqsunu5Mm3wDvUAKRHSC34sJ7in334"});
+        vectors.push_back({"m/0'/1/2'/2/1000000000",
+            {0 | BIP32_HARDENED, 1, 2 | BIP32_HARDENED, 2, 1000000000},
+            "xprvA41z7zogVVwxVSgdKUHDy1SKmdb533PjDz7J6N6mV6uS3ze1ai8FHa8kmHScGpWmj4WggLyQjgPie1rFSruoUihUZREPSL39UNdE3BBDu76"});
+
+        for (const PathVector& v : vectors)
+        {
+            BIP32PrivateNode actual;
+            BIP32PrivateNode expected;
+            std::string label = std::string("derives ") + v.name;
+            CHECK(BIP32DerivePath(master, v.path, actual, err), label.c_str());
+            label = std::string("decodes vector ") + v.name;
+            CHECK(DecodeXPrvNode(v.xprv, expected), label.c_str());
+            label = std::string("matches vector ") + v.name;
+            CHECK(actual.privateKey == expected.privateKey &&
+                  actual.chainCode == expected.chainCode, label.c_str());
+        }
     }
 
     printf("\n%s (%d failures)\n",

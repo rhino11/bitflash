@@ -25,16 +25,34 @@
 // would restore a wallet that looks empty.
 static const int RESTORE_BATCH   = 100;
 static const int RESTORE_MAX     = 10000;
-// The wallet may have a full unused key pool in front of a change address
-// created while spending pre-phrase coins. Looking only one empty batch ahead
-// can stop just before that change output.
-static const int RESTORE_MIN_SCAN = KEYPOOL_SIZE + RESTORE_BATCH;
-
 // Quiet batches required before giving up. Three, because the wallet's own
 // bookkeeping can leave a gap of two hundred used-nothing indices between one
 // used address and the next -- see the note at the stop condition. One was not
 // enough and cost a real balance in testing.
 static const int RESTORE_QUIET_BATCHES = 3;
+// The wallet may have restored once, scanned a few quiet batches, and then
+// spent after that. Change starts from wherever that restore stopped, so the
+// next real change output can be just beyond the old quiet window. The default
+// restore has to look far enough for that ordinary "restore, then spend, then
+// restore again" path; explicit -restoredepth can still go deeper.
+static const int RESTORE_MIN_SCAN =
+    KEYPOOL_SIZE + (RESTORE_QUIET_BATCHES + 1) * RESTORE_BATCH;
+
+bool RestoreScanReachedDepth(int nSchema,
+                             unsigned int nReceiveNext,
+                             unsigned int nChangeNext,
+                             unsigned int nLegacyNext,
+                             int nStopDepth)
+{
+    if (nStopDepth <= 0)
+        return true;
+    unsigned int nDepth = (unsigned int)nStopDepth;
+    if (nSchema == HD_SCHEMA_BIP44)
+        return nReceiveNext >= nDepth &&
+               nChangeNext >= nDepth &&
+               nLegacyNext >= nDepth;
+    return nLegacyNext >= nDepth;
+}
 
 int CmdNewPhrase()
 {
@@ -114,7 +132,9 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
     // Derive forward in batches, scanning after each, until a whole batch turns
     // up nothing. Every derived key is written to the wallet before the scan,
     // because the scan asks the wallet what belongs to it.
-    int nTotalDerived = (int)nHDNext;
+    int nTotalDerived = nHDKeySchema == HD_SCHEMA_BIP44
+        ? (int)(nHDReceiveNext + nHDChangeNext)
+        : (int)nHDNext;
     int nStopDepth = max(nMinDepth, RESTORE_MIN_SCAN);
     int nQuietBatches = 0;
     while (nTotalDerived < RESTORE_MAX)
@@ -131,17 +151,61 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             nWalletBefore = mapWallet.size();
 
         std::string strDeriveError;
-        for (int i = 0; i < RESTORE_BATCH; i++)
+        if (nHDKeySchema == HD_SCHEMA_BIP44)
         {
-            CKey key;
-            if (!DeriveHDKey(nHDNext, key, strDeriveError))
-                break;
-            if (!AddKey(key))
-                break;
-            nHDNext++;
-            nTotalDerived++;
+            for (int i = 0; i < RESTORE_BATCH; i++)
+            {
+                CKey key;
+                if (!DeriveHDKey(nHDReceiveNext, key, strDeriveError))
+                    break;
+                if (!AddKey(key))
+                    break;
+                nHDReceiveNext++;
+                nTotalDerived++;
+            }
+            CWalletDB().WriteHDReceiveNext(nHDReceiveNext);
+
+            for (int i = 0; i < RESTORE_BATCH; i++)
+            {
+                CKey key;
+                if (!DeriveHDChangeKey(nHDChangeNext, key, strDeriveError))
+                    break;
+                if (!AddKey(key))
+                    break;
+                nHDChangeNext++;
+                nTotalDerived++;
+            }
+            CWalletDB().WriteHDChangeNext(nHDChangeNext);
+
+            int nSavedSchema = nHDKeySchema;
+            nHDKeySchema = HD_SCHEMA_LEGACY;
+            for (int i = 0; i < RESTORE_BATCH; i++)
+            {
+                CKey key;
+                if (!DeriveHDKey(nHDNext, key, strDeriveError))
+                    break;
+                if (!AddKey(key))
+                    break;
+                nHDNext++;
+                nTotalDerived++;
+            }
+            nHDKeySchema = nSavedSchema;
+            CWalletDB().WriteHDNext(nHDNext);
         }
-        CWalletDB().WriteHDNext(nHDNext);
+        else
+        {
+            for (int i = 0; i < RESTORE_BATCH; i++)
+            {
+                CKey key;
+                if (!DeriveHDKey(nHDNext, key, strDeriveError))
+                    break;
+                if (!AddKey(key))
+                    break;
+                nHDNext++;
+                nTotalDerived++;
+            }
+            CWalletDB().WriteHDNext(nHDNext);
+        }
 
         ScanForWalletTransactions(pindexGenesisBlock);
 
@@ -157,11 +221,11 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
         }
 
         // Stopping needs more than one quiet batch, because this wallet digs
-        // gaps in its own derivation. A restore leaves nHDNext at the depth it
-        // scanned, the key pool then derives KEYPOOL_SIZE more, and change
-        // takes the index after that -- so the address used *after* a restore
-        // can sit two hundred indices past the last one used before it, with
-        // nothing in between.
+        // gaps in its own derivation. A restore leaves the receive counter at
+        // the depth it scanned, the key pool then derives KEYPOOL_SIZE more,
+        // and a later spend can use change after that -- so the address used
+        // *after* a restore can sit two hundred indices past the last one used
+        // before it, with nothing in between.
         //
         // Measured, on a real wallet with real coin: restore, spend once, and
         // the coins land at indices 201 and 302. Restoring again with the old
@@ -171,7 +235,12 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             nQuietBatches++;
         else
             nQuietBatches = 0;
-        if (nQuietBatches >= RESTORE_QUIET_BATCHES && nTotalDerived >= nStopDepth)
+        if (nQuietBatches >= RESTORE_QUIET_BATCHES &&
+            RestoreScanReachedDepth(nHDKeySchema,
+                                    nHDReceiveNext,
+                                    nHDChangeNext,
+                                    nHDNext,
+                                    nStopDepth))
             break;
     }
 
@@ -283,7 +352,13 @@ int CmdRecoveryAudit()
     printf("Wallet recovery audit\n");
     printf("  recovery phrase: %s\n", audit.fHaveSeed ? "present" : "not installed");
     if (audit.fHaveSeed)
+    {
+        printf("  derivation schema: %s\n", HDKeySchemaName(audit.nSchema).c_str());
+        printf("  BIP44 coin type: %u (provisional BITFLASH)\n", audit.nCoinType);
         printf("  derived keys known to this wallet: %u\n", audit.nDerivedKnown);
+        printf("  receive/change counters: %u/%u\n",
+               audit.nReceiveNext, audit.nChangeNext);
+    }
     if (!audit.fDeriveComplete)
         printf("  derivation warning: %s\n", audit.strDeriveError.c_str());
     printf("  total spendable balance:      %s BTF\n", FormatMoney(nTotal).c_str());

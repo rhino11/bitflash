@@ -147,21 +147,45 @@ extern map<int64, vector<unsigned char> > mapKeyPool;
 
 // --- Deterministic wallet (BIP32) -----------------------------------------
 //
-// When a seed is present the key pool is derived from it -- m/0'/n, hardened,
-// n increasing -- instead of being made of random keys. That is what lets a
-// recovery phrase bring a wallet back: the same twelve words reproduce the same
-// keys in the same order.
+// When a seed is present today, the key pool is derived from it by the legacy
+// Bitflash path -- m/index', hardened, index increasing -- instead of being
+// made of random keys. That is what lets a recovery phrase bring a wallet back:
+// the same twelve words reproduce the same keys in the same order.
 //
-// A wallet without a seed keeps working exactly as before. Nothing here
-// migrates an existing wallet on its own: the seed is created only when the
-// user asks for a phrase and confirms they have written it down, because a
-// phrase generated silently is a backup nobody has.
+// BIP44 uses a different path family and separate receive/change counters.
+// The schema fields below let new wallets opt into that without making old
+// m/index' coins disappear.
+//
+// A wallet without a seed keeps working exactly as before. Existing seeded
+// wallets keep their recorded schema. A new phrase uses BIP44, but it is still
+// created only when the user asks for a phrase and confirms they have written
+// it down, because a phrase generated silently is a backup nobody has.
 //
 // Empty until a seed exists.
 extern vector<unsigned char> vchHDMaster;     // 32-byte master private key (IL)
 extern vector<unsigned char> vchHDChainCode;  // 32 bytes (IR)
 extern unsigned int nHDNext;                  // next child index to derive
+static const int HD_SCHEMA_NONE   = 0;
+static const int HD_SCHEMA_LEGACY = 1;         // m/index'
+static const int HD_SCHEMA_BIP44  = 2;         // m/44'/coin_type'/account'/change/index
+static const unsigned int HD_BIP44_PURPOSE = 44;
+static const unsigned int HD_BIP44_ACCOUNT = 0;
+static const unsigned int HD_BIP44_CHAIN_RECEIVE = 0;
+static const unsigned int HD_BIP44_CHAIN_CHANGE = 1;
+// Provisional until Bitflash has an official SLIP-0044 assignment.
+// Proposed registry row: 4346950 | BITFLASH | Bitflash.
+static const unsigned int HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL = 4346950;
+extern int nHDKeySchema;
+extern unsigned int nHDReceiveNext;            // BIP44 external chain
+extern unsigned int nHDChangeNext;             // BIP44 internal chain
+extern unsigned int nHDCoinType;               // BIP44 coin_type'
 inline bool HaveHDSeed() { return vchHDMaster.size() == 32 && vchHDChainCode.size() == 32; }
+string HDKeySchemaName(int nSchema);
+std::vector<unsigned int> HDLegacyPath(unsigned int nIndex);
+std::vector<unsigned int> HDBIP44Path(unsigned int nCoinType,
+                                      unsigned int nAccount,
+                                      unsigned int nChain,
+                                      unsigned int nIndex);
 
 // Install a seed derived from a mnemonic, replacing any existing one. The
 // default receiving key is derived immediately, so the next visible address is
@@ -169,9 +193,12 @@ inline bool HaveHDSeed() { return vchHDMaster.size() == 32 && vchHDChainCode.siz
 // wallet untouched if the phrase is not valid.
 bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet);
 
-// Derive the child at nIndex and return it as a key. Used by the key pool and
-// by restore, which needs to run ahead of the pool.
+// Derive the receiving child at nIndex for the wallet's active schema and
+// return it as a key. Legacy seeded wallets use m/index'. BIP44 wallets use
+// m/44'/coin_type'/0'/0/index. Used by the key pool and restore, which needs
+// to run ahead of the pool.
 bool DeriveHDKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet);
+bool DeriveHDChangeKey(unsigned int nIndex, CKey& keyRet, string& strErrorRet);
 
 // Fill the pool back up to KEYPOOL_SIZE. Every key it creates is written to
 // wallet.dat before it is offered to anybody.
@@ -221,7 +248,11 @@ struct WalletRecoveryAudit
 {
     bool fHaveSeed;
     bool fDeriveComplete;
+    int nSchema;
     unsigned int nDerivedKnown;
+    unsigned int nReceiveNext;
+    unsigned int nChangeNext;
+    unsigned int nCoinType;
     int nRecoverableTx;
     int nLegacyTx;
     int nRecoverableImmatureTx;
@@ -236,7 +267,11 @@ struct WalletRecoveryAudit
     {
         fHaveSeed = false;
         fDeriveComplete = true;
+        nSchema = HD_SCHEMA_NONE;
         nDerivedKnown = 0;
+        nReceiveNext = 0;
+        nChangeNext = 0;
+        nCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
         nRecoverableTx = 0;
         nLegacyTx = 0;
         nRecoverableImmatureTx = 0;

@@ -114,6 +114,43 @@ static bool HmacSha512(const unsigned char* key, int keyLen,
            len == 64;
 }
 
+static bool PrivateKeyToCompressedPubKey(const std::vector<unsigned char>& privateKey,
+                                         unsigned char out[33],
+                                         std::string& errorOut)
+{
+    if (!IsValidPrivateKey(privateKey))
+    {
+        errorOut = "private key is invalid";
+        return false;
+    }
+
+    BIGNUM* bn = BN_bin2bn(&privateKey[0], 32, NULL);
+    BN_CTX* ctx = BN_CTX_new();
+    EC_GROUP* group = EC_GROUP_new_by_curve_name(NID_secp256k1);
+    EC_POINT* pub = group ? EC_POINT_new(group) : NULL;
+
+    bool ok = false;
+    if (bn && ctx && group && pub &&
+        EC_POINT_mul(group, pub, bn, NULL, NULL, ctx))
+    {
+        size_t n = EC_POINT_point2oct(group, pub, POINT_CONVERSION_COMPRESSED,
+                                      out, 33, ctx);
+        ok = n == 33;
+    }
+
+    BN_free(bn);
+    BN_CTX_free(ctx);
+    EC_POINT_free(pub);
+    EC_GROUP_free(group);
+
+    if (!ok)
+    {
+        errorOut = "could not serialize parent public key";
+        return false;
+    }
+    return true;
+}
+
 bool BIP39EntropyToMnemonic(const std::vector<unsigned char>& entropy,
                             std::string& mnemonicOut,
                             std::string& errorOut)
@@ -284,10 +321,10 @@ bool BIP32MasterFromSeed(const std::vector<unsigned char>& seed,
     return true;
 }
 
-bool BIP32DeriveHardenedChild(const BIP32PrivateNode& parent,
-                              unsigned int childIndex,
-                              BIP32PrivateNode& childOut,
-                              std::string& errorOut)
+bool BIP32DeriveChild(const BIP32PrivateNode& parent,
+                      unsigned int childNumber,
+                      BIP32PrivateNode& childOut,
+                      std::string& errorOut)
 {
     childOut.privateKey.clear();
     childOut.chainCode.clear();
@@ -297,20 +334,21 @@ bool BIP32DeriveHardenedChild(const BIP32PrivateNode& parent,
         errorOut = "parent private key or chain code is invalid";
         return false;
     }
-    if (childIndex >= 0x80000000U)
-    {
-        errorOut = "child index must be non-hardened; hardening is applied here";
-        return false;
-    }
-
-    const unsigned int hardened = childIndex | 0x80000000U;
     unsigned char data[37];
-    data[0] = 0x00;
-    memcpy(data + 1, &parent.privateKey[0], 32);
-    data[33] = (unsigned char)((hardened >> 24) & 0xff);
-    data[34] = (unsigned char)((hardened >> 16) & 0xff);
-    data[35] = (unsigned char)((hardened >> 8) & 0xff);
-    data[36] = (unsigned char)(hardened & 0xff);
+    if (childNumber & BIP32_HARDENED)
+    {
+        data[0] = 0x00;
+        memcpy(data + 1, &parent.privateKey[0], 32);
+    }
+    else
+    {
+        if (!PrivateKeyToCompressedPubKey(parent.privateKey, data, errorOut))
+            return false;
+    }
+    data[33] = (unsigned char)((childNumber >> 24) & 0xff);
+    data[34] = (unsigned char)((childNumber >> 16) & 0xff);
+    data[35] = (unsigned char)((childNumber >> 8) & 0xff);
+    data[36] = (unsigned char)(childNumber & 0xff);
 
     unsigned char I[64];
     if (!HmacSha512(&parent.chainCode[0], 32, data, sizeof(data), I))
@@ -361,6 +399,45 @@ bool BIP32DeriveHardenedChild(const BIP32PrivateNode& parent,
         return false;
     }
     return true;
+}
+
+bool BIP32DerivePath(const BIP32PrivateNode& root,
+                     const std::vector<unsigned int>& path,
+                     BIP32PrivateNode& nodeOut,
+                     std::string& errorOut)
+{
+    nodeOut.privateKey.clear();
+    nodeOut.chainCode.clear();
+    errorOut.clear();
+    if (!IsValidPrivateKey(root.privateKey) || root.chainCode.size() != 32)
+    {
+        errorOut = "root private key or chain code is invalid";
+        return false;
+    }
+
+    BIP32PrivateNode cur = root;
+    for (size_t i = 0; i < path.size(); i++)
+    {
+        BIP32PrivateNode next;
+        if (!BIP32DeriveChild(cur, path[i], next, errorOut))
+            return false;
+        cur = next;
+    }
+    nodeOut = cur;
+    return true;
+}
+
+bool BIP32DeriveHardenedChild(const BIP32PrivateNode& parent,
+                              unsigned int childIndex,
+                              BIP32PrivateNode& childOut,
+                              std::string& errorOut)
+{
+    if (childIndex >= BIP32_HARDENED)
+    {
+        errorOut = "child index must be non-hardened; hardening is applied here";
+        return false;
+    }
+    return BIP32DeriveChild(parent, childIndex | BIP32_HARDENED, childOut, errorOut);
 }
 
 } // namespace bitflash
