@@ -1005,7 +1005,15 @@ static void DrawCreatePhraseDialog()
         ImGui::Checkbox("I have written these words down", &g_phraseWrittenDown);
         ImGui::Spacing();
 
-        if (!g_phraseWrittenDown)
+        // Read the condition once, before the button that changes it.
+        //
+        // Pressing Finish clears g_phraseWrittenDown, so testing it again after
+        // the click asked BeginDisabled and EndDisabled two different questions:
+        // the pair was opened while the checkbox was ticked and closed after the
+        // handler had unticked it. ImGui asserts on the unmatched EndDisabled --
+        // on the success path, so every phrase created from the window hit it.
+        const bool fFinishDisabled = !g_phraseWrittenDown;
+        if (fFinishDisabled)
             ImGui::BeginDisabled();
         if (ImGui::Button("Finish", ImVec2(120.0f, 0.0f)))
         {
@@ -1024,7 +1032,7 @@ static void DrawCreatePhraseDialog()
             g_showCreatePhrase = false;
             g_needRefresh = true;
         }
-        if (!g_phraseWrittenDown)
+        if (fFinishDisabled)
             ImGui::EndDisabled();
 
         ImGui::SameLine();
