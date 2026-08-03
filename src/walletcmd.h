@@ -44,4 +44,9 @@ int CmdShowDerived(int nCount);
 // by the installed recovery phrase or still depends on wallet.dat-only keys.
 int CmdRecoveryAudit();
 
+// Spend, from the command line. Until now the only way to send was the window,
+// so a headless node could be paid and could never pay -- it could hold a
+// balance it had no way to move. strArg is "ADDRESS,AMOUNT".
+int CmdSendTo(const std::string& strArg);
+
 #endif

@@ -86,6 +86,8 @@ static void PrintUsage()
     printf("                              anyone, so guard it like cash)\n");
     printf("  /importwallet=FILE         (load keys from such a file back in)\n");
     printf("  /newaddress                (print the next receiving address, then exit)\n");
+    printf("  /sendto=ADDRESS,AMOUNT     (spend from this wallet, then exit -- the\n");
+    printf("                              only way to send without the window)\n");
     printf("  /newphrase                 (create a twelve-word recovery phrase for a\n");
     printf("                              wallet that has none, show it once, exit)\n");
     printf("  /restorephrase=\"WORDS\"     (rebuild this wallet from a phrase and scan\n");
@@ -384,6 +386,17 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/newaddress") || arg(argc,argv,"-newaddress"))
     {
         int nRet = CmdNewAddress();
+        DBFlush(true);
+        return nRet;
+    }
+
+    // -sendto -- the counterpart to -newaddress. Without it a headless node can
+    // be paid and can never pay: SendMoney() has been here since 0.1.0 and only
+    // the window ever reached it.
+    string strSendTo = argval2(argc, argv, "/sendto", "-sendto");
+    if (!strSendTo.empty())
+    {
+        int nRet = CmdSendTo(strSendTo);
         DBFlush(true);
         return nRet;
     }
