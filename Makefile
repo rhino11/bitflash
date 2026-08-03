@@ -8,7 +8,7 @@
 ROOT    := $(shell pwd)
 NPROC   := $(shell nproc 2>/dev/null || echo 2)
 SUDO    := $(shell [ "$$(id -u)" = "0" ] && echo "" || echo "sudo")
-VERSION := 1.2.14
+VERSION := 1.2.15
 
 # ---- Linux ----------------------------------------------------------------
 
