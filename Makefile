@@ -42,7 +42,7 @@ deps-apt:
 	@if command -v apt-get >/dev/null 2>&1; then \
 	  $(SUDO) apt-get install -y build-essential cmake git pkg-config autoconf \
 	    libtool libssl-dev libdb5.3++-dev libsodium-dev nlohmann-json3-dev \
-	    libboost-system-dev libglfw3-dev libgl-dev python3-pil; \
+	    libboost-system-dev libglfw3-dev libgl-dev python3-pil clang; \
 	else \
 	  echo "Not an apt system — install: g++ cmake git autoconf libtool"; \
 	  echo "  libssl libdb++ libsodium nlohmann-json boost glfw3 opengl python3-pil"; \
@@ -191,6 +191,9 @@ clean:
 tests:
 	$(MAKE) -C src -f Makefile tests
 
+fuzz-net-message-smoke: deps-linux
+	$(MAKE) -C src -f Makefile fuzz-net-message-smoke
+
 checksums:
 	./scripts/make-release-checksums.sh
 
@@ -201,5 +204,5 @@ verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
 .PHONY: linux windows clean appimage \
-        tests checksums sign-checksums verify-release \
+        tests fuzz-net-message-smoke checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

@@ -2,6 +2,7 @@
 # Called by: make linux (root Makefile)
 
 CXX ?= g++
+FUZZ_CXX ?= clang++
 
 SECP_INC    ?= /usr/local/include
 SECP_LIB    ?= /usr/local/lib
@@ -33,6 +34,9 @@ CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
            -I$(SECP_INC) -I$(RANDOMX_DIR)/src \
            -I/usr/include/nlohmann \
            -I$(IMGUI_DIR)
+FUZZ_CXXFLAGS = $(filter-out -O2,$(CXXFLAGS)) -O1 -g -fno-omit-frame-pointer \
+                -fsanitize=fuzzer-no-link,address,undefined
+FUZZ_LDFLAGS = -fsanitize=fuzzer,address,undefined
 
 LIBS = -L$(SECP_LIB) -lsecp256k1 \
        -L$(RANDOMX_DIR)/build -lrandomx \
@@ -117,6 +121,9 @@ NODE_LIBS = -L$(SECP_LIB) -lsecp256k1 \
 NODE_ONLY_OBJS = $(patsubst obj/%,obj-node/%,$(NODE_OBJS)) \
                  obj-node/main_gui.o obj-node/headless.o
 
+FUZZ_OBJS = $(patsubst obj/%,obj-fuzz/%,$(NODE_OBJS)) \
+            obj-fuzz/fuzz_net_message.o
+
 obj-node/%.o: %.cpp $(HEADERS)
 	@mkdir -p obj-node
 	$(CXX) -c $(CXXFLAGS) -DBITFLASH_NO_GUI -o $@ $<
@@ -129,8 +136,31 @@ bitflash-node: $(NODE_ONLY_OBJS)
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(NODE_LIBS)
 	@echo "Built: bitflash-node (headless, no libGL needed)"
 
+obj-fuzz/%.o: %.cpp $(HEADERS)
+	@mkdir -p obj-fuzz
+	$(FUZZ_CXX) -c $(FUZZ_CXXFLAGS) -DBITFLASH_FUZZ -o $@ $<
+
+obj-fuzz/sha.o: sha.cpp sha.h
+	@mkdir -p obj-fuzz
+	$(FUZZ_CXX) -c $(FUZZ_CXXFLAGS) -DBITFLASH_FUZZ -O1 -o $@ $<
+
+obj-fuzz/fuzz_net_message.o: fuzz_net_message.cpp $(HEADERS)
+	@mkdir -p obj-fuzz
+	$(FUZZ_CXX) -c $(FUZZ_CXXFLAGS) -DBITFLASH_FUZZ -o $@ $<
+
+fuzz-net-message: $(FUZZ_OBJS)
+	$(FUZZ_CXX) $(filter-out -fsanitize=fuzzer-no-link%,$(FUZZ_CXXFLAGS)) \
+	  $(FUZZ_LDFLAGS) -o $@ $^ $(NODE_LIBS)
+	@echo "Built: fuzz-net-message"
+
+fuzz-net-message-smoke: fuzz-net-message
+	@mkdir -p ../work/fuzz-corpus/net-message
+	@printf '\277\040\134\375ping\000\000\000\000\000\000\000\000\000\000\000\000' > ../work/fuzz-corpus/net-message/ping-header
+	@printf '\277\040\134\375version\000\000\000\000\000\000\000\000\000' > ../work/fuzz-corpus/net-message/version-header
+	./fuzz-net-message -runs=128 ../work/fuzz-corpus/net-message
+
 clean:
-	rm -rf obj obj-node bitflash bitflash-node test_bip32
+	rm -rf obj obj-node obj-fuzz bitflash bitflash-node fuzz-net-message test_bip32
 
 test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 	$(CXX) $(CXXFLAGS) -o $@ test_bip32.cpp bip32.cpp -lssl -lcrypto
@@ -144,3 +174,5 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=wallet-encrypt
 	./bitflash-node -selftest=net-message
 	./bitflash-node -selftest=consensus-limits
+
+.PHONY: tests fuzz-net-message-smoke
