@@ -12,6 +12,11 @@ NPROC   := $(shell nproc 2>/dev/null || echo 2)
 SUDO    := $(shell [ "$$(id -u)" = "0" ] && echo "" || echo "sudo")
 VERSION := 1.2.15
 
+SECP256K1_REPO   := https://github.com/bitcoin-core/secp256k1
+SECP256K1_COMMIT := 7fecac74aed8e1fd9078380d67dd04663705c989
+RANDOMX_REPO     := https://github.com/tevador/RandomX
+RANDOMX_COMMIT   := 1e9d4b2df63fa6edf46b06789486e23c0fcaa55a
+
 # ---- Linux ----------------------------------------------------------------
 
 linux: deps-linux
@@ -47,7 +52,13 @@ deps-secp256k1:
 	@if [ ! -f /usr/local/lib/libsecp256k1.a ]; then \
 	  echo "==> building libsecp256k1"; \
 	  rm -rf $(ROOT)/secp256k1-build; \
-	  git clone --depth 1 https://github.com/bitcoin-core/secp256k1 $(ROOT)/secp256k1-build; \
+	  git init -q $(ROOT)/secp256k1-build; \
+	  cd $(ROOT)/secp256k1-build && \
+	  git remote add origin $(SECP256K1_REPO) && \
+	  git fetch -q --depth 1 origin $(SECP256K1_COMMIT) && \
+	  git checkout -q --detach FETCH_HEAD && \
+	  test "$$(git rev-parse HEAD)" = "$(SECP256K1_COMMIT)" && \
+	  echo "==> libsecp256k1 pinned at $(SECP256K1_COMMIT)" && \
 	  cd $(ROOT)/secp256k1-build && ./autogen.sh && \
 	  ./configure --enable-module-schnorrsig --enable-module-extrakeys \
 	    --disable-shared --with-pic --disable-benchmark --disable-tests && \
@@ -61,7 +72,13 @@ deps-randomx:
 	@if [ ! -f $(HOME)/RandomX/build/librandomx.a ]; then \
 	  echo "==> building RandomX"; \
 	  rm -rf $(HOME)/RandomX; \
-	  git clone --depth 1 https://github.com/tevador/RandomX $(HOME)/RandomX; \
+	  git init -q $(HOME)/RandomX; \
+	  cd $(HOME)/RandomX && \
+	  git remote add origin $(RANDOMX_REPO) && \
+	  git fetch -q --depth 1 origin $(RANDOMX_COMMIT) && \
+	  git checkout -q --detach FETCH_HEAD && \
+	  test "$$(git rev-parse HEAD)" = "$(RANDOMX_COMMIT)" && \
+	  echo "==> RandomX pinned at $(RANDOMX_COMMIT)" && \
 	  mkdir -p $(HOME)/RandomX/build; \
 	  cd $(HOME)/RandomX/build && cmake .. -DCMAKE_BUILD_TYPE=Release && \
 	  make -j$(NPROC) randomx; \
@@ -120,8 +137,14 @@ deps-windows:
 	  autoconf automake libtool
 	@if [ ! -f deps/lib/libsecp256k1.a ]; then \
 	  rm -rf secp256k1-build; \
-	  git clone --depth 1 https://github.com/bitcoin-core/secp256k1 secp256k1-build; \
-	  cd secp256k1-build && ./autogen.sh && \
+	  git init -q secp256k1-build; \
+	  cd secp256k1-build && \
+	  git remote add origin $(SECP256K1_REPO) && \
+	  git fetch -q --depth 1 origin $(SECP256K1_COMMIT) && \
+	  git checkout -q --detach FETCH_HEAD && \
+	  test "$$(git rev-parse HEAD)" = "$(SECP256K1_COMMIT)" && \
+	  echo "==> secp256k1 pinned at $(SECP256K1_COMMIT)" && \
+	  cd $(ROOT)/secp256k1-build && ./autogen.sh && \
 	  ./configure --prefix=$(ROOT)/deps \
 	    --enable-module-schnorrsig --enable-module-extrakeys \
 	    --disable-shared --with-pic --disable-benchmark --disable-tests && \
@@ -132,9 +155,15 @@ deps-windows:
 	fi
 	@if [ ! -f RandomX/build/librandomx.a ]; then \
 	  rm -rf RandomX; \
-	  git clone --depth 1 https://github.com/tevador/RandomX; \
-	  mkdir -p RandomX/build; \
-	  cd RandomX/build && cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release && \
+	  git init -q RandomX; \
+	  cd RandomX && \
+	  git remote add origin $(RANDOMX_REPO) && \
+	  git fetch -q --depth 1 origin $(RANDOMX_COMMIT) && \
+	  git checkout -q --detach FETCH_HEAD && \
+	  test "$$(git rev-parse HEAD)" = "$(RANDOMX_COMMIT)" && \
+	  echo "==> RandomX pinned at $(RANDOMX_COMMIT)" && \
+	  mkdir -p $(ROOT)/RandomX/build; \
+	  cd $(ROOT)/RandomX/build && cmake .. -G "Unix Makefiles" -DCMAKE_BUILD_TYPE=Release && \
 	  make randomx; \
 	  echo "==> RandomX done"; \
 	else \
