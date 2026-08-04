@@ -48,6 +48,10 @@ private:
 
 static CCriticalSection cs_db;
 static bool fDbEnvInit = false;
+
+// Why LoadWallet() refused, in words meant for the person who has to act on it.
+// Empty unless the reason is one we can name.
+string strWalletLoadError;
 DbEnv dbenv(0u);
 static map<string, int> mapFileUseCount;
 
@@ -625,6 +629,7 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
     bool fHaveStoredMineMode = false;
     bool fHaveStoredHDCoinType = false;
     vchDefaultKeyRet.clear();
+    strWalletLoadError.clear();
 
     // Satoshi's "todo: shouldn't we catch exceptions" sat here since 2009, and
     // it was not a nicety. Nothing on this path caught anything, so a record
@@ -779,11 +784,15 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
                 ssValue >> nMinVersion;
                 if (nMinVersion > WALLET_FORMAT_SUPPORTED)
                 {
-                    printf("LoadWallet: wallet.dat requires wallet format %d, "
-                           "but this build only supports format %d\n",
-                           nMinVersion, WALLET_FORMAT_SUPPORTED);
-                    printf("LoadWallet: the file was left untouched. Upgrade "
-                           "Bitflash before opening this wallet.\n");
+                    // Said out loud, not only into debug.log: this is the one
+                    // refusal whose whole purpose is to be understood, and the
+                    // caller puts it in front of the user.
+                    strWalletLoadError = strprintf(
+                        "This wallet.dat was written by a newer version of Bitflash "
+                        "(wallet format %d; this build understands %d). Upgrade "
+                        "Bitflash before opening it.",
+                        nMinVersion, WALLET_FORMAT_SUPPORTED);
+                    printf("LoadWallet: %s\n", strWalletLoadError.c_str());
                     return false;
                 }
             }

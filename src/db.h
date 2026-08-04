@@ -54,6 +54,9 @@ extern void DBFlush(bool fShutdown);
 // this: the logs hold the plaintext records the old wallet wrote.
 extern void PurgeDbEnvironmentLogs();
 
+// Set by LoadWallet() when it refuses for a reason worth telling the user.
+extern string strWalletLoadError;
+
 
 
 

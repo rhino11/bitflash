@@ -291,6 +291,50 @@ static void ParseStartupArguments(int argc, char* argv[])
     }
 }
 
+// Report a startup failure somewhere the user will actually see it.
+//
+// Every fatal path here wrote to stderr and to printf, and on the platform most
+// people use, neither reaches anybody. printf is remapped to OutputDebugStringF,
+// so it lands in debug.log inside the data directory. A -mwindows binary
+// launched by double-clicking has no stderr at all, and AttachTerminal() cannot
+// help: it attaches to a *parent* console, which a double-clicked exe does not
+// have.
+//
+// So the program exited silently. Someone whose wallet.dat needs a newer build
+// -- which is exactly what the wallet format guard was added to tell them --
+// double-clicked Bitflash and watched nothing happen.
+//
+// The box is deliberately not shown for a headless node: those run under
+// scheduled tasks and services, where a modal dialog waits forever for a click
+// nobody is there to make. Headless already has a console when it has one, and
+// its output goes to stderr and the log as before.
+static void FatalStartupError(bool fHeadless, const string& strWhat, const string& strDetail)
+{
+    printf("FATAL: %s\n", strWhat.c_str());
+    if (!strDetail.empty())
+        printf("FATAL: %s\n", strDetail.c_str());
+
+    AttachTerminal();
+    fprintf(stderr, "%s\n", strWhat.c_str());
+    if (!strDetail.empty())
+        fprintf(stderr, "%s\n", strDetail.c_str());
+    fflush(stderr);
+
+#ifdef _WIN32
+    if (!fHeadless && GetConsoleWindow() == NULL)
+    {
+        string strBody = strWhat;
+        if (!strDetail.empty())
+            strBody += "\n\n" + strDetail;
+        strBody += "\n\nNothing was changed. More detail is in debug.log, "
+                   "inside the data directory.";
+        MessageBoxA(NULL, strBody.c_str(), "Bitflash", MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
+    }
+#else
+    (void)fHeadless;
+#endif
+}
+
 int main(int argc, char* argv[])
 {
     if (arg(argc,argv,"/help") || arg(argc,argv,"-help") ||
@@ -323,25 +367,47 @@ int main(int argc, char* argv[])
     //   libdb_cxx-6.2.dll -> CDB::CDB(...) -> LoadBlockIndex(...) -> main()
     //
     // The program knew what had gone wrong and threw the reason away.
+    // Needed here, long before the headless branch runs, because whether a
+    // startup failure may pop a dialog depends on it.
+#ifdef BITFLASH_NO_GUI
+    bool fHeadlessStartup = true;
+#else
+    bool fHeadlessStartup = arg(argc,argv,"/nogui") || arg(argc,argv,"-nogui") ||
+                            arg(argc,argv,"/daemon") || arg(argc,argv,"-daemon");
+#endif
+
     string strErrors;
     printf("Loading block index...\n");
     try
     {
-        if (!LoadBlockIndex()) { fprintf(stderr, "LoadBlockIndex failed\n"); return 1; }
+        if (!LoadBlockIndex())
+        {
+            FatalStartupError(fHeadlessStartup, "Cannot load the block index.", "");
+            return 1;
+        }
     }
     catch (const std::exception& e)
     {
-        fprintf(stderr, "Cannot read the block index: %s\n", e.what());
-        fprintf(stderr, "blkindex.dat and blk0001.dat may be from another machine or "
-                        "incomplete. Deleting both is safe -- they are re-downloaded -- "
-                        "but never delete wallet.dat, which holds your keys.\n");
+        FatalStartupError(fHeadlessStartup,
+                          strprintf("Cannot read the block index: %s", e.what()),
+                          "blkindex.dat and blk0001.dat may be from another machine or "
+                          "incomplete. Deleting both is safe -- they are re-downloaded -- "
+                          "but never delete wallet.dat, which holds your keys.");
         return 1;
     }
 
     printf("Loading wallet...\n");
     try
     {
-        if (!LoadWallet()) { fprintf(stderr, "LoadWallet failed\n"); return 1; }
+        if (!LoadWallet())
+        {
+            // LoadWallet() explains itself into strWalletLoadError when it
+            // knows why -- an unsupported wallet format, for one, which is the
+            // case this whole path exists to make visible.
+            FatalStartupError(fHeadlessStartup, "Cannot open wallet.dat.",
+                              strWalletLoadError);
+            return 1;
+        }
 
         // After the block index, so there is a chain to compare the wallet
         // against, and before anything reports a balance.
@@ -349,10 +415,11 @@ int main(int argc, char* argv[])
     }
     catch (const std::exception& e)
     {
-        fprintf(stderr, "Cannot read wallet.dat: %s\n", e.what());
-        fprintf(stderr, "The file was left untouched. A wallet.dat written by a "
-                        "different platform's Berkeley DB is the usual cause; back it "
-                        "up before trying anything else.\n");
+        FatalStartupError(fHeadlessStartup,
+                          strprintf("Cannot read wallet.dat: %s", e.what()),
+                          "The file was left untouched. A wallet.dat written by a "
+                          "different platform's Berkeley DB is the usual cause; back it "
+                          "up before trying anything else.");
         return 1;
     }
     printf("Height=%d\n", nBestHeight);
