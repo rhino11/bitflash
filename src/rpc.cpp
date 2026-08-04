@@ -167,29 +167,64 @@ static bool RebuildJob()
         CBlock block;
         block.vtx.push_back(txNew);
 
+        // Fill the block the same way BitcoinMiner() does, because this is the
+        // same job: a block that gets mined and submitted for real.
+        //
+        // It used to differ in two ways, and both were bugs.
+        //
+        // One pass over mapTransactions is not enough. That map is keyed by
+        // hash, so it has no dependency order, and a transaction spending the
+        // still-unconfirmed output of another (change from a recent send, most
+        // commonly) fails ConnectInputs whenever its parent happens to sit
+        // later in map order. A single pass then drops it -- and because map
+        // order does not change between rebuilds, every later rebuild drops it
+        // again at the same point. Deterministic exclusion, not bad luck: if
+        // pool operators mine most of the blocks, a transaction of that shape
+        // can stay unconfirmed for as long as its parent does.
+        //
+        // Diagnosis and fix both come from Vic-Nas, who found it in his fork
+        // of this code and described it exactly. The fork has since been
+        // deleted, so this carries it back rather than losing it.
+        int64 nFees = 0;
         {
             CTxDB txdb("r");
             CRITICAL_BLOCK(cs_mapTransactions)
             {
                 map<uint256, CTxIndex> pool;
+                vector<char> vfAlreadyAdded(mapTransactions.size());
+                bool fFoundSomething = true;
                 unsigned int sz = 0;
-                for (auto& kv : mapTransactions) {
-                    CTransaction& tx = kv.second;
-                    if (tx.IsCoinBase() || !tx.IsFinal()) continue;
-                    int64 nFees = 0;
-                    map<uint256, CTxIndex> tmp(pool);
-                    if (!tx.ConnectInputs(txdb, tmp, CDiskTxPos(1,1,1), 0, nFees,
-                                          false, true, tx.GetMinFee(block.vtx.size() < 100)))
-                        continue;
-                    pool = tmp;
-                    block.vtx.push_back(tx);
-                    sz += ::GetSerializeSize(tx, SER_NETWORK);
-                    if (sz > MAX_SIZE / 2) break;
+                while (fFoundSomething && sz < MAX_SIZE / 2)
+                {
+                    fFoundSomething = false;
+                    unsigned int n = 0;
+                    for (map<uint256, CTransaction>::iterator mi = mapTransactions.begin();
+                         mi != mapTransactions.end(); ++mi, ++n)
+                    {
+                        if (vfAlreadyAdded[n])
+                            continue;
+                        CTransaction& tx = (*mi).second;
+                        if (tx.IsCoinBase() || !tx.IsFinal()) continue;
+                        map<uint256, CTxIndex> tmp(pool);
+                        if (!tx.ConnectInputs(txdb, tmp, CDiskTxPos(1,1,1), 0, nFees,
+                                              false, true, tx.GetMinFee(block.vtx.size() < 100)))
+                            continue;
+                        swap(pool, tmp);
+                        block.vtx.push_back(tx);
+                        sz += ::GetSerializeSize(tx, SER_NETWORK);
+                        vfAlreadyAdded[n] = true;
+                        fFoundSomething = true;
+                    }
                 }
             }
         }
 
-        block.vtx[0].vout[0].nValue = block.GetBlockValue(pindexPrev->nHeight + 1, 0);
+        // And the fees actually go to the coinbase now. nFees was declared
+        // inside the scan loop, so every transaction reset it and the total was
+        // thrown away, while this line passed a hardcoded 0. A pool operator
+        // collected fees into a block and paid none of them to itself. Solo
+        // mining has always passed nFees here; only this builder did not.
+        block.vtx[0].vout[0].nValue = block.GetBlockValue(pindexPrev->nHeight + 1, nFees);
         block.hashPrevBlock  = pindexPrev->GetBlockHash();
         block.hashMerkleRoot = block.BuildMerkleTree();
         block.nTime = max((unsigned int)(pindexPrev->GetMedianTimePast() + 1),
