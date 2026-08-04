@@ -49,12 +49,29 @@ configuration — it connects automatically and starts syncing.
 
 **Windows:** extract the `-windows.zip` and run `Bitflash.exe`.
 
-Every release ships a `SHA256SUMS` covering both assets. Verifying takes a second
+Every release ships a `SHA256SUMS` covering the assets. Verifying takes a second
 and is worth doing:
 
 ```bash
 sha256sum -c SHA256SUMS
 ```
+
+For newer signed releases, verify the checksum file itself first:
+
+```bash
+gpg --verify SHA256SUMS.asc SHA256SUMS
+sha256sum -c SHA256SUMS
+```
+
+The helper below downloads the release assets, verifies `SHA256SUMS.asc` when it
+is present, then checks the hashes:
+
+```bash
+scripts/verify-release.sh latest
+```
+
+See [release verification](docs/release-verification.md) for the full release
+audit flow and the maintainer signing step.
 
 **Keep your node current.** Consensus rules have changed since the first
 releases — 1.2.1 fixed a bug that let anyone spend anyone's coins, and 1.2.2

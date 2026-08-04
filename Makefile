@@ -3,6 +3,8 @@
 #   make linux    build Bitflash-*-x86_64.AppImage
 #   make windows  build Bitflash-*-windows.zip (from MSYS2 UCRT64)
 #   make tests    build and run standalone unit tests
+#   make checksums create SHA256SUMS for release assets
+#   make verify-release TAG=v1.2.13
 #   make clean    remove build artifacts
 
 ROOT    := $(shell pwd)
@@ -160,5 +162,15 @@ clean:
 tests:
 	$(MAKE) -C src -f Makefile tests
 
+checksums:
+	./scripts/make-release-checksums.sh
+
+sign-checksums:
+	./scripts/make-release-checksums.sh --sign $(if $(KEY),--local-user $(KEY),)
+
+verify-release:
+	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
+
 .PHONY: linux windows clean appimage \
-        tests deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx
+        tests checksums sign-checksums verify-release \
+        deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

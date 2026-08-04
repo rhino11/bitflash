@@ -13,6 +13,7 @@ Bitflash-*-windows.zip
 Bitflash-*.AppImage
 bitflash-node-*-x86_64
 SHA256SUMS
+SHA256SUMS.asc
 
 # Runtime data / logs
 debug.log
