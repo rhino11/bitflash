@@ -33,6 +33,8 @@
 
 #ifdef _WIN32
 #include <direct.h>
+#include <fcntl.h>
+#include <io.h>
 #else
 #include <dirent.h>
 #include <sys/stat.h>
@@ -601,6 +603,500 @@ static int RunWalletHDSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunWalletFormatSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-format self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    try
+    {
+        class CWalletDBRaw : public CWalletDB
+        {
+        public:
+            CWalletDBRaw(const char* pszMode="r+") : CWalletDB(pszMode) { }
+            bool WriteStringRecord(const string& strType, int nValue)
+            {
+                return Write(strType, nValue);
+            }
+            bool EraseStringRecord(const string& strType)
+            {
+                return Erase(strType);
+            }
+        };
+
+        if (!LoadWallet())
+            throw std::runtime_error("LoadWallet failed");
+
+        {
+            CWalletDB walletdb;
+            nFail += Check(walletdb.WriteWalletMinVersion(WALLET_FORMAT_SUPPORTED),
+                           "the current wallet format marker can be written") ? 0 : 1;
+        }
+
+        std::vector<unsigned char> vchDefaultKey;
+        nFail += Check(CWalletDB("r").LoadWallet(vchDefaultKey),
+                       "the current wallet format marker loads") ? 0 : 1;
+
+        {
+            CWalletDBRaw walletdb;
+            nFail += Check(walletdb.WriteStringRecord("mkey", 1),
+                           "a malformed encrypted master-key record can be written") ? 0 : 1;
+        }
+
+        vchDefaultKey.clear();
+        nFail += Check(!CWalletDB("r").LoadWallet(vchDefaultKey),
+                       "a malformed encrypted master-key record is refused") ? 0 : 1;
+
+        {
+            CWalletDBRaw walletdb;
+            nFail += Check(walletdb.EraseStringRecord("mkey"),
+                           "the malformed encrypted master-key record can be removed") ? 0 : 1;
+        }
+
+        {
+            CWalletDB walletdb;
+            nFail += Check(walletdb.WriteWalletMinVersion(WALLET_FORMAT_SUPPORTED + 1),
+                           "a future wallet format marker can be written") ? 0 : 1;
+        }
+
+        vchDefaultKey.clear();
+        nFail += Check(!CWalletDB("r").LoadWallet(vchDefaultKey),
+                       "a future wallet format marker is refused") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+static void ClearWalletRuntimeForTest()
+{
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        mapKeys.clear();
+        mapCryptedKeys.clear();
+        mapPubKeys.clear();
+        mapMasterKeys.clear();
+        vWalletMasterKey.clear();
+        vchCryptedHDMaster.clear();
+        vchCryptedHDChainCode.clear();
+        fWalletEncrypted = false;
+        fWalletLocked = true;
+    }
+    CRITICAL_BLOCK(cs_keyPool)
+        mapKeyPool.clear();
+    vchHDMaster.clear();
+    vchHDChainCode.clear();
+    nHDNext = 0;
+}
+
+static int RunWalletCryptoSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-crypto self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    try
+    {
+        const string strPassphrase = "btf-test-passphrase";
+        const string strWrongPassphrase = "btf-test-passphraser";
+
+        CKey key;
+        key.MakeNewKey();
+        vector<unsigned char> vchPubKey = key.GetPubKey();
+        CPrivKey vchPrivKey = key.GetPrivKey();
+
+        CKeyingMaterial vchMasterKey;
+        for (int i = 0; i < 32; i++)
+            vchMasterKey.push_back((unsigned char)(i + 1));
+
+        CWalletMasterKey kMasterKey;
+        kMasterKey.vchSalt.clear();
+        for (int i = 0; i < 8; i++)
+            kMasterKey.vchSalt.push_back((unsigned char)(0xa0 + i));
+        kMasterKey.nDeriveIterations = 2500;
+
+        CKeyingMaterial vchPassKey;
+        vector<unsigned char> vchPassIV;
+        nFail += Check(DeriveWalletPassphraseKey(strPassphrase, kMasterKey.vchSalt,
+                                                 kMasterKey.nDeriveIterations,
+                                                 vchPassKey, vchPassIV),
+                       "a passphrase key can be derived") ? 0 : 1;
+        nFail += Check(EncryptSecret(vchPassKey,
+                                     vector<unsigned char>(vchMasterKey.begin(), vchMasterKey.end()),
+                                     vchPassIV, kMasterKey.vchCryptedKey),
+                       "the wallet master key can be encrypted") ? 0 : 1;
+
+        vector<unsigned char> vchCryptedKey;
+        nFail += Check(EncryptSecret(vchMasterKey,
+                                     vector<unsigned char>(vchPrivKey.begin(), vchPrivKey.end()),
+                                     WalletKeyIV(vchPubKey), vchCryptedKey),
+                       "a private key can be encrypted under the wallet master key") ? 0 : 1;
+
+        {
+            CWalletDB walletdb("cr");
+            nFail += Check(walletdb.WriteWalletMinVersion(WALLET_FORMAT_ENCRYPTED),
+                           "an encrypted wallet format marker can be written") ? 0 : 1;
+            nFail += Check(walletdb.WriteMasterKey(0, kMasterKey),
+                           "the encrypted master key can be written") ? 0 : 1;
+            nFail += Check(walletdb.WriteCryptedKey(vchPubKey, vchCryptedKey),
+                           "the encrypted private key can be written") ? 0 : 1;
+            nFail += Check(walletdb.WriteDefaultKey(vchPubKey),
+                           "the encrypted wallet default key can be written") ? 0 : 1;
+        }
+
+        ClearWalletRuntimeForTest();
+
+        vector<unsigned char> vchDefaultKey;
+        nFail += Check(CWalletDB("r").LoadWallet(vchDefaultKey),
+                       "an encrypted wallet can be loaded") ? 0 : 1;
+        nFail += Check(vchDefaultKey == vchPubKey,
+                       "the encrypted wallet default public key loads") ? 0 : 1;
+        nFail += Check(IsWalletEncrypted() && IsWalletLocked(),
+                       "an encrypted wallet loads locked") ? 0 : 1;
+        nFail += Check(WalletCanSpendKey(vchPubKey),
+                       "an encrypted key is recognized as wallet-owned while locked") ? 0 : 1;
+
+        CPrivKey vchDecrypted;
+        string strError;
+        nFail += Check(!GetWalletPrivKey(vchPubKey, vchDecrypted, strError),
+                       "a locked encrypted key cannot be read") ? 0 : 1;
+        nFail += Check(!UnlockWallet(strWrongPassphrase, strError),
+                       "the wrong-passphrase does not unlock") ? 0 : 1;
+        nFail += Check(UnlockWallet(strPassphrase, strError),
+                       "the right passphrase unlocks") ? 0 : 1;
+        nFail += Check(!IsWalletLocked(),
+                       "the wallet reports unlocked") ? 0 : 1;
+        nFail += Check(GetWalletPrivKey(vchPubKey, vchDecrypted, strError) &&
+                       vchDecrypted == vchPrivKey,
+                       "an unlocked encrypted key decrypts to the original private key") ? 0 : 1;
+        LockWallet();
+        nFail += Check(IsWalletLocked(),
+                       "locking clears the unlocked state") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+static bool FileContainsBytes(const string& strPath, const vector<unsigned char>& vchNeedle)
+{
+    if (vchNeedle.empty())
+        return false;
+    FILE* pf = fopen(strPath.c_str(), "rb");
+    if (!pf)
+        return false;
+
+    vector<unsigned char> vchHaystack;
+    unsigned char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), pf)) > 0)
+        vchHaystack.insert(vchHaystack.end(), buf, buf + n);
+    fclose(pf);
+
+    if (vchHaystack.size() < vchNeedle.size())
+        return false;
+    return search(vchHaystack.begin(), vchHaystack.end(),
+                  vchNeedle.begin(), vchNeedle.end()) != vchHaystack.end();
+}
+
+static bool FileContainsText(const string& strPath, const string& strNeedle)
+{
+    FILE* pf = fopen(strPath.c_str(), "rb");
+    if (!pf)
+        return false;
+
+    string strHaystack;
+    char buf[4096];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), pf)) > 0)
+        strHaystack.append(buf, buf + n);
+    fclose(pf);
+
+    return strHaystack.find(strNeedle) != string::npos;
+}
+
+static bool WriteTextFile(const string& strPath, const string& strText)
+{
+    FILE* pf = fopen(strPath.c_str(), "wb");
+    if (!pf)
+        return false;
+    bool fOk = fwrite(strText.data(), 1, strText.size(), pf) == strText.size();
+    if (fclose(pf) != 0)
+        fOk = false;
+    return fOk;
+}
+
+static string QuoteCommandArg(const string& str)
+{
+    string out = "\"";
+    for (size_t i = 0; i < str.size(); i++)
+    {
+        if (str[i] == '"')
+            out += "\\\"";
+        else
+            out += str[i];
+    }
+    out += "\"";
+    return out;
+}
+
+static int RunBitflashChild(const string& strExe,
+                            const vector<string>& vArgs,
+                            const string* pStdinFile = NULL)
+{
+#ifdef _WIN32
+    vector<char*> argv;
+    argv.push_back((char*)strExe.c_str());
+    for (size_t i = 0; i < vArgs.size(); i++)
+        argv.push_back((char*)vArgs[i].c_str());
+    argv.push_back(NULL);
+
+    int nOldOut = _dup(1);
+    int nOldErr = _dup(2);
+    int nOldIn = _dup(0);
+    int nNull = _open("NUL", _O_WRONLY);
+    int nIn = -1;
+    if (nNull >= 0)
+    {
+        _dup2(nNull, 1);
+        _dup2(nNull, 2);
+    }
+    if (pStdinFile)
+    {
+        nIn = _open(pStdinFile->c_str(), _O_RDONLY);
+        if (nIn >= 0)
+            _dup2(nIn, 0);
+    }
+    int nRet = _spawnv(_P_WAIT, strExe.c_str(), &argv[0]);
+    if (nIn >= 0)
+        _close(nIn);
+    if (nNull >= 0)
+        _close(nNull);
+    if (nOldIn >= 0)
+    {
+        _dup2(nOldIn, 0);
+        _close(nOldIn);
+    }
+    if (nOldOut >= 0)
+    {
+        _dup2(nOldOut, 1);
+        _close(nOldOut);
+    }
+    if (nOldErr >= 0)
+    {
+        _dup2(nOldErr, 2);
+        _close(nOldErr);
+    }
+    return nRet;
+#else
+    string strCmd = QuoteCommandArg(strExe);
+    for (size_t i = 0; i < vArgs.size(); i++)
+        strCmd += " " + QuoteCommandArg(vArgs[i]);
+    if (pStdinFile)
+        strCmd += " < " + QuoteCommandArg(*pStdinFile);
+    strCmd += " > /dev/null 2>&1";
+    return system(strCmd.c_str());
+#endif
+}
+
+static int RunWalletEncryptSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-encrypt self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    bool fWalletEnvClosed = false;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    try
+    {
+        if (!LoadWallet())
+            throw std::runtime_error("LoadWallet failed");
+
+        string strError;
+        const string strMnemonic =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        nFail += Check(SetHDSeedFromMnemonic(strMnemonic, strError),
+                       "a phrase can be installed before encryption") ? 0 : 1;
+        TopUpKeyPool();
+
+        vector<unsigned char> vchDefaultPubKey = keyUser.GetPubKey();
+        CPrivKey vchDefaultPrivKey;
+        nFail += Check(GetWalletPrivKey(vchDefaultPubKey, vchDefaultPrivKey, strError),
+                       "the default private key is readable before encryption") ? 0 : 1;
+        vector<unsigned char> vchDefaultPrivBytes(vchDefaultPrivKey.begin(), vchDefaultPrivKey.end());
+        vector<unsigned char> vchPlainHDMaster = vchHDMaster;
+        vector<unsigned char> vchPlainHDChainCode = vchHDChainCode;
+
+        string strBackup;
+        nFail += Check(EncryptWallet("btf-test-passphrase", strBackup, strError),
+                       "wallet.dat can be rewritten encrypted") ? 0 : 1;
+        fWalletEnvClosed = true;
+        nFail += Check(FileExists(strBackup.c_str()),
+                       "the original wallet is preserved as an explicit backup") ? 0 : 1;
+
+        string strWalletPath = GetAppDir() + "/wallet.dat";
+        nFail += Check(!FileContainsBytes(strWalletPath, vchDefaultPrivBytes),
+                       "the active wallet no longer contains the default private key bytes") ? 0 : 1;
+        nFail += Check(!FileContainsBytes(strWalletPath, vchPlainHDMaster),
+                       "the active wallet no longer contains the HD master key bytes") ? 0 : 1;
+        nFail += Check(!FileContainsBytes(strWalletPath, vchPlainHDChainCode),
+                       "the active wallet no longer contains the HD chain-code bytes") ? 0 : 1;
+
+#ifdef _WIN32
+        string strExe = cwd + "\\bitflash.exe";
+#else
+        string strExe = cwd + "/bitflash-node";
+#endif
+        string strWrongDump = tmp + "/wrong-pass-dump.txt";
+        string strRightDump = tmp + "/right-pass-dump.txt";
+        string strLiteralDump = tmp + "/literal-pass-dump.txt";
+        string strStdinDump = tmp + "/stdin-pass-dump.txt";
+        string strWrongPassFile = tmp + "/wrong-pass.txt";
+        string strRightPassFile = tmp + "/right-pass.txt";
+        nFail += Check(WriteTextFile(strWrongPassFile, "wrong-passphrase\n") &&
+                       WriteTextFile(strRightPassFile, "btf-test-passphrase\n"),
+                       "passphrase files can be written for restarted commands") ? 0 : 1;
+
+        vector<string> vWrongArgs;
+        vWrongArgs.push_back("-datadir=" + tmp);
+        vWrongArgs.push_back("-walletpassphrase=@" + strWrongPassFile);
+        vWrongArgs.push_back("-dumpwallet=" + strWrongDump);
+        vWrongArgs.push_back("-nogui");
+        int nWrongRet = RunBitflashChild(strExe, vWrongArgs);
+        nFail += Check(nWrongRet != 0 && !FileExists(strWrongDump.c_str()),
+                       "a restarted wallet rejects the wrong-passphrase") ? 0 : 1;
+
+        vector<string> vLiteralArgs;
+        vLiteralArgs.push_back("-datadir=" + tmp);
+        vLiteralArgs.push_back("-walletpassphrase=btf-test-passphrase");
+        vLiteralArgs.push_back("-dumpwallet=" + strLiteralDump);
+        vLiteralArgs.push_back("-nogui");
+        int nLiteralRet = RunBitflashChild(strExe, vLiteralArgs);
+        nFail += Check(nLiteralRet != 0 && !FileExists(strLiteralDump.c_str()),
+                       "literal passphrases on the command line are refused") ? 0 : 1;
+
+        vector<string> vRightArgs;
+        vRightArgs.push_back("-datadir=" + tmp);
+        vRightArgs.push_back("-walletpassphrase=@" + strRightPassFile);
+        vRightArgs.push_back("-dumpwallet=" + strRightDump);
+        vRightArgs.push_back("-nogui");
+        int nRightRet = RunBitflashChild(strExe, vRightArgs);
+        nFail += Check(nRightRet == 0 && FileExists(strRightDump.c_str()),
+                       "a restarted wallet unlocks with the right passphrase") ? 0 : 1;
+        nFail += Check(FileContainsText(strRightDump, HexStrLocal(vchDefaultPrivBytes)),
+                       "the restarted wallet can decrypt and dump the original key") ? 0 : 1;
+
+        vector<string> vStdinArgs;
+        vStdinArgs.push_back("-datadir=" + tmp);
+        vStdinArgs.push_back("-walletpassphrase");
+        vStdinArgs.push_back("-dumpwallet=" + strStdinDump);
+        vStdinArgs.push_back("-nogui");
+        int nStdinRet = RunBitflashChild(strExe, vStdinArgs, &strRightPassFile);
+        nFail += Check(nStdinRet == 0 && FileExists(strStdinDump.c_str()),
+                       "a restarted wallet can read the passphrase from stdin") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    if (!fWalletEnvClosed)
+        DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunNetMessageSelfTest()
 {
     fflush(stdout);
@@ -728,12 +1224,18 @@ int RunSelfTest(const std::string& name)
         return RunWalletKeyPoolSelfTest();
     if (name == "wallet-hd")
         return RunWalletHDSelfTest();
+    if (name == "wallet-format")
+        return RunWalletFormatSelfTest();
+    if (name == "wallet-crypto")
+        return RunWalletCryptoSelfTest();
+    if (name == "wallet-encrypt")
+        return RunWalletEncryptSelfTest();
     if (name == "net-message")
         return RunNetMessageSelfTest();
     if (name == "consensus-limits")
         return RunConsensusLimitsSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, net-message, consensus-limits\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits\n");
     return 1;
 }

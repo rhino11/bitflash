@@ -1020,43 +1020,54 @@ bool Solver(const CScript& scriptPubKey, uint256 hash, int nHashType, CScript& s
     if (!Solver(scriptPubKey, vSolution))
         return false;
 
-    // Compile solution
-    CRITICAL_BLOCK(cs_mapKeys)
+    // Compile solution. Public keys stay available for encrypted wallets so the
+    // wallet can recognize its own outputs while locked; private keys are
+    // fetched only for an actual signature.
+    foreach(PAIRTYPE(opcodetype, valtype)& item, vSolution)
     {
-        foreach(PAIRTYPE(opcodetype, valtype)& item, vSolution)
+        if (item.first == OP_PUBKEY)
         {
-            if (item.first == OP_PUBKEY)
+            const valtype& vchPubKey = item.second;
+            if (!WalletCanSpendKey(vchPubKey))
+                return false;
+            if (hash != 0)
             {
-                // Sign
-                const valtype& vchPubKey = item.second;
-                if (!mapKeys.count(vchPubKey))
+                CPrivKey vchPrivKey;
+                string strError;
+                if (!GetWalletPrivKey(vchPubKey, vchPrivKey, strError))
                     return false;
-                if (hash != 0)
+                vector<unsigned char> vchSig;
+                if (!CKey::Sign(vchPrivKey, hash, vchSig))
+                    return false;
+                vchSig.push_back((unsigned char)nHashType);
+                scriptSigRet << vchSig;
+            }
+        }
+        else if (item.first == OP_PUBKEYHASH)
+        {
+            vector<unsigned char> vchPubKey;
+            {
+                CRITICAL_BLOCK(cs_mapKeys)
                 {
-                    vector<unsigned char> vchSig;
-                    if (!CKey::Sign(mapKeys[vchPubKey], hash, vchSig))
+                    map<uint160, valtype>::iterator mi = mapPubKeys.find(uint160(item.second));
+                    if (mi == mapPubKeys.end())
                         return false;
-                    vchSig.push_back((unsigned char)nHashType);
-                    scriptSigRet << vchSig;
+                    vchPubKey = (*mi).second;
                 }
             }
-            else if (item.first == OP_PUBKEYHASH)
+            if (!WalletCanSpendKey(vchPubKey))
+                return false;
+            if (hash != 0)
             {
-                // Sign and give pubkey
-                map<uint160, valtype>::iterator mi = mapPubKeys.find(uint160(item.second));
-                if (mi == mapPubKeys.end())
+                CPrivKey vchPrivKey;
+                string strError;
+                if (!GetWalletPrivKey(vchPubKey, vchPrivKey, strError))
                     return false;
-                const vector<unsigned char>& vchPubKey = (*mi).second;
-                if (!mapKeys.count(vchPubKey))
+                vector<unsigned char> vchSig;
+                if (!CKey::Sign(vchPrivKey, hash, vchSig))
                     return false;
-                if (hash != 0)
-                {
-                    vector<unsigned char> vchSig;
-                    if (!CKey::Sign(mapKeys[vchPubKey], hash, vchSig))
-                        return false;
-                    vchSig.push_back((unsigned char)nHashType);
-                    scriptSigRet << vchSig << vchPubKey;
-                }
+                vchSig.push_back((unsigned char)nHashType);
+                scriptSigRet << vchSig << vchPubKey;
             }
         }
     }
@@ -1080,27 +1091,27 @@ bool ExtractPubKey(const CScript& scriptPubKey, bool fMineOnly, vector<unsigned 
     if (!Solver(scriptPubKey, vSolution))
         return false;
 
-    CRITICAL_BLOCK(cs_mapKeys)
+    foreach(PAIRTYPE(opcodetype, valtype)& item, vSolution)
     {
-        foreach(PAIRTYPE(opcodetype, valtype)& item, vSolution)
+        valtype vchPubKey;
+        if (item.first == OP_PUBKEY)
         {
-            valtype vchPubKey;
-            if (item.first == OP_PUBKEY)
-            {
-                vchPubKey = item.second;
-            }
-            else if (item.first == OP_PUBKEYHASH)
+            vchPubKey = item.second;
+        }
+        else if (item.first == OP_PUBKEYHASH)
+        {
+            CRITICAL_BLOCK(cs_mapKeys)
             {
                 map<uint160, valtype>::iterator mi = mapPubKeys.find(uint160(item.second));
                 if (mi == mapPubKeys.end())
                     continue;
                 vchPubKey = (*mi).second;
             }
-            if (!fMineOnly || mapKeys.count(vchPubKey))
-            {
-                vchPubKeyRet = vchPubKey;
-                return true;
-            }
+        }
+        if (!fMineOnly || WalletCanSpendKey(vchPubKey))
+        {
+            vchPubKeyRet = vchPubKey;
+            return true;
         }
     }
     return false;

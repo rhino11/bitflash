@@ -53,6 +53,10 @@ int CmdShowDerived(int nCount);
 // by the installed recovery phrase or still depends on wallet.dat-only keys.
 int CmdRecoveryAudit();
 
+// Rewrite wallet.dat so private keys and the HD seed are encrypted with the
+// given passphrase. Returns 0 on success and exits without starting the node.
+int CmdEncryptWallet(const std::string& strPassphrase);
+
 // Spend, from the command line. Until now the only way to send was the window,
 // so a headless node could be paid and could never pay -- it could hold a
 // balance it had no way to move. strArg is "ADDRESS,AMOUNT".

@@ -72,7 +72,15 @@ vector<pair<uint256, bool> > vWalletUpdated;
 CCriticalSection cs_mapWallet;
 
 map<vector<unsigned char>, CPrivKey> mapKeys;
+map<vector<unsigned char>, vector<unsigned char> > mapCryptedKeys;
 map<uint160, vector<unsigned char> > mapPubKeys;
+map<unsigned int, CWalletMasterKey> mapMasterKeys;
+unsigned int nWalletMasterKeyMaxID = 0;
+CKeyingMaterial vWalletMasterKey;
+vector<unsigned char> vchCryptedHDMaster;
+vector<unsigned char> vchCryptedHDChainCode;
+bool fWalletEncrypted = false;
+bool fWalletLocked = true;
 CCriticalSection cs_mapKeys;
 CKey keyUser;
 
@@ -159,6 +167,21 @@ int MinerThreadCount()
 
 bool AddKey(const CKey& key)
 {
+    if (IsWalletEncrypted())
+    {
+        string strError;
+        CPrivKey vchPrivKey = key.GetPrivKey();
+        vector<unsigned char> vchCryptedSecret;
+        if (IsWalletLocked())
+            return error("AddKey() : wallet is locked\n");
+        if (!EncryptSecret(vWalletMasterKey, vector<unsigned char>(vchPrivKey.begin(), vchPrivKey.end()),
+                           WalletKeyIV(key.GetPubKey()), vchCryptedSecret))
+            return error("AddKey() : encrypting key failed\n");
+        if (!AddCryptedKey(key.GetPubKey(), vchCryptedSecret))
+            return false;
+        return CWalletDB().WriteCryptedKey(key.GetPubKey(), vchCryptedSecret);
+    }
+
     CRITICAL_BLOCK(cs_mapKeys)
     {
         mapKeys[key.GetPubKey()] = key.GetPrivKey();
@@ -167,10 +190,287 @@ bool AddKey(const CKey& key)
     return CWalletDB().WriteKey(key.GetPubKey(), key.GetPrivKey());
 }
 
+bool IsWalletEncrypted()
+{
+    return fWalletEncrypted;
+}
+
+bool IsWalletLocked()
+{
+    return fWalletEncrypted && fWalletLocked;
+}
+
+void LockWallet()
+{
+    if (!fWalletEncrypted)
+        return;
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        vWalletMasterKey.clear();
+        if (!vchCryptedHDMaster.empty())
+            vchHDMaster.clear();
+        if (!vchCryptedHDChainCode.empty())
+            vchHDChainCode.clear();
+        fWalletLocked = true;
+    }
+}
+
+bool DeriveWalletPassphraseKey(const string& strPassphrase,
+                               const vector<unsigned char>& vchSalt,
+                               unsigned int nDeriveIterations,
+                               CKeyingMaterial& vchKeyRet,
+                               vector<unsigned char>& vchIVRet)
+{
+    vchKeyRet.clear();
+    vchIVRet.clear();
+    if (vchSalt.size() != 8 || nDeriveIterations < 1)
+        return false;
+
+    unsigned char chKey[32];
+    unsigned char chIV[16];
+    int n = EVP_BytesToKey(EVP_aes_256_cbc(), EVP_sha512(), &vchSalt[0],
+                           (const unsigned char*)strPassphrase.data(),
+                           (int)strPassphrase.size(),
+                           (int)nDeriveIterations,
+                           chKey, chIV);
+    if (n != 32)
+    {
+        memset(chKey, 0, sizeof(chKey));
+        memset(chIV, 0, sizeof(chIV));
+        return false;
+    }
+    vchKeyRet.assign(chKey, chKey + sizeof(chKey));
+    vchIVRet.assign(chIV, chIV + sizeof(chIV));
+    memset(chKey, 0, sizeof(chKey));
+    memset(chIV, 0, sizeof(chIV));
+    return true;
+}
+
+bool EncryptSecret(const CKeyingMaterial& vchKey,
+                   const vector<unsigned char>& vchPlaintext,
+                   const vector<unsigned char>& vchIV,
+                   vector<unsigned char>& vchCiphertextRet)
+{
+    vchCiphertextRet.clear();
+    if (vchKey.size() != 32 || vchIV.size() != 16)
+        return false;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return false;
+
+    bool fOk = false;
+    int nLen = 0;
+    int nFinal = 0;
+    vector<unsigned char> vchOut(vchPlaintext.size() + EVP_CIPHER_block_size(EVP_aes_256_cbc()));
+    if (EVP_EncryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, &vchKey[0], &vchIV[0]) &&
+        EVP_EncryptUpdate(ctx, &vchOut[0], &nLen,
+                          vchPlaintext.empty() ? NULL : &vchPlaintext[0],
+                          (int)vchPlaintext.size()) &&
+        EVP_EncryptFinal_ex(ctx, &vchOut[0] + nLen, &nFinal))
+    {
+        vchOut.resize(nLen + nFinal);
+        vchCiphertextRet.swap(vchOut);
+        fOk = true;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return fOk;
+}
+
+bool DecryptSecret(const CKeyingMaterial& vchKey,
+                   const vector<unsigned char>& vchCiphertext,
+                   const vector<unsigned char>& vchIV,
+                   vector<unsigned char>& vchPlaintextRet)
+{
+    vchPlaintextRet.clear();
+    if (vchKey.size() != 32 || vchIV.size() != 16 || vchCiphertext.empty())
+        return false;
+
+    EVP_CIPHER_CTX* ctx = EVP_CIPHER_CTX_new();
+    if (!ctx)
+        return false;
+
+    bool fOk = false;
+    int nLen = 0;
+    int nFinal = 0;
+    vector<unsigned char> vchOut(vchCiphertext.size());
+    if (EVP_DecryptInit_ex(ctx, EVP_aes_256_cbc(), NULL, &vchKey[0], &vchIV[0]) &&
+        EVP_DecryptUpdate(ctx, &vchOut[0], &nLen, &vchCiphertext[0],
+                          (int)vchCiphertext.size()) &&
+        EVP_DecryptFinal_ex(ctx, &vchOut[0] + nLen, &nFinal))
+    {
+        vchOut.resize(nLen + nFinal);
+        vchPlaintextRet.swap(vchOut);
+        fOk = true;
+    }
+    EVP_CIPHER_CTX_free(ctx);
+    return fOk;
+}
+
+vector<unsigned char> WalletKeyIV(const vector<unsigned char>& vchPubKey)
+{
+    uint256 hash = Hash(vchPubKey.begin(), vchPubKey.end());
+    vector<unsigned char> vchIV(16);
+    memcpy(&vchIV[0], hash.begin(), vchIV.size());
+    return vchIV;
+}
+
+vector<unsigned char> WalletSecretIV(const string& strLabel)
+{
+    uint256 hash = Hash(strLabel.begin(), strLabel.end());
+    vector<unsigned char> vchIV(16);
+    memcpy(&vchIV[0], hash.begin(), vchIV.size());
+    return vchIV;
+}
+
+bool AddCryptedKey(const vector<unsigned char>& vchPubKey,
+                   const vector<unsigned char>& vchCryptedSecret)
+{
+    if (vchPubKey.empty() || vchCryptedSecret.empty())
+        return false;
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        fWalletEncrypted = true;
+        mapCryptedKeys[vchPubKey] = vchCryptedSecret;
+        mapPubKeys[Hash160(vchPubKey)] = vchPubKey;
+    }
+    return true;
+}
+
+bool WalletCanSpendKey(const vector<unsigned char>& vchPubKey)
+{
+    CRITICAL_BLOCK(cs_mapKeys)
+        return mapKeys.count(vchPubKey) > 0 || mapCryptedKeys.count(vchPubKey) > 0;
+    return false;
+}
+
+bool GetWalletPrivKey(const vector<unsigned char>& vchPubKey,
+                      CPrivKey& vchPrivKeyRet,
+                      string& strErrorRet)
+{
+    vchPrivKeyRet.clear();
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        map<vector<unsigned char>, CPrivKey>::iterator mi = mapKeys.find(vchPubKey);
+        if (mi != mapKeys.end())
+        {
+            vchPrivKeyRet = (*mi).second;
+            return true;
+        }
+
+        map<vector<unsigned char>, vector<unsigned char> >::iterator mci = mapCryptedKeys.find(vchPubKey);
+        if (mci == mapCryptedKeys.end())
+        {
+            strErrorRet = "private key not found";
+            return false;
+        }
+        if (IsWalletLocked())
+        {
+            strErrorRet = "wallet is locked";
+            return false;
+        }
+
+        vector<unsigned char> vchPlaintext;
+        if (!DecryptSecret(vWalletMasterKey, (*mci).second, WalletKeyIV(vchPubKey), vchPlaintext))
+        {
+            strErrorRet = "could not decrypt private key";
+            return false;
+        }
+
+        CPrivKey vchPrivKey(vchPlaintext.begin(), vchPlaintext.end());
+        CKey key;
+        if (!key.SetPrivKey(vchPrivKey) || key.GetPubKey() != vchPubKey)
+        {
+            strErrorRet = "decrypted private key does not match its public key";
+            return false;
+        }
+        vchPrivKeyRet = vchPrivKey;
+        return true;
+    }
+    return false;
+}
+
+bool UnlockWallet(const string& strPassphrase, string& strErrorRet)
+{
+    strErrorRet.clear();
+    if (!IsWalletEncrypted())
+        return true;
+
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        for (map<unsigned int, CWalletMasterKey>::iterator mi = mapMasterKeys.begin();
+             mi != mapMasterKeys.end(); ++mi)
+        {
+            const CWalletMasterKey& kMasterKey = (*mi).second;
+            CKeyingMaterial vchPassKey;
+            vector<unsigned char> vchPassIV;
+            if (!DeriveWalletPassphraseKey(strPassphrase, kMasterKey.vchSalt,
+                                           kMasterKey.nDeriveIterations,
+                                           vchPassKey, vchPassIV))
+                continue;
+
+            vector<unsigned char> vchMasterPlain;
+            if (!DecryptSecret(vchPassKey, kMasterKey.vchCryptedKey,
+                               vchPassIV, vchMasterPlain))
+                continue;
+            if (vchMasterPlain.size() != 32)
+                continue;
+
+            CKeyingMaterial vchCandidate(vchMasterPlain.begin(), vchMasterPlain.end());
+            bool fValid = mapCryptedKeys.empty();
+            for (map<vector<unsigned char>, vector<unsigned char> >::iterator mci = mapCryptedKeys.begin();
+                 mci != mapCryptedKeys.end(); ++mci)
+            {
+                vector<unsigned char> vchPlaintext;
+                if (!DecryptSecret(vchCandidate, (*mci).second, WalletKeyIV((*mci).first), vchPlaintext))
+                    break;
+                CPrivKey vchPrivKey(vchPlaintext.begin(), vchPlaintext.end());
+                CKey key;
+                if (key.SetPrivKey(vchPrivKey) && key.GetPubKey() == (*mci).first)
+                    fValid = true;
+                break;
+            }
+            if (fValid)
+            {
+                vWalletMasterKey = vchCandidate;
+                if (!vchCryptedHDMaster.empty())
+                {
+                    vector<unsigned char> vchPlainHDMaster;
+                    if (!DecryptSecret(vWalletMasterKey, vchCryptedHDMaster,
+                                       WalletSecretIV("hdmaster"), vchPlainHDMaster) ||
+                        vchPlainHDMaster.size() != 32)
+                    {
+                        strErrorRet = "could not decrypt HD master key";
+                        return false;
+                    }
+                    vchHDMaster = vchPlainHDMaster;
+                }
+                if (!vchCryptedHDChainCode.empty())
+                {
+                    vector<unsigned char> vchPlainHDChainCode;
+                    if (!DecryptSecret(vWalletMasterKey, vchCryptedHDChainCode,
+                                       WalletSecretIV("hdchaincode"), vchPlainHDChainCode) ||
+                        vchPlainHDChainCode.size() != 32)
+                    {
+                        strErrorRet = "could not decrypt HD chain code";
+                        return false;
+                    }
+                    vchHDChainCode = vchPlainHDChainCode;
+                }
+                fWalletLocked = false;
+                return true;
+            }
+        }
+    }
+
+    strErrorRet = "passphrase did not unlock the wallet";
+    return false;
+}
+
 static bool WalletAlreadyHasKey(const vector<unsigned char>& vchPubKey)
 {
     CRITICAL_BLOCK(cs_mapKeys)
-        return mapKeys.count(vchPubKey) > 0;
+        return mapKeys.count(vchPubKey) > 0 || mapCryptedKeys.count(vchPubKey) > 0;
     return false;
 }
 
@@ -509,6 +809,12 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
 
 void TopUpKeyPool()
 {
+    if (IsWalletLocked())
+    {
+        printf("TopUpKeyPool() : wallet is encrypted and locked\n");
+        return;
+    }
+
     CRITICAL_BLOCK(cs_keyPool)
     {
         while ((int)mapKeyPool.size() < KEYPOOL_SIZE)
@@ -562,6 +868,12 @@ void TopUpKeyPool()
 
 vector<unsigned char> GetKeyFromPool()
 {
+    if (IsWalletLocked())
+    {
+        printf("GetKeyFromPool() : wallet is encrypted and locked\n");
+        return vector<unsigned char>();
+    }
+
     CRITICAL_BLOCK(cs_keyPool)
     {
         TopUpKeyPool();
@@ -584,7 +896,15 @@ vector<unsigned char> GetKeyFromPool()
     // locked open elsewhere. Generating on demand is what this code did for
     // its whole life, so fall back to it rather than refuse to mine.
     printf("GetKeyFromPool() : pool empty, generating a key on demand\n");
-    return GenerateNewKey();
+    try
+    {
+        return GenerateNewKey();
+    }
+    catch (const std::exception& e)
+    {
+        printf("GetKeyFromPool() : failed to generate a key: %s\n", e.what());
+        return vector<unsigned char>();
+    }
 }
 
 
@@ -3581,6 +3901,11 @@ bool BitcoinMiner(int nThreadId)
     // thread happened to win a block, which meant a backup taken while mining
     // could not spend what the very next block paid.
     vector<unsigned char> vchPubKey = GetKeyFromPool();
+    if (vchPubKey.empty())
+    {
+        printf("BitcoinMiner: no wallet key available for coinbase; mining stopped\n");
+        return false;
+    }
     CBigNum bnExtraNonce = 0;
     while (fGenerateBitcoins)
     {
@@ -3759,6 +4084,11 @@ bool BitcoinMiner(int nThreadId)
                         // them out one at a time under cs_keyPool, which is
                         // what keeps concurrent coinbases distinct (#58).
                         vchPubKey = GetKeyFromPool();
+                        if (vchPubKey.empty())
+                        {
+                            printf("BitcoinMiner: no replacement wallet key available; mining stopped\n");
+                            fGenerateBitcoins = false;
+                        }
 
                         // Process this block the same as if we had received it from another node
                         if (!ProcessBlock(NULL, pblock.release()))

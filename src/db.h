@@ -16,9 +16,43 @@ class CWalletTx;
 extern map<string, string> mapAddressBook;
 extern bool fClient;
 
+// Wallet file format guard. The current wallet stores private keys in plain
+// records. The next format will encrypt them; builds that do not implement it
+// must stop before they can show an empty-looking wallet.
+static const int WALLET_FORMAT_PLAINTEXT = 1;
+static const int WALLET_FORMAT_ENCRYPTED = 2;
+static const int WALLET_FORMAT_SUPPORTED = WALLET_FORMAT_ENCRYPTED;
+
+class CWalletMasterKey
+{
+public:
+    vector<unsigned char> vchCryptedKey;
+    vector<unsigned char> vchSalt;
+    unsigned int nDerivationMethod;
+    unsigned int nDeriveIterations;
+
+    CWalletMasterKey()
+    {
+        nDerivationMethod = 0;
+        nDeriveIterations = 25000;
+        vchSalt.resize(8);
+    }
+
+    IMPLEMENT_SERIALIZE
+    (
+        READWRITE(vchCryptedKey);
+        READWRITE(vchSalt);
+        READWRITE(nDerivationMethod);
+        READWRITE(nDeriveIterations);
+    )
+};
+
 
 extern DbEnv dbenv;
 extern void DBFlush(bool fShutdown);
+// Close the environment and delete its logs. Only the encryption command calls
+// this: the logs hold the plaintext records the old wallet wrote.
+extern void PurgeDbEnvironmentLogs();
 
 
 
@@ -411,6 +445,29 @@ public:
             && Write(string("hdchaincode"), vchChainCode);
     }
 
+    bool WriteWalletMinVersion(int nVersion)
+    {
+        return Write(string("walletminversion"), nVersion);
+    }
+
+    bool WriteMasterKey(unsigned int nID, const CWalletMasterKey& kMasterKey)
+    {
+        return Write(make_pair(string("mkey"), nID), kMasterKey, true);
+    }
+
+    bool WriteCryptedKey(const vector<unsigned char>& vchPubKey,
+                         const vector<unsigned char>& vchCryptedSecret)
+    {
+        return Write(make_pair(string("ckey"), vchPubKey), vchCryptedSecret, false);
+    }
+
+    bool WriteCryptedHDMaster(const vector<unsigned char>& vchCryptedMaster,
+                              const vector<unsigned char>& vchCryptedChainCode)
+    {
+        return Write(string("cryptedhdmaster"), vchCryptedMaster)
+            && Write(string("cryptedhdchaincode"), vchCryptedChainCode);
+    }
+
     bool WriteHDNext(unsigned int nNext)
     {
         return Write(string("hdnext"), nNext);
@@ -478,6 +535,7 @@ bool BackupWallet(const string& strDest);
 // POSIX -- the output holds private keys in the clear.
 bool DumpWallet(const string& strDest);
 bool ImportWallet(const string& strSrc, int& nAddedRet, int& nSkippedRet);
+bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& strErrorRet);
 
 inline bool SetAddressBookName(const string& strAddress, const string& strName)
 {

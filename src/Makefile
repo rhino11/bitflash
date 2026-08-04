@@ -139,5 +139,8 @@ tests: test_bip32 bitflash-node
 	./test_bip32
 	./bitflash-node -selftest=wallet-keypool
 	./bitflash-node -selftest=wallet-hd
+	./bitflash-node -selftest=wallet-format
+	./bitflash-node -selftest=wallet-crypto
+	./bitflash-node -selftest=wallet-encrypt
 	./bitflash-node -selftest=net-message
 	./bitflash-node -selftest=consensus-limits

@@ -111,5 +111,8 @@ tests: test_bip32.exe bitflash.exe
 	./test_bip32.exe
 	./bitflash.exe -selftest=wallet-keypool
 	./bitflash.exe -selftest=wallet-hd
+	./bitflash.exe -selftest=wallet-format
+	./bitflash.exe -selftest=wallet-crypto
+	./bitflash.exe -selftest=wallet-encrypt
 	./bitflash.exe -selftest=net-message
 	./bitflash.exe -selftest=consensus-limits

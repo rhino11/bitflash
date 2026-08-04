@@ -40,6 +40,60 @@ static string argval2(int argc, char* argv[], const char* keySlash, const char* 
     return argval(argc, argv, keyDash);
 }
 
+static bool ReadPassphraseArgument(const string& strArg, string& strPassphraseRet, string& strErrorRet)
+{
+    strPassphraseRet.clear();
+    strErrorRet.clear();
+    if (strArg.empty())
+    {
+        AttachTerminal();
+        fprintf(stderr, "Enter wallet passphrase: ");
+        fflush(stderr);
+        char buf[4096];
+        if (!fgets(buf, sizeof(buf), stdin))
+        {
+            strErrorRet = "could not read passphrase from stdin";
+            return false;
+        }
+        strPassphraseRet = buf;
+    }
+    else if (strArg[0] == '@')
+    {
+        string strPath = strArg.substr(1);
+        FILE* pf = fopen(strPath.c_str(), "rb");
+        if (!pf)
+        {
+            strErrorRet = strprintf("could not read passphrase file %s", strPath.c_str());
+            return false;
+        }
+        char buf[4096];
+        if (!fgets(buf, sizeof(buf), pf))
+        {
+            fclose(pf);
+            strErrorRet = strprintf("passphrase file %s is empty", strPath.c_str());
+            return false;
+        }
+        fclose(pf);
+        strPassphraseRet = buf;
+    }
+    else
+    {
+        strErrorRet = "passphrase literals on the command line are unsafe; use the option without a value to read stdin, or use @FILE";
+        return false;
+    }
+
+    while (!strPassphraseRet.empty() &&
+           (strPassphraseRet[strPassphraseRet.size() - 1] == '\n' ||
+            strPassphraseRet[strPassphraseRet.size() - 1] == '\r'))
+        strPassphraseRet.resize(strPassphraseRet.size() - 1);
+    if (strPassphraseRet.empty())
+    {
+        strErrorRet = "empty passphrase";
+        return false;
+    }
+    return true;
+}
+
 // The real printf, not the one util.h remaps to OutputDebugStringF. Help that
 // goes to debug.log is help nobody asked for: `-help` printed a full page into
 // the data directory and returned 0 with an empty terminal, which reads as a
@@ -56,7 +110,7 @@ static void PrintUsage()
     printf("  /debug\n");
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
-    printf("  /selftest=wallet-keypool or /selftest=wallet-hd\n");
+    printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, or wallet-encrypt\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -85,6 +139,10 @@ static void PrintUsage()
     printf("  /dumpwallet=FILE           (export private keys as text -- readable by\n");
     printf("                              anyone, so guard it like cash)\n");
     printf("  /importwallet=FILE         (load keys from such a file back in)\n");
+    printf("  /encryptwallet[=@FILE]     (rewrite wallet.dat with encrypted private keys\n");
+    printf("                              and encrypted HD seed, then exit)\n");
+    printf("  /walletpassphrase[=@FILE]  (unlock an encrypted wallet for one-shot\n");
+    printf("                              commands; without @FILE reads stdin)\n");
     printf("  /newaddress                (print the next receiving address, then exit)\n");
     printf("  /sendto=ADDRESS,AMOUNT     (spend from this wallet, then exit -- the\n");
     printf("                              only way to send without the window)\n");
@@ -299,6 +357,39 @@ int main(int argc, char* argv[])
     }
     printf("Height=%d\n", nBestHeight);
 
+    bool fEncryptWallet = arg(argc, argv, "/encryptwallet") || arg(argc, argv, "-encryptwallet");
+    string strEncryptWallet = argval2(argc, argv, "/encryptwallet", "-encryptwallet");
+    if (fEncryptWallet)
+    {
+        string strPassphrase;
+        string strPassphraseError;
+        if (!ReadPassphraseArgument(strEncryptWallet, strPassphrase, strPassphraseError))
+        {
+            fprintf(stderr, "Cannot read encryption passphrase: %s\n", strPassphraseError.c_str());
+            DBFlush(true);
+            return 1;
+        }
+        int nRet = CmdEncryptWallet(strPassphrase);
+        if (nRet != 0)
+            DBFlush(true);
+        return nRet;
+    }
+
+    bool fWalletPassphrase = arg(argc, argv, "/walletpassphrase") || arg(argc, argv, "-walletpassphrase");
+    string strWalletPassphrase = argval2(argc, argv, "/walletpassphrase", "-walletpassphrase");
+    if (fWalletPassphrase)
+    {
+        string strPassphrase;
+        string strUnlockError;
+        if (!ReadPassphraseArgument(strWalletPassphrase, strPassphrase, strUnlockError) ||
+            !UnlockWallet(strPassphrase, strUnlockError))
+        {
+            fprintf(stderr, "Cannot unlock wallet: %s\n", strUnlockError.c_str());
+            DBFlush(true);
+            return 1;
+        }
+    }
+
     // Before the node opens sockets or touches anything: the wallet is loaded,
     // which is all a backup needs, and finishing here means the copy is taken
     // from a quiet directory rather than from under a running node.
@@ -440,6 +531,14 @@ int main(int argc, char* argv[])
         printf("Rescan done: %d transaction(s) added or updated.\n", nFound);
         DBFlush(true);
         return 0;
+    }
+
+    if (fGenerateBitcoins && IsWalletLocked())
+    {
+        fprintf(stderr, "Cannot mine while the encrypted wallet is locked. "
+                        "Start with /walletpassphrase or /walletpassphrase=@FILE, or disable mining.\n");
+        DBFlush(true);
+        return 1;
     }
 
     ReacceptWalletTransactions();

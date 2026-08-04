@@ -406,6 +406,36 @@ int CmdRecoveryAudit()
     return 0;
 }
 
+int CmdEncryptWallet(const std::string& strPassphrase)
+{
+    AttachTerminal();
+
+    string strBackup;
+    string strError;
+    if (!EncryptWallet(strPassphrase, strBackup, strError))
+    {
+        fprintf(stderr, "Cannot encrypt wallet: %s\n", strError.c_str());
+        fprintf(stderr, "Nothing was changed.\n");
+        return 1;
+    }
+
+    printf("Wallet encrypted.\n");
+    printf("The old unencrypted wallet was moved to:\n");
+    printf("  %s\n", strBackup.c_str());
+    printf("That backup still contains private keys in plain text. Move it offline or\n");
+    printf("delete it after you have a safer backup plan.\n");
+    printf("Restart Bitflash before using the wallet again.\n");
+    fflush(stdout);
+
+    // The rewritten wallet.dat is clean; the environment's write-ahead logs are
+    // not, because every plaintext record this wallet ever wrote passed through
+    // them. Closing the environment and dropping the logs is the last step of
+    // encrypting, not an optimisation -- our own backup advice is to copy the
+    // whole directory, and following it otherwise carries the keys along.
+    PurgeDbEnvironmentLogs();
+    return 0;
+}
+
 // Spend, from the command line.
 //
 // SendMoney() has been in this tree since 0.1.0 and only the window ever called
@@ -420,6 +450,12 @@ int CmdRecoveryAudit()
 int CmdSendTo(const std::string& strArg)
 {
     AttachTerminal();
+
+    if (IsWalletLocked())
+    {
+        fprintf(stderr, "Wallet is encrypted and locked. Start with /walletpassphrase or /walletpassphrase=@FILE to spend.\n");
+        return 1;
+    }
 
     std::string::size_type comma = strArg.rfind(',');
     if (comma == std::string::npos)

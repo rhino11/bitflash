@@ -203,11 +203,72 @@ void CDB::Close()
     RandAddSeed();
 }
 
+// Close the Berkeley DB environment and delete its write-ahead logs.
+//
+// Encrypting the wallet rewrites wallet.dat, and that file does come out clean.
+// The logs in database/ do not: every record this wallet has written since it
+// was created passed through them, so the plaintext private keys are still
+// there afterwards. Measured -- wallet.dat held no trace of a known key while
+// database/log.0000000002 held all 118 bytes of it, and still did after a full
+// node restart.
+//
+// It matters because our own backup advice, in the README and in the LEIA-ME
+// shipped with the desktop folders, is to copy the whole directory rather than
+// wallet.dat alone. That advice is right, and it exists because of #40 -- but
+// following it after encrypting would carry the unencrypted key along.
+//
+// log_archive(DB_ARCH_REMOVE) cannot fix this. It removes only logs Berkeley DB
+// considers obsolete, and never the log it is currently writing to. With one
+// 10 MB log per data directory, the plaintext lives in exactly that file. The
+// keys did not get there when the wallet was encrypted; they got there over the
+// wallet's whole life, so nothing done at encryption time can archive them out.
+//
+// So the logs go, after a full flush. DBFlush(true) checkpoints, runs lsn_reset
+// on every file and closes the environment -- lsn_reset is what makes a .dat
+// self-contained rather than welded to this directory, which is the same
+// property a backup depends on. Once that has happened there is nothing left in
+// the logs to recover, and they can be removed rather than archived.
+//
+// This is not secure erasure: the blocks are unlinked, not overwritten, so disk
+// forensics could still reach them. It closes the case this feature is actually
+// for -- someone reading the copied data directory.
+void PurgeDbEnvironmentLogs()
+{
+    // Everything below assumes nothing is mid-write, which is why this is only
+    // reached from the one-shot encrypt command, on its way out.
+    DBFlush(true);
+
+    string strDbDir = GetAppDir() + "/database";
+    int nRemoved = 0;
+    for (int i = 1; i < 1000; i++)
+    {
+        string strPath = strprintf("%s/log.%010d", strDbDir.c_str(), i);
+        if (!FileExists(strPath.c_str()))
+            continue;
+        if (remove(strPath.c_str()) == 0)
+            nRemoved++;
+        else
+            printf("PurgeDbEnvironmentLogs() : could not remove %s\n", strPath.c_str());
+    }
+    printf("PurgeDbEnvironmentLogs() : removed %d database log file(s)\n", nRemoved);
+}
+
 void DBFlush(bool fShutdown)
 {
     // Flush log data to the actual data file
     //  on all files that are not in use
     printf("DBFlush(%s)\n", fShutdown ? "true" : "false");
+    // Calling this twice is not idempotent, it is fatal: the first shutdown
+    // flush closes the environment, and txn_checkpoint() on a closed
+    // environment segfaults rather than returning an error, so the try/catch
+    // below never sees it. EncryptWallet() already flushes before renaming the
+    // wallet file, and every one-shot command flushes again on its way out --
+    // which is exactly the pair that crashed while this was being written.
+    if (!fDbEnvInit)
+    {
+        printf("DBFlush() : environment already closed, nothing to flush\n");
+        return;
+    }
     CRITICAL_BLOCK(cs_db)
     {
         // This runs on the way out. Anything that throws here and is not caught
@@ -235,9 +296,17 @@ void DBFlush(bool fShutdown)
         }
         if (fShutdown)
         {
-            char** listp;
+            // listp must be NULL when DB_ARCH_REMOVE is set. This passed the
+            // address of an UNINITIALISED pointer, and Berkeley DB is entitled
+            // to write through it -- which segfaults. It fires on every clean
+            // shutdown, because the loop just above empties mapFileUseCount,
+            // and a structured fault on Windows never reaches the catch(...)
+            // wrapped around it. Inherited from 0.1.0 and wrong since then.
+            //
+            // Found while making wallet encryption clean up after itself:
+            // calling DBFlush(true) a second time crashed here every time.
             if (mapFileUseCount.empty())
-                try { dbenv.log_archive(&listp, DB_ARCH_REMOVE); } catch (...) { }
+                try { dbenv.log_archive(NULL, DB_ARCH_REMOVE); } catch (...) { }
             try { dbenv.close(0); } catch (...) { }
             fDbEnvInit = false;
         }
@@ -636,6 +705,29 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
                 mapKeys[vchPubKey] = vchPrivKey;
                 mapPubKeys[Hash160(vchPubKey)] = vchPubKey;
             }
+            else if (strType == "mkey")
+            {
+                unsigned int nID = 0;
+                ssKey >> nID;
+                CWalletMasterKey kMasterKey;
+                ssValue >> kMasterKey;
+                mapMasterKeys[nID] = kMasterKey;
+                nWalletMasterKeyMaxID = max(nWalletMasterKeyMaxID, nID);
+                fWalletEncrypted = true;
+                fWalletLocked = true;
+            }
+            else if (strType == "ckey")
+            {
+                vector<unsigned char> vchPubKey;
+                ssKey >> vchPubKey;
+                vector<unsigned char> vchCryptedSecret;
+                ssValue >> vchCryptedSecret;
+                if (!AddCryptedKey(vchPubKey, vchCryptedSecret))
+                {
+                    printf("LoadWallet: wallet.dat has an unreadable encrypted key record\n");
+                    return false;
+                }
+            }
             else if (strType == "defaultkey")
             {
                 ssValue >> vchDefaultKeyRet;
@@ -668,6 +760,32 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
             else if (strType == "hdchangenext")
             {
                 ssValue >> nHDChangeNext;
+            }
+            else if (strType == "cryptedhdmaster")
+            {
+                ssValue >> vchCryptedHDMaster;
+                fWalletEncrypted = true;
+                fWalletLocked = true;
+            }
+            else if (strType == "cryptedhdchaincode")
+            {
+                ssValue >> vchCryptedHDChainCode;
+                fWalletEncrypted = true;
+                fWalletLocked = true;
+            }
+            else if (strType == "walletminversion")
+            {
+                int nMinVersion = 0;
+                ssValue >> nMinVersion;
+                if (nMinVersion > WALLET_FORMAT_SUPPORTED)
+                {
+                    printf("LoadWallet: wallet.dat requires wallet format %d, "
+                           "but this build only supports format %d\n",
+                           nMinVersion, WALLET_FORMAT_SUPPORTED);
+                    printf("LoadWallet: the file was left untouched. Upgrade "
+                           "Bitflash before opening this wallet.\n");
+                    return false;
+                }
             }
             else if (strType == "pool")
             {
@@ -725,7 +843,17 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         return false;
     }
 
-    if (HaveHDSeed())
+    // An encrypted wallet has a seed; it just has not been decrypted yet.
+    //
+    // The reset in the else branch was written when "no seed in memory after
+    // loading" could only mean "this wallet has no seed". With encryption that
+    // is no longer true, and taking the else branch here wiped the schema and
+    // the derivation counters that had just been read correctly out of the
+    // file. Unlocking later restores the seed but nothing restores those, so a
+    // BIP44 wallet came back deriving legacy addresses -- different addresses
+    // from the ones its own recovery phrase produces, while the audit reported
+    // the phrase as covering nothing.
+    if (HaveHDSeed() || !vchCryptedHDMaster.empty())
     {
         if (nHDKeySchema == HD_SCHEMA_NONE)
         {
@@ -801,11 +929,18 @@ bool LoadWallet()
     if (!CWalletDB("cr").LoadWallet(vchDefaultKey))
         return false;
 
-    if (mapKeys.count(vchDefaultKey))
+    if (!vchDefaultKey.empty() && mapPubKeys.count(Hash160(vchDefaultKey)))
     {
         // Set keyUser
         keyUser.SetPubKey(vchDefaultKey);
-        keyUser.SetPrivKey(mapKeys[vchDefaultKey]);
+        if (mapKeys.count(vchDefaultKey))
+            keyUser.SetPrivKey(mapKeys[vchDefaultKey]);
+    }
+    else if (IsWalletEncrypted())
+    {
+        printf("LoadWallet: encrypted wallet has no usable default public key. "
+               "The file was left untouched.\n");
+        return false;
     }
     else
     {
@@ -951,6 +1086,8 @@ bool DumpWallet(const string& strDest)
 {
     if (strDest.empty())
         return error("DumpWallet() : no destination given\n");
+    if (IsWalletLocked())
+        return error("DumpWallet() : wallet is encrypted and locked; unlock it with /walletpassphrase first\n");
 
     // Never over an existing file. The whole point is to hold the only copy of
     // something irreplaceable, and a mistyped path must not eat one.
@@ -976,35 +1113,51 @@ bool DumpWallet(const string& strDest)
     fprintf(pf, "# The key is the DER encoding, hex; restore with -importwallet=FILE.\n");
     fprintf(pf, "#\n");
 
+    vector<vector<unsigned char> > vPubKeys;
+    {
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            for (map<vector<unsigned char>, CPrivKey>::iterator mi = mapKeys.begin();
+                 mi != mapKeys.end(); ++mi)
+                vPubKeys.push_back((*mi).first);
+            for (map<vector<unsigned char>, vector<unsigned char> >::iterator mi = mapCryptedKeys.begin();
+                 mi != mapCryptedKeys.end(); ++mi)
+                if (!mapKeys.count((*mi).first))
+                    vPubKeys.push_back((*mi).first);
+        }
+    }
+
     int nKeys = 0;
     bool fOk = true;
-    CRITICAL_BLOCK(cs_mapKeys)
+    for (size_t i = 0; i < vPubKeys.size(); i++)
     {
-        for (map<vector<unsigned char>, CPrivKey>::iterator mi = mapKeys.begin();
-             mi != mapKeys.end(); ++mi)
+        const vector<unsigned char>& vchPubKey = vPubKeys[i];
+        CPrivKey vchPrivKey;
+        string strError;
+        if (!GetWalletPrivKey(vchPubKey, vchPrivKey, strError))
         {
-            const vector<unsigned char>& vchPubKey = (*mi).first;
-            const CPrivKey& vchPrivKey = (*mi).second;
-
-            string strAddress = PubKeyToAddress(vchPubKey);
-            string strLabel;
-            map<string, string>::iterator mia = mapAddressBook.find(strAddress);
-            if (mia != mapAddressBook.end())
-                strLabel = (*mia).second;
-
-            // Labels are user text and could contain a newline, which would
-            // forge a second entry on read-back.
-            for (size_t i = 0; i < strLabel.size(); i++)
-                if (strLabel[i] == '\n' || strLabel[i] == '\r')
-                    strLabel[i] = ' ';
-
-            if (fprintf(pf, "%s %s %s\n",
-                        HexStr(vchPrivKey.begin(), vchPrivKey.end(), false).c_str(),
-                        strAddress.c_str(),
-                        strLabel.c_str()) < 0)
-            { fOk = false; break; }
-            nKeys++;
+            fOk = false;
+            break;
         }
+
+        string strAddress = PubKeyToAddress(vchPubKey);
+        string strLabel;
+        map<string, string>::iterator mia = mapAddressBook.find(strAddress);
+        if (mia != mapAddressBook.end())
+            strLabel = (*mia).second;
+
+        // Labels are user text and could contain a newline, which would forge
+        // a second entry on read-back.
+        for (size_t j = 0; j < strLabel.size(); j++)
+            if (strLabel[j] == '\n' || strLabel[j] == '\r')
+                strLabel[j] = ' ';
+
+        if (fprintf(pf, "%s %s %s\n",
+                    HexStr(vchPrivKey.begin(), vchPrivKey.end(), false).c_str(),
+                    strAddress.c_str(),
+                    strLabel.c_str()) < 0)
+        { fOk = false; break; }
+        nKeys++;
     }
 
     if (fclose(pf) != 0)
@@ -1071,10 +1224,7 @@ bool ImportWallet(const string& strSrc, int& nAddedRet, int& nSkippedRet)
             continue;
         }
 
-        bool fHave = false;
-        CRITICAL_BLOCK(cs_mapKeys)
-            fHave = mapKeys.count(key.GetPubKey()) > 0;
-        if (fHave)
+        if (WalletCanSpendKey(key.GetPubKey()))
         {
             nSkippedRet++;   // already ours; importing twice is not an error
             continue;
@@ -1097,5 +1247,391 @@ bool ImportWallet(const string& strSrc, int& nAddedRet, int& nSkippedRet)
     if (nAddedRet > 0)
         printf("ImportWallet() : restart the node so it can find transactions "
                "belonging to the new keys\n");
+    return true;
+}
+
+
+// ---- wallet encryption rewrite -------------------------------------------
+
+class CWalletRewriteDB : public CDB
+{
+public:
+    CWalletRewriteDB(const char* pszFile, const char* pszMode="r+", bool fTxn=false)
+        : CDB(pszFile, pszMode, fTxn) { }
+
+    bool WriteRaw(CDataStream ssKey, CDataStream ssValue)
+    {
+        if (!pdb || ssKey.empty())
+            return false;
+
+        Dbt datKey(&ssKey[0], ssKey.size());
+        Dbt datValue(ssValue.empty() ? NULL : &ssValue[0], ssValue.size());
+        int ret = pdb->put(GetTxn(), &datKey, &datValue, 0);
+
+        memset(datKey.get_data(), 0, datKey.get_size());
+        if (datValue.get_data())
+            memset(datValue.get_data(), 0, datValue.get_size());
+        return ret == 0;
+    }
+
+    bool WriteWalletMinVersion(int nVersion)
+    {
+        return Write(string("walletminversion"), nVersion);
+    }
+
+    bool WriteMasterKey(unsigned int nID, const CWalletMasterKey& kMasterKey)
+    {
+        return Write(make_pair(string("mkey"), nID), kMasterKey, true);
+    }
+
+    bool WriteCryptedKey(const vector<unsigned char>& vchPubKey,
+                         const vector<unsigned char>& vchCryptedSecret)
+    {
+        return Write(make_pair(string("ckey"), vchPubKey), vchCryptedSecret, false);
+    }
+
+    bool WriteCryptedHDMaster(const vector<unsigned char>& vchCryptedMaster,
+                              const vector<unsigned char>& vchCryptedChainCode)
+    {
+        return Write(string("cryptedhdmaster"), vchCryptedMaster)
+            && Write(string("cryptedhdchaincode"), vchCryptedChainCode);
+    }
+
+    bool WriteHDNext(unsigned int nNext)
+    {
+        return Write(string("hdnext"), nNext);
+    }
+
+    bool WritePool(int64 nIndex, const vector<unsigned char>& vchPubKey)
+    {
+        return Write(make_pair(string("pool"), nIndex), vchPubKey);
+    }
+
+    bool CopyPublicRecordsTo(CWalletRewriteDB& dbTo, int& nCopiedRet, string& strErrorRet)
+    {
+        nCopiedRet = 0;
+        Dbc* pcursor = GetCursor();
+        if (!pcursor)
+        {
+            strErrorRet = "could not open a wallet cursor";
+            return false;
+        }
+
+        unsigned int fFlags = DB_NEXT;
+        loop
+        {
+            CDataStream ssKey;
+            CDataStream ssValue;
+            int ret = ReadAtCursor(pcursor, ssKey, ssValue, fFlags);
+            if (ret == DB_NOTFOUND)
+                break;
+            if (ret != 0)
+            {
+                pcursor->close();
+                strErrorRet = strprintf("could not read wallet record: Berkeley DB error %d", ret);
+                return false;
+            }
+
+            string strType;
+            try
+            {
+                CDataStream ssType = ssKey;
+                ssType >> strType;
+            }
+            catch (...)
+            {
+                pcursor->close();
+                strErrorRet = "wallet.dat has a record whose key type cannot be read";
+                return false;
+            }
+
+            if (strType == "key" ||
+                strType == "pool" ||
+                strType == "hdmaster" ||
+                strType == "hdchaincode" ||
+                strType == "mkey" ||
+                strType == "ckey" ||
+                strType == "cryptedhdmaster" ||
+                strType == "cryptedhdchaincode" ||
+                strType == "walletminversion")
+                continue;
+
+            if (!dbTo.WriteRaw(ssKey, ssValue))
+            {
+                pcursor->close();
+                strErrorRet = strprintf("could not copy wallet record '%s'", strType.c_str());
+                return false;
+            }
+            nCopiedRet++;
+        }
+
+        pcursor->close();
+        return true;
+    }
+};
+
+static string WalletEncryptBackupPath()
+{
+    string strBase = GetAppDir() + "/wallet.dat.before-encrypt.";
+    string strPath = strBase + i64tostr(GetTime()) + ".bak";
+    for (int i = 1; FileExists(strPath.c_str()); i++)
+        strPath = strBase + i64tostr(GetTime()) + "." + itostr(i) + ".bak";
+    return strPath;
+}
+
+static bool EncryptPrivateKeyForWallet(const CKeyingMaterial& vchMasterKey,
+                                       const vector<unsigned char>& vchPubKey,
+                                       const CPrivKey& vchPrivKey,
+                                       vector<unsigned char>& vchCryptedRet,
+                                       string& strErrorRet)
+{
+    if (!EncryptSecret(vchMasterKey,
+                       vector<unsigned char>(vchPrivKey.begin(), vchPrivKey.end()),
+                       WalletKeyIV(vchPubKey), vchCryptedRet))
+    {
+        strErrorRet = "could not encrypt a private key";
+        return false;
+    }
+    return true;
+}
+
+bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& strErrorRet)
+{
+    strBackupRet.clear();
+    strErrorRet.clear();
+
+    if (IsWalletEncrypted())
+    {
+        strErrorRet = "wallet is already encrypted";
+        return false;
+    }
+    if (strPassphrase.size() < 8)
+    {
+        strErrorRet = "passphrase must be at least 8 characters";
+        return false;
+    }
+
+    map<vector<unsigned char>, CPrivKey> mapPlainKeys;
+    vector<unsigned char> vchPlainHDMaster;
+    vector<unsigned char> vchPlainHDChainCode;
+    unsigned int nHDNextSnapshot = 0;
+    {
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapPlainKeys = mapKeys;
+    }
+    {
+        CRITICAL_BLOCK(cs_keyPool)
+        {
+            vchPlainHDMaster = vchHDMaster;
+            vchPlainHDChainCode = vchHDChainCode;
+            nHDNextSnapshot = nHDNext;
+        }
+    }
+    if (mapPlainKeys.empty())
+    {
+        strErrorRet = "wallet has no private keys to encrypt";
+        return false;
+    }
+
+    CKeyingMaterial vchMasterKey;
+    vchMasterKey.resize(32);
+    if (RAND_bytes(&vchMasterKey[0], vchMasterKey.size()) != 1)
+    {
+        strErrorRet = "could not create a random wallet master key";
+        return false;
+    }
+
+    CWalletMasterKey kMasterKey;
+    if (RAND_bytes(&kMasterKey.vchSalt[0], kMasterKey.vchSalt.size()) != 1)
+    {
+        strErrorRet = "could not create a wallet encryption salt";
+        return false;
+    }
+
+    CKeyingMaterial vchPassKey;
+    vector<unsigned char> vchPassIV;
+    if (!DeriveWalletPassphraseKey(strPassphrase, kMasterKey.vchSalt,
+                                   kMasterKey.nDeriveIterations,
+                                   vchPassKey, vchPassIV) ||
+        !EncryptSecret(vchPassKey,
+                       vector<unsigned char>(vchMasterKey.begin(), vchMasterKey.end()),
+                       vchPassIV, kMasterKey.vchCryptedKey))
+    {
+        strErrorRet = "could not encrypt the wallet master key";
+        return false;
+    }
+
+    vector<pair<vector<unsigned char>, vector<unsigned char> > > vCryptedKeys;
+    for (map<vector<unsigned char>, CPrivKey>::const_iterator mi = mapPlainKeys.begin();
+         mi != mapPlainKeys.end(); ++mi)
+    {
+        vector<unsigned char> vchCrypted;
+        if (!EncryptPrivateKeyForWallet(vchMasterKey, (*mi).first, (*mi).second,
+                                        vchCrypted, strErrorRet))
+            return false;
+        vCryptedKeys.push_back(make_pair((*mi).first, vchCrypted));
+    }
+
+    vector<unsigned char> vchCryptedHDMasterNew;
+    vector<unsigned char> vchCryptedHDChainCodeNew;
+    if (!vchPlainHDMaster.empty() || !vchPlainHDChainCode.empty())
+    {
+        if (vchPlainHDMaster.size() != 32 || vchPlainHDChainCode.size() != 32)
+        {
+            strErrorRet = "wallet has an incomplete HD seed";
+            return false;
+        }
+        if (!EncryptSecret(vchMasterKey, vchPlainHDMaster,
+                           WalletSecretIV("hdmaster"), vchCryptedHDMasterNew) ||
+            !EncryptSecret(vchMasterKey, vchPlainHDChainCode,
+                           WalletSecretIV("hdchaincode"), vchCryptedHDChainCodeNew))
+        {
+            strErrorRet = "could not encrypt the HD seed";
+            return false;
+        }
+    }
+
+    vector<pair<int64, vector<unsigned char> > > vNewPool;
+    vector<pair<vector<unsigned char>, vector<unsigned char> > > vNewPoolKeys;
+    unsigned int nHDNextNew = nHDNextSnapshot;
+    for (int i = 0; i < KEYPOOL_SIZE; i++)
+    {
+        CKey key;
+        if (!vchPlainHDMaster.empty())
+        {
+            string strDeriveError;
+            if (!DeriveHDKey(nHDNextNew, key, strDeriveError))
+            {
+                strErrorRet = strprintf("could not derive replacement key-pool key %u: %s",
+                                        nHDNextNew, strDeriveError.c_str());
+                return false;
+            }
+            nHDNextNew++;
+        }
+        else
+        {
+            key.MakeNewKey();
+        }
+
+        vector<unsigned char> vchPubKey = key.GetPubKey();
+        if (!mapPlainKeys.count(vchPubKey))
+        {
+            vector<unsigned char> vchCrypted;
+            if (!EncryptPrivateKeyForWallet(vchMasterKey, vchPubKey, key.GetPrivKey(),
+                                            vchCrypted, strErrorRet))
+                return false;
+            vNewPoolKeys.push_back(make_pair(vchPubKey, vchCrypted));
+        }
+        vNewPool.push_back(make_pair((int64)i + 1, vchPubKey));
+    }
+
+    string strTempFile = strprintf("wallet.encrypting.%lld.dat", GetTime());
+    string strTempPath = GetAppDir() + "/" + strTempFile;
+    remove(strTempPath.c_str());
+
+    int nCopied = 0;
+    {
+        CWalletRewriteDB dbSource("wallet.dat", "r");
+        CWalletRewriteDB dbTarget(strTempFile.c_str(), "c+");
+        if (!dbSource.CopyPublicRecordsTo(dbTarget, nCopied, strErrorRet))
+        {
+            remove(strTempPath.c_str());
+            return false;
+        }
+        if (!dbTarget.WriteWalletMinVersion(WALLET_FORMAT_ENCRYPTED) ||
+            !dbTarget.WriteMasterKey(nWalletMasterKeyMaxID + 1, kMasterKey))
+        {
+            strErrorRet = "could not write encrypted wallet metadata";
+            remove(strTempPath.c_str());
+            return false;
+        }
+        for (size_t i = 0; i < vCryptedKeys.size(); i++)
+        {
+            if (!dbTarget.WriteCryptedKey(vCryptedKeys[i].first, vCryptedKeys[i].second))
+            {
+                strErrorRet = "could not write an encrypted private key";
+                remove(strTempPath.c_str());
+                return false;
+            }
+        }
+        for (size_t i = 0; i < vNewPoolKeys.size(); i++)
+        {
+            if (!dbTarget.WriteCryptedKey(vNewPoolKeys[i].first, vNewPoolKeys[i].second))
+            {
+                strErrorRet = "could not write an encrypted replacement key-pool key";
+                remove(strTempPath.c_str());
+                return false;
+            }
+        }
+        if (!vchCryptedHDMasterNew.empty() &&
+            !dbTarget.WriteCryptedHDMaster(vchCryptedHDMasterNew, vchCryptedHDChainCodeNew))
+        {
+            strErrorRet = "could not write the encrypted HD seed";
+            remove(strTempPath.c_str());
+            return false;
+        }
+        if (!dbTarget.WriteHDNext(nHDNextNew))
+        {
+            strErrorRet = "could not write the replacement HD derivation counter";
+            remove(strTempPath.c_str());
+            return false;
+        }
+        for (size_t i = 0; i < vNewPool.size(); i++)
+        {
+            if (!dbTarget.WritePool(vNewPool[i].first, vNewPool[i].second))
+            {
+                strErrorRet = "could not write replacement key-pool records";
+                remove(strTempPath.c_str());
+                return false;
+            }
+        }
+    }
+
+    // The source and target handles are closed. Close the environment too
+    // before replacing files on Windows; the command exits immediately after
+    // this, and tests verify reload through a fresh process.
+    DBFlush(true);
+
+    string strWalletPath = GetAppDir() + "/wallet.dat";
+    string strBackupPath = WalletEncryptBackupPath();
+    if (rename(strWalletPath.c_str(), strBackupPath.c_str()) != 0)
+    {
+        strErrorRet = strprintf("could not move the original wallet to %s", strBackupPath.c_str());
+        remove(strTempPath.c_str());
+        return false;
+    }
+    if (rename(strTempPath.c_str(), strWalletPath.c_str()) != 0)
+    {
+        rename(strBackupPath.c_str(), strWalletPath.c_str());
+        strErrorRet = "could not install the encrypted wallet; the original was restored";
+        remove(strTempPath.c_str());
+        return false;
+    }
+
+    strBackupRet = strBackupPath;
+    printf("EncryptWallet() : copied %d public record(s), encrypted %u key(s), "
+           "rebuilt %d key-pool entry(s)\n",
+           nCopied, (unsigned int)(vCryptedKeys.size() + vNewPoolKeys.size()),
+           (int)vNewPool.size());
+
+    // The rewritten wallet.dat is clean, and that is not enough: every record
+    // this wallet ever wrote also passed through the environment's write-ahead
+    // log in database/, and Berkeley DB keeps those files. Measured on a real
+    // wallet -- wallet.dat held no trace of a known private key afterwards,
+    // while database/log.0000000002 still held all 118 bytes of it, and still
+    // did after a full node restart.
+    //
+    // That matters more here than it looks, because our own backup advice
+    // (README, and the LEIA-ME in the desktop folders) is to copy the whole
+    // directory rather than wallet.dat alone -- which is the right advice, and
+    // the reason for issue #40. Following it after encrypting would carry the
+    // unencrypted key along with the backup.
+    //
+    // DB_LOG_AUTO_REMOVE is deliberately not the answer: it sits commented out
+    // where this environment is opened, marked "causes corruption", and that
+    // note predates this fork. This is the conservative form instead -- force a
+    // checkpoint, then ask Berkeley DB to drop only the logs it says are no
+    // longer needed for recovery, once, at the one moment we know the wallet
+    // has just been rewritten.
     return true;
 }

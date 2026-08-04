@@ -129,6 +129,46 @@ FILE* AppendBlockFile(unsigned int& nFileRet);
 bool AddKey(const CKey& key);
 vector<unsigned char> GenerateNewKey();
 
+// --- Wallet encryption ----------------------------------------------------
+//
+// Plain wallets keep private keys in mapKeys. Encrypted wallets keep public
+// keys visible so balances can still be recognized while locked, and decrypt
+// private keys only after an unlock passphrase has supplied the master key.
+typedef vector<unsigned char, secure_allocator<unsigned char> > CKeyingMaterial;
+extern map<vector<unsigned char>, vector<unsigned char> > mapCryptedKeys;
+extern map<unsigned int, CWalletMasterKey> mapMasterKeys;
+extern unsigned int nWalletMasterKeyMaxID;
+extern CKeyingMaterial vWalletMasterKey;
+extern vector<unsigned char> vchCryptedHDMaster;
+extern vector<unsigned char> vchCryptedHDChainCode;
+extern bool fWalletEncrypted;
+extern bool fWalletLocked;
+bool IsWalletEncrypted();
+bool IsWalletLocked();
+void LockWallet();
+bool UnlockWallet(const string& strPassphrase, string& strErrorRet);
+bool DeriveWalletPassphraseKey(const string& strPassphrase,
+                               const vector<unsigned char>& vchSalt,
+                               unsigned int nDeriveIterations,
+                               CKeyingMaterial& vchKeyRet,
+                               vector<unsigned char>& vchIVRet);
+bool EncryptSecret(const CKeyingMaterial& vchKey,
+                   const vector<unsigned char>& vchPlaintext,
+                   const vector<unsigned char>& vchIV,
+                   vector<unsigned char>& vchCiphertextRet);
+bool DecryptSecret(const CKeyingMaterial& vchKey,
+                   const vector<unsigned char>& vchCiphertext,
+                   const vector<unsigned char>& vchIV,
+                   vector<unsigned char>& vchPlaintextRet);
+vector<unsigned char> WalletKeyIV(const vector<unsigned char>& vchPubKey);
+vector<unsigned char> WalletSecretIV(const string& strLabel);
+bool AddCryptedKey(const vector<unsigned char>& vchPubKey,
+                   const vector<unsigned char>& vchCryptedSecret);
+bool WalletCanSpendKey(const vector<unsigned char>& vchPubKey);
+bool GetWalletPrivKey(const vector<unsigned char>& vchPubKey,
+                      CPrivKey& vchPrivKeyRet,
+                      string& strErrorRet);
+
 // --- Key pool -------------------------------------------------------------
 //
 // A backup of this wallet only ever contained the keys that existed the moment
