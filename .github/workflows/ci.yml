@@ -1,0 +1,62 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  linux-headless:
+    name: Linux headless selftests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Install Linux dependencies
+        run: make deps-linux
+
+      - name: Run Linux selftests
+        run: make tests
+
+  windows-ucrt64:
+    name: Windows UCRT64 selftests
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Set up MSYS2
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: true
+          install: >-
+            git
+            make
+            mingw-w64-ucrt-x86_64-gcc
+            mingw-w64-ucrt-x86_64-glfw
+            mingw-w64-ucrt-x86_64-openssl
+            mingw-w64-ucrt-x86_64-db
+            mingw-w64-ucrt-x86_64-libsodium
+            mingw-w64-ucrt-x86_64-nlohmann-json
+            mingw-w64-ucrt-x86_64-boost
+            mingw-w64-ucrt-x86_64-cmake
+            autoconf
+            automake
+            libtool
+
+      - name: Build Windows dependencies
+        run: make deps-windows
+
+      - name: Run Windows selftests
+        run: cd src && make -f makefile.mingw tests
