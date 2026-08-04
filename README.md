@@ -107,7 +107,7 @@ words also cover the address the window shows you. **Both still matter** — the
 phrase and the file back up different things, and the difference is where people
 lose money.
 
-The derivation is written down in [doc/derivation.md](doc/derivation.md), with
+The derivation is written down in [docs/derivation.md](docs/derivation.md), with
 test vectors and a script that reproduces them from scratch. It is there so the
 twelve words keep working even if this software does not: paths, address format
 and encoding, enough to recover the keys with ordinary tools and no Bitflash

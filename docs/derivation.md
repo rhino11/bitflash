@@ -5,7 +5,7 @@ software**. If the project stops, the binaries are lost, or you simply do not
 trust them, the twelve words plus what is written here are enough to recover
 your private keys with ordinary cryptographic tools.
 
-Everything below is verified by `doc/verify-derivation.py`, a self-contained
+Everything below is verified by `docs/verify-derivation.py`, a self-contained
 script that implements this document from scratch — no Bitflash code, no
 libraries beyond Python's standard library — and checks that it reproduces the
 addresses the wallet produces. If the two ever disagree, this document is wrong
@@ -106,7 +106,7 @@ abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon 
 Check them yourself:
 
 ```
-python doc/verify-derivation.py
+python docs/verify-derivation.py
 ```
 
 Both tables were produced by the wallet — the legacy one by the v1.2.15 binary,
