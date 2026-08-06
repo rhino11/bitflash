@@ -3,16 +3,32 @@
 Bitflash releases publish binaries and a `SHA256SUMS` file. The checksum file
 proves that the file you downloaded matches the file the release page names.
 A detached signature, `SHA256SUMS.asc`, proves that the checksum file itself was
-signed by a trusted release key.
+signed by the Bitflash release key.
 
 That gives users two separate checks:
 
-1. `gpg --verify SHA256SUMS.asc SHA256SUMS` checks who signed the checksums.
-2. `sha256sum -c SHA256SUMS` checks the binaries against those checksums.
+1. `gpg --verify SHA256SUMS.asc SHA256SUMS` — who signed the checksums.
+2. `sha256sum -c SHA256SUMS` — the binaries against those checksums.
 
-## User Check
+But the first check is only worth something if you require a **specific** key.
+A good signature by *some* key proves nothing; anyone can make one.
 
-From a shell with `curl` or `wget` and `sha256sum`:
+## The release signing key
+
+```text
+fingerprint  910A 2B4C CA87 9E81 FB4B  2AEA 1D4A 53D3 B78A A4B8
+uid          Bitflash Releases (bitflash.network release signing)
+             <releases@bitflash.network>
+```
+
+The public key is published at
+`https://releases.bitflash.network/bitflash-release-key.asc` and embedded in
+`scripts/verify-release.sh`, so the tool's trust anchor lives in this
+repository rather than on the server it verifies.
+
+## User check
+
+From a shell with `curl` or `wget`, `sha256sum` and `gpg`:
 
 ```bash
 scripts/verify-release.sh latest
@@ -21,42 +37,48 @@ scripts/verify-release.sh latest
 For a specific release:
 
 ```bash
-scripts/verify-release.sh v1.2.13
+scripts/verify-release.sh v1.2.15
 ```
 
-For release audits, require the signature:
+The script downloads the release, imports the pinned key into a throwaway
+keyring, and **refuses anything that is not a valid signature by the key above**
+before checking the hashes. Releases from before signing was introduced ship
+only `SHA256SUMS`; without `--require-signature` those are checked for integrity
+and reported as unsigned.
+
+By hand, if you would rather not run the script:
 
 ```bash
-scripts/verify-release.sh v1.2.13 --require-signature
+curl -O https://releases.bitflash.network/bitflash-release-key.asc
+gpg --import bitflash-release-key.asc
+gpg --verify SHA256SUMS.asc SHA256SUMS   # must name the fingerprint above
+sha256sum -c SHA256SUMS
 ```
 
-Older releases may not have `SHA256SUMS.asc`. In that case the script warns and
-still checks file integrity. New release audits should use `--require-signature`.
+## Maintainer flow
 
-## Maintainer Flow
-
-After building release assets in the repository root:
+The signing key lives on a dedicated location, not in the build tree. After
+building the release assets in the repository root, write and sign the
+checksums:
 
 ```bash
-scripts/make-release-checksums.sh --sign --local-user RELEASE_KEY_ID
+sha256sum Bitflash-*.zip Bitflash-*.AppImage bitflash-node-* > SHA256SUMS
+gpg --armor --detach-sign --output SHA256SUMS.asc SHA256SUMS
 ```
 
-Upload all built assets plus:
+Publish, alongside the assets, `SHA256SUMS` and `SHA256SUMS.asc`, and update
+`latest.txt` on the releases host to the new tag. Keep using the same key; if it
+is ever rotated, announce the new fingerprint clearly and update the embedded
+key in `verify-release.sh`.
 
-```text
-SHA256SUMS
-SHA256SUMS.asc
-```
-
-Keep the private signing key offline or on a dedicated release machine. Publish
-the public key fingerprint in the release notes and keep using the same key for
-future releases unless there is a clearly announced rotation.
-
-## Why This Matters
+## Why this matters
 
 `SHA256SUMS` alone protects against a broken download, but not against someone
-replacing both a binary and the checksum file. Signing `SHA256SUMS` means an
-attacker must also have the release signing key to make the replacement verify.
+replacing both a binary and the checksum file. Signing `SHA256SUMS`, and
+requiring a pinned key, means an attacker must also hold the release signing key
+to make the replacement verify. Serving from bitflash.network makes this the
+guarantee that matters: without a pinned key, "trust the site" is the only
+thing standing behind a download.
 
 This is not reproducible builds yet. It is the smaller, immediate step that
-makes every release asset auditable by users before they run it.
+makes every release asset auditable before anyone runs it.
