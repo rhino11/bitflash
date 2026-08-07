@@ -363,6 +363,36 @@ static void FatalStartupError(bool fHeadless, const string& strWhat, const strin
 #endif
 }
 
+#ifdef _WIN32
+// Windows equivalent of the SIGINT/SIGTERM handler the headless loop installs on
+// POSIX. Without it a headless node on Windows had no way to reach the clean
+// StopNode()+DBFlush() path: Ctrl-C, closing the console window, a service stop
+// and OS shutdown all killed it mid-write, and a wallet.dat left unflushed by
+// Berkeley DB will not reopen. For CLOSE/LOGOFF/SHUTDOWN the OS terminates us
+// shortly after the handler returns, so we set fShutdown and then block until the
+// main loop signals the flush is done -- returning any sooner throws the flush
+// away, which is the whole bug. (A `taskkill /F` is still an uncatchable hard
+// kill; nothing can help there, and nothing should pretend to.)
+static volatile bool g_fHeadlessShutdownDone = false;
+static BOOL WINAPI HeadlessConsoleCtrlHandler(DWORD dwCtrlType)
+{
+    switch (dwCtrlType)
+    {
+    case CTRL_C_EVENT:
+    case CTRL_BREAK_EVENT:
+    case CTRL_CLOSE_EVENT:
+    case CTRL_LOGOFF_EVENT:
+    case CTRL_SHUTDOWN_EVENT:
+        fShutdown = true;
+        while (!g_fHeadlessShutdownDone)
+            Sleep(50);
+        return TRUE;
+    default:
+        return FALSE;
+    }
+}
+#endif
+
 int main(int argc, char* argv[])
 {
     if (arg(argc,argv,"/help") || arg(argc,argv,"-help") ||
@@ -662,7 +692,9 @@ int main(int argc, char* argv[])
 #endif
 
     if (fHeadless) {
-#ifndef _WIN32
+#ifdef _WIN32
+        SetConsoleCtrlHandler(HeadlessConsoleCtrlHandler, TRUE);
+#else
         auto sig=[](int){fShutdown=true;};
         signal(SIGINT,sig); signal(SIGTERM,sig);
 #endif
@@ -674,6 +706,11 @@ int main(int argc, char* argv[])
         // called here, which is why a wallet.dat copied elsewhere would not
         // open -- issue #40. Not optional.
         DBFlush(true);
+#ifdef _WIN32
+        // wallet.dat is safely flushed and closed now; let a pending console
+        // control handler (CLOSE/LOGOFF/SHUTDOWN) return so the OS can finish.
+        g_fHeadlessShutdownDone = true;
+#endif
         return 0;
     }
 
