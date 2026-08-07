@@ -28,6 +28,9 @@ jobs:
       - name: Run P2P message fuzz smoke
         run: make fuzz-net-message-smoke
 
+      - name: Run script fuzz smoke
+        run: make fuzz-script-smoke
+
   windows-ucrt64:
     name: Windows UCRT64 selftests
     runs-on: windows-latest

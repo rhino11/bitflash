@@ -194,6 +194,9 @@ tests:
 fuzz-net-message-smoke: deps-linux
 	$(MAKE) -C src -f Makefile fuzz-net-message-smoke
 
+fuzz-script-smoke: deps-linux
+	$(MAKE) -C src -f Makefile fuzz-script-smoke
+
 checksums:
 	./scripts/make-release-checksums.sh
 
@@ -204,5 +207,5 @@ verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
 .PHONY: linux windows clean appimage \
-        tests fuzz-net-message-smoke checksums sign-checksums verify-release \
+        tests fuzz-net-message-smoke fuzz-script-smoke checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

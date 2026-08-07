@@ -121,8 +121,9 @@ NODE_LIBS = -L$(SECP_LIB) -lsecp256k1 \
 NODE_ONLY_OBJS = $(patsubst obj/%,obj-node/%,$(NODE_OBJS)) \
                  obj-node/main_gui.o obj-node/headless.o
 
-FUZZ_OBJS = $(patsubst obj/%,obj-fuzz/%,$(NODE_OBJS)) \
-            obj-fuzz/fuzz_net_message.o
+FUZZ_BASE_OBJS = $(patsubst obj/%,obj-fuzz/%,$(NODE_OBJS))
+FUZZ_NET_MESSAGE_OBJS = $(FUZZ_BASE_OBJS) obj-fuzz/fuzz_net_message.o
+FUZZ_SCRIPT_OBJS = $(FUZZ_BASE_OBJS) obj-fuzz/fuzz_script.o
 
 obj-node/%.o: %.cpp $(HEADERS)
 	@mkdir -p obj-node
@@ -148,10 +149,19 @@ obj-fuzz/fuzz_net_message.o: fuzz_net_message.cpp $(HEADERS)
 	@mkdir -p obj-fuzz
 	$(FUZZ_CXX) -c $(FUZZ_CXXFLAGS) -DBITFLASH_FUZZ -o $@ $<
 
-fuzz-net-message: $(FUZZ_OBJS)
+obj-fuzz/fuzz_script.o: fuzz_script.cpp $(HEADERS)
+	@mkdir -p obj-fuzz
+	$(FUZZ_CXX) -c $(FUZZ_CXXFLAGS) -DBITFLASH_FUZZ -o $@ $<
+
+fuzz-net-message: $(FUZZ_NET_MESSAGE_OBJS)
 	$(FUZZ_CXX) $(filter-out -fsanitize=fuzzer-no-link%,$(FUZZ_CXXFLAGS)) \
 	  $(FUZZ_LDFLAGS) -o $@ $^ $(NODE_LIBS)
 	@echo "Built: fuzz-net-message"
+
+fuzz-script: $(FUZZ_SCRIPT_OBJS)
+	$(FUZZ_CXX) $(filter-out -fsanitize=fuzzer-no-link%,$(FUZZ_CXXFLAGS)) \
+	  $(FUZZ_LDFLAGS) -o $@ $^ $(NODE_LIBS)
+	@echo "Built: fuzz-script"
 
 fuzz-net-message-smoke: fuzz-net-message
 	@mkdir -p ../work/fuzz-corpus/net-message
@@ -159,8 +169,15 @@ fuzz-net-message-smoke: fuzz-net-message
 	@printf '\277\040\134\375version\000\000\000\000\000\000\000\000\000' > ../work/fuzz-corpus/net-message/version-header
 	./fuzz-net-message -runs=128 ../work/fuzz-corpus/net-message
 
+fuzz-script-smoke: fuzz-script
+	@mkdir -p ../work/fuzz-corpus/script
+	@printf '\000\121' > ../work/fuzz-corpus/script/op-true
+	@printf '\001\166\251\024\001\002\003\004\005\006\007\010\011\012\013\014\015\016\017\020\021\022\023\024\210\254' > ../work/fuzz-corpus/script/p2pkh-shape
+	@printf '\000\115\377\377' > ../work/fuzz-corpus/script/truncated-pushdata2
+	./fuzz-script -runs=128 ../work/fuzz-corpus/script
+
 clean:
-	rm -rf obj obj-node obj-fuzz bitflash bitflash-node fuzz-net-message test_bip32
+	rm -rf obj obj-node obj-fuzz bitflash bitflash-node fuzz-net-message fuzz-script test_bip32
 
 test_bip32: test_bip32.cpp bip32.cpp bip32.h bip39_english.h
 	$(CXX) $(CXXFLAGS) -o $@ test_bip32.cpp bip32.cpp -lssl -lcrypto
@@ -175,4 +192,4 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=net-message
 	./bitflash-node -selftest=consensus-limits
 
-.PHONY: tests fuzz-net-message-smoke
+.PHONY: tests fuzz-net-message-smoke fuzz-script-smoke
