@@ -6,6 +6,10 @@
 #include "headers.h"
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
+#ifdef _WIN32
+#include <wincrypt.h>
+#endif
 // We link libsecp256k1 statically (without this the header assumes DLL import).
 // Both makefiles also pass -DSECP256K1_STATIC; the guard keeps that from
 // warning while leaving this file correct if built without the flag.
@@ -446,6 +450,41 @@ static bool BuildSignedEvent(CNostrKey& key, int kind, const json& tags,
 static const uint64 MAX_WS_FRAME   = 1 << 20;  // 1 MiB per frame
 static const uint64 MAX_WS_MESSAGE = 4 << 20;  // 4 MiB reassembled
 
+static int BtfConnectedNodeCount()
+{
+    int nNodes = 0;
+    CRITICAL_BLOCK(cs_vNodes)
+    {
+        nNodes = (int)vNodes.size();
+    }
+    return nNodes;
+}
+
+#ifdef _WIN32
+static bool BtfLoadWindowsRootCertificates(SSL_CTX* sslctx)
+{
+    HCERTSTORE hStore = CertOpenSystemStoreA(0, "ROOT");
+    if (!hStore)
+        return false;
+
+    bool fLoaded = false;
+    X509_STORE* x509store = SSL_CTX_get_cert_store(sslctx);
+    PCCERT_CONTEXT pCert = NULL;
+    while ((pCert = CertEnumCertificatesInStore(hStore, pCert)) != NULL)
+    {
+        const unsigned char* p = pCert->pbCertEncoded;
+        X509* x509 = d2i_X509(NULL, &p, pCert->cbCertEncoded);
+        if (!x509)
+            continue;
+        if (X509_STORE_add_cert(x509store, x509) == 1)
+            fLoaded = true;
+        X509_free(x509);
+    }
+    CertCloseStore(hStore, 0);
+    return fLoaded;
+}
+#endif
+
 class CWebSocket
 {
 public:
@@ -555,11 +594,26 @@ public:
         {
             sslctx = SSL_CTX_new(TLS_client_method());
             if (!sslctx) return false;
+            SSL_CTX_set_verify(sslctx, SSL_VERIFY_PEER, NULL);
+            bool fTrustLoaded = (SSL_CTX_set_default_verify_paths(sslctx) == 1);
+#ifdef _WIN32
+            fTrustLoaded = BtfLoadWindowsRootCertificates(sslctx) || fTrustLoaded;
+#endif
+            if (!fTrustLoaded)
+                return error("Nostr: failed to load TLS trust store");
             ssl = SSL_new(sslctx);
+            if (!ssl) return false;
             SSL_set_fd(ssl, (int)hSocket);
-            SSL_set_tlsext_host_name(ssl, host.c_str());  // SNI
+            if (SSL_set_tlsext_host_name(ssl, host.c_str()) != 1)
+                return error("Nostr: failed to set TLS SNI for %s", host.c_str());
+            if (SSL_set1_host(ssl, host.c_str()) != 1)
+                return error("Nostr: failed to set TLS hostname for %s", host.c_str());
             if (SSL_connect(ssl) != 1)
                 return error("Nostr: TLS handshake with %s failed", host.c_str());
+            long nVerify = SSL_get_verify_result(ssl);
+            if (nVerify != X509_V_OK)
+                return error("Nostr: TLS certificate verification failed for %s: %s",
+                             host.c_str(), X509_verify_cert_error_string(nVerify));
         }
 
         // WebSocket handshake (HTTP Upgrade)
@@ -1016,6 +1070,7 @@ static bool ResolveDescriptor(CWebSocket& ws, void* ctx, const string& btfAddr,
     json filter = json::object();
     filter["authors"] = json::array({ HexEncode(pk, 32) });
     filter["kinds"]   = json::array({ BTF_DESC_KIND });
+    filter["#d"]      = json::array({ BTF_DESC_DTAG });
     filter["limit"]   = 1;
     json req = json::array({ "REQ", "btf-resolve", filter });
     if (!ws.SendText(req.dump()))
@@ -1126,6 +1181,7 @@ bool BtfResolveMany(const std::vector<std::string>& btfAddrs,
             json filter = json::object();
             filter["authors"] = authors;
             filter["kinds"]   = json::array({ BTF_DESC_KIND });
+            filter["#d"]      = json::array({ BTF_DESC_DTAG });
             filter["limit"]   = (int)authors.size();
             json req = json::array({ "REQ", "btf-resolve-many", filter });
             if (!ws.SendText(req.dump()))
@@ -1536,8 +1592,9 @@ static void ConnectDiscoveredBtfPeers()
     // plus a random sample, not one or the other.
     int64 now = GetTime();
     int nBudget = (int)BTF_DIALS_PER_PASS;
+    int nNodeCount = BtfConnectedNodeCount();
     {
-        int nRoom = (int)BTF_TARGET_CONN - (int)vNodes.size();
+        int nRoom = (int)BTF_TARGET_CONN - nNodeCount;
         if (nRoom < nBudget) nBudget = nRoom;
     }
     if (nBudget < 0) nBudget = 0;
@@ -1551,7 +1608,6 @@ static void ConnectDiscoveredBtfPeers()
         // Reliability slice: walk the tiered (good -> untried -> bad) order.
         for (const string& addr : peers)
         {
-            if ((int)vNodes.size() >= (int)BTF_TARGET_CONN) break;
             if ((int)candidates.size() >= nSortedSlots) break;
             map<string, int64>::iterator bi = g_btfPeerBackoff.find(addr);
             if (bi != g_btfPeerBackoff.end() && now < bi->second)
@@ -1576,7 +1632,7 @@ static void ConnectDiscoveredBtfPeers()
         int nWant = min(nRandomSlots, (int)pool.size());
         for (int i = 0; i < nWant; i++)
         {
-            if ((int)vNodes.size() + (int)candidates.size() >= (int)BTF_TARGET_CONN) break;
+            if (nNodeCount + (int)candidates.size() >= (int)BTF_TARGET_CONN) break;
             if ((int)candidates.size() >= nBudget) break;
             size_t j = i + (size_t)GetRand((uint64)(pool.size() - i));
             std::swap(pool[i], pool[j]);
@@ -1631,12 +1687,10 @@ static void ConnectDiscoveredBtfPeers()
     // not the shared Nostr relays, so there's no thundering-herd effect here.
     // Each thread writes its result back via shared state guarded by cs_btfPeerState.
     struct DialCtx { string addr; BtfResolvedPeer rp; };
-    vector<DialCtx*> ctxs;
     for (const string& addr : toDial)
     {
         DialCtx* ctx = new DialCtx{addr, resolved[addr]};
-        ctxs.push_back(ctx);
-        _beginthread([](void* arg) {
+        uintptr_t tid = _beginthread([](void* arg) {
             DialCtx* ctx = (DialCtx*)arg;
             string addr = ctx->addr;
             string meeting = ctx->rp.meetingHostPort;
@@ -1669,6 +1723,21 @@ static void ConnectDiscoveredBtfPeers()
                 }
             }
         }, 0, ctx);
+        if (tid == (uintptr_t)-1)
+        {
+            LogPrint("nostr", "Nostr: failed to create .btf dial thread for %s\n", addr.c_str());
+            CRITICAL_BLOCK(cs_btfPeerState)
+            {
+                int n = ++g_btfPeerFails[addr];
+                int64 cap = (n >= BTF_CHRONIC_FAIL_THRESHOLD) ? BTF_BACKOFF_CAP_SECS_DEAD
+                                                               : BTF_BACKOFF_CAP_SECS;
+                int64 secs = 30;
+                for (int k = 1; k < n && secs < cap; k++) secs *= 2;
+                if (secs > cap) secs = cap;
+                g_btfPeerBackoff[addr] = GetTime() + secs;
+            }
+            delete ctx;
+        }
     }
 
     // Wait long enough for all parallel dials to finish (each has a 10s socket
@@ -1768,7 +1837,7 @@ void ThreadNostrSeed(void* parg)
 
         // Re-discover periodically. Sleep less aggressively when
         // we have no connections yet so we find peers faster on startup.
-        int nSleepSecs = vNodes.empty() ? 20 : 60;
+        int nSleepSecs = (BtfConnectedNodeCount() == 0) ? 20 : 60;
         for (int i = 0; i < nSleepSecs && !fShutdown; i++)
             Sleep(1000);
     }
