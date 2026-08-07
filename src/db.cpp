@@ -1404,6 +1404,13 @@ static bool EncryptPrivateKeyForWallet(const CKeyingMaterial& vchMasterKey,
     return true;
 }
 
+static void SecureClearBytes(vector<unsigned char>& vch)
+{
+    if (!vch.empty())
+        OPENSSL_cleanse(&vch[0], vch.size());
+    vch.clear();
+}
+
 bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& strErrorRet)
 {
     strBackupRet.clear();
@@ -1423,6 +1430,7 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
     map<vector<unsigned char>, CPrivKey> mapPlainKeys;
     vector<unsigned char> vchPlainHDMaster;
     vector<unsigned char> vchPlainHDChainCode;
+    bool fHadHDSeed = false;
     unsigned int nHDNextSnapshot = 0;
     {
         CRITICAL_BLOCK(cs_mapKeys)
@@ -1433,6 +1441,7 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
         {
             vchPlainHDMaster = vchHDMaster;
             vchPlainHDChainCode = vchHDChainCode;
+            fHadHDSeed = !vchPlainHDMaster.empty() || !vchPlainHDChainCode.empty();
             nHDNextSnapshot = nHDNext;
         }
     }
@@ -1483,11 +1492,13 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
 
     vector<unsigned char> vchCryptedHDMasterNew;
     vector<unsigned char> vchCryptedHDChainCodeNew;
-    if (!vchPlainHDMaster.empty() || !vchPlainHDChainCode.empty())
+    if (fHadHDSeed)
     {
         if (vchPlainHDMaster.size() != 32 || vchPlainHDChainCode.size() != 32)
         {
             strErrorRet = "wallet has an incomplete HD seed";
+            SecureClearBytes(vchPlainHDMaster);
+            SecureClearBytes(vchPlainHDChainCode);
             return false;
         }
         if (!EncryptSecret(vchMasterKey, vchPlainHDMaster,
@@ -1496,8 +1507,12 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
                            WalletSecretIV("hdchaincode"), vchCryptedHDChainCodeNew))
         {
             strErrorRet = "could not encrypt the HD seed";
+            SecureClearBytes(vchPlainHDMaster);
+            SecureClearBytes(vchPlainHDChainCode);
             return false;
         }
+        SecureClearBytes(vchPlainHDMaster);
+        SecureClearBytes(vchPlainHDChainCode);
     }
 
     vector<pair<int64, vector<unsigned char> > > vNewPool;
@@ -1506,7 +1521,7 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
     for (int i = 0; i < KEYPOOL_SIZE; i++)
     {
         CKey key;
-        if (!vchPlainHDMaster.empty())
+        if (fHadHDSeed)
         {
             string strDeriveError;
             if (!DeriveHDKey(nHDNextNew, key, strDeriveError))
