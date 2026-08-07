@@ -155,7 +155,9 @@ public:
         for (int i = 0; i < 8; i++)
         {
             unsigned char c = (n >> 56) & 0xff;
-            n <<= 8;
+            n = (int64)((uint64)n << 8);  // shift in unsigned space; <<= on a
+                                          // signed int64 with the top byte set
+                                          // is overflow UB (fuzzer/UBSan finding)
             if (fLeadingZeroes)
             {
                 if (c == 0)
