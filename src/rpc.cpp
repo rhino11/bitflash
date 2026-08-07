@@ -251,36 +251,72 @@ static bool RebuildJob()
 // Payouts -- event loop thread only
 // ---------------------------------------------------------------------------
 struct PendingPayout {
+    std::string                  id;
+    int                          blockHeight;
     int                          matureAtHeight;
     std::map<std::string, int64> amounts; // address -> satoshis
+    std::map<std::string, std::string> paidTxids; // address -> txid
+    int64                        nextAttempt;
+
+    PendingPayout() : blockHeight(0), matureAtHeight(0), nextAttempt(0) {}
 };
 static std::vector<PendingPayout> gPendingPayouts;
+static std::mutex                 gPayoutLedgerMutex;
 
 static std::string PayoutFilePath()
 {
     return GetAppDir() + "/pending_payouts.json";
 }
 
-static void SavePendingPayouts()
+static std::string PayoutIdForBlock(int blockHeight)
+{
+    return strprintf("block-%d", blockHeight);
+}
+
+static bool PayoutFullyPaid(const PendingPayout& pp)
+{
+    for (const auto& kv : pp.amounts)
+        if (pp.paidTxids.count(kv.first) == 0)
+            return false;
+    return true;
+}
+
+static void SavePendingPayoutsLocked()
 {
     nlohmann::json arr = nlohmann::json::array();
     for (const auto& pp : gPendingPayouts) {
         nlohmann::json obj;
+        obj["id"] = pp.id;
+        obj["blockHeight"] = pp.blockHeight;
         obj["matureAtHeight"] = pp.matureAtHeight;
+        obj["nextAttempt"] = pp.nextAttempt;
         nlohmann::json amounts = nlohmann::json::object();
         for (const auto& kv : pp.amounts)
             amounts[kv.first] = kv.second;
         obj["amounts"] = amounts;
+        nlohmann::json paid = nlohmann::json::object();
+        for (const auto& kv : pp.paidTxids)
+            paid[kv.first] = kv.second;
+        obj["paidTxids"] = paid;
         arr.push_back(obj);
     }
     std::string path = PayoutFilePath();
-    FILE* f = fopen(path.c_str(), "w");
+    std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "w");
     if (f) {
         std::string s = arr.dump(2);
         fwrite(s.c_str(), 1, s.size(), f);
-        fclose(f);
+        if (fclose(f) != 0) {
+            LogPrint("payout", "[payout] WARNING: could not close %s\n", tmp.c_str());
+            return;
+        }
+#ifdef _WIN32
+        remove(path.c_str());
+#endif
+        if (rename(tmp.c_str(), path.c_str()) != 0)
+            LogPrint("payout", "[payout] WARNING: could not replace %s\n", path.c_str());
     } else {
-        LogPrint("payout", "[payout] WARNING: could not write %s\n", path.c_str());
+        LogPrint("payout", "[payout] WARNING: could not write %s\n", tmp.c_str());
     }
 }
 
@@ -297,11 +333,25 @@ static void LoadPendingPayouts()
     fclose(f);
     try {
         nlohmann::json arr = nlohmann::json::parse(s);
+        std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
         for (const auto& obj : arr) {
             PendingPayout pp;
+            if (obj.contains("blockHeight"))
+                pp.blockHeight = obj["blockHeight"].get<int>();
             pp.matureAtHeight = obj["matureAtHeight"].get<int>();
+            if (obj.contains("id") && obj["id"].is_string())
+                pp.id = obj["id"].get<std::string>();
+            if (pp.blockHeight == 0)
+                pp.blockHeight = pp.matureAtHeight - COINBASE_MATURITY;
+            if (pp.id.empty())
+                pp.id = PayoutIdForBlock(pp.blockHeight);
+            if (obj.contains("nextAttempt"))
+                pp.nextAttempt = obj["nextAttempt"].get<int64>();
             for (auto it = obj["amounts"].begin(); it != obj["amounts"].end(); ++it)
                 pp.amounts[it.key()] = it.value().get<int64>();
+            if (obj.contains("paidTxids") && obj["paidTxids"].is_object())
+                for (auto it = obj["paidTxids"].begin(); it != obj["paidTxids"].end(); ++it)
+                    pp.paidTxids[it.key()] = it.value().get<std::string>();
             gPendingPayouts.push_back(pp);
         }
         LogPrint("payout", "[payout] loaded %zu pending payout(s) from disk\n",
@@ -318,6 +368,35 @@ static void LoadPendingPayouts()
 static std::vector<PendingPayout> gPayoutExecQueue;
 static std::mutex                 gPayoutExecMutex;
 static std::atomic<bool>          gPayoutThreadRunning{false};
+
+static std::set<std::string>      gQueuedPayouts;
+
+static bool FindRecordedPoolPayout(const std::string& id,
+                                   const std::string& address,
+                                   int64 amount,
+                                   std::string& txidRet)
+{
+    CRITICAL_BLOCK(cs_mapWallet)
+    {
+        for (map<uint256, CWalletTx>::const_iterator it = mapWallet.begin();
+             it != mapWallet.end(); ++it)
+        {
+            const CWalletTx& wtx = it->second;
+            map<string, string>::const_iterator idIt = wtx.mapValue.find("pool_payout_id");
+            if (idIt == wtx.mapValue.end() || idIt->second != id)
+                continue;
+            map<string, string>::const_iterator addrIt = wtx.mapValue.find("pool_payout_address");
+            if (addrIt == wtx.mapValue.end() || addrIt->second != address)
+                continue;
+            map<string, string>::const_iterator amtIt = wtx.mapValue.find("pool_payout_amount");
+            if (amtIt == wtx.mapValue.end() || amtIt->second != strprintf("%lld", amount))
+                continue;
+            txidRet = wtx.GetHash().GetHex();
+            return true;
+        }
+    }
+    return false;
+}
 
 static void QueuePayouts(int blockHeight,
                          const std::map<std::string, uint64>& shareCount,
@@ -341,6 +420,8 @@ static void QueuePayouts(int blockHeight,
     int64 minerReward = (int64)((double)nSubsidy * (1.0 - feeFrac));
 
     PendingPayout pp;
+    pp.id = PayoutIdForBlock(blockHeight);
+    pp.blockHeight = blockHeight;
     pp.matureAtHeight = blockHeight + COINBASE_MATURITY;
 
     int skipped = 0;
@@ -364,8 +445,11 @@ static void QueuePayouts(int blockHeight,
         pp.amounts[kv.first] = amount;
     }
 
-    gPendingPayouts.push_back(pp);
-    SavePendingPayouts();
+    {
+        std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
+        gPendingPayouts.push_back(pp);
+        SavePendingPayoutsLocked();
+    }
 
     int64 operatorCut = nSubsidy - minerReward;
     LogPrint("payout",
@@ -383,42 +467,33 @@ static void QueuePayouts(int blockHeight,
                         : "");
 }
 
-// Called from event loop: move matured entries to the exec queue (fast).
-// NOT crash-safe, despite the ordering below looking like it is.
-//
-// A matured payout is erased from gPendingPayouts, the file is rewritten
-// without it, and only then does it reach the exec queue -- which lives in
-// memory alone. SavePendingPayouts writes gPendingPayouts and nothing else;
-// there is no exec-queue section of the file to recover from. Die anywhere
-// between the rewrite and SendMoney and those miners are simply never paid,
-// with no record that they were owed anything.
-//
-// Making this safe needs the payment to be idempotent -- record the txid and
-// check the wallet for it on restart -- rather than a reordering, since
-// re-queueing blindly would double-pay whoever was already sent to.
+// Called from event loop: copy matured entries to the exec queue (fast).
+// The ledger entry stays on disk until every recipient has a txid recorded.
+// On restart, FindRecordedPoolPayout() checks wallet metadata before sending,
+// so a crash after SendMoney but before the ledger update does not double-pay.
 static void FlushMaturePayouts()
 {
     std::vector<PendingPayout> ready;
-    for (auto it = gPendingPayouts.begin(); it != gPendingPayouts.end(); ) {
-        if (nBestHeight < it->matureAtHeight) { ++it; continue; }
-        LogPrint("payout", "[payout] block height %d matured -- queuing %zu payments\n",
-                 it->matureAtHeight, it->amounts.size());
-        ready.push_back(*it);   // copy first; erase after save
-        ++it;
-    }
-    if (!ready.empty()) {
-        // Erase from pending then save before handing off to exec thread,
-        // so the file never contains an entry that is already being sent.
-        for (auto it = gPendingPayouts.begin(); it != gPendingPayouts.end(); ) {
-            if (nBestHeight >= it->matureAtHeight)
-                it = gPendingPayouts.erase(it);
-            else
-                ++it;
+    {
+        std::lock_guard<std::mutex> ledger(gPayoutLedgerMutex);
+        std::lock_guard<std::mutex> queue(gPayoutExecMutex);
+        int64 now = GetTime();
+        for (const PendingPayout& pp : gPendingPayouts) {
+            if (nBestHeight < pp.matureAtHeight)
+                continue;
+            if (pp.nextAttempt > now)
+                continue;
+            if (PayoutFullyPaid(pp))
+                continue;
+            if (gQueuedPayouts.count(pp.id))
+                continue;
+            LogPrint("payout", "[payout] block height %d matured -- queuing payout %s (%zu recipients)\n",
+                     pp.matureAtHeight, pp.id.c_str(), pp.amounts.size());
+            ready.push_back(pp);
+            gQueuedPayouts.insert(pp.id);
         }
-        SavePendingPayouts();
-        std::lock_guard<std::mutex> lk(gPayoutExecMutex);
         for (auto& pp : ready)
-            gPayoutExecQueue.push_back(std::move(pp));
+            gPayoutExecQueue.push_back(pp);
     }
 }
 
@@ -437,10 +512,21 @@ static void PayoutThreadFn(void*)
             batch.swap(gPayoutExecQueue);
         }
 
-        for (auto& pp : batch) {
+        for (auto& ppQueued : batch) {
             LogPrint("payout", "[payout] executing payments for block matured at %d"
-                     " (%zu miners)\n", pp.matureAtHeight, pp.amounts.size());
-            for (auto& kv : pp.amounts) {
+                     " (%zu miners)\n", ppQueued.matureAtHeight, ppQueued.amounts.size());
+            bool fAbortBatch = false;
+            for (auto& kv : ppQueued.amounts) {
+                bool alreadyPaid = false;
+                {
+                    std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
+                    for (const PendingPayout& pp : gPendingPayouts)
+                        if (pp.id == ppQueued.id && pp.paidTxids.count(kv.first))
+                            alreadyPaid = true;
+                }
+                if (alreadyPaid)
+                    continue;
+
                 uint160 h160;
                 if (!AddressToHash160(kv.first, h160)) {
                     // Should not happen -- bad addresses are filtered in QueuePayouts
@@ -451,16 +537,70 @@ static void PayoutThreadFn(void*)
                 CScript sc;
                 sc << OP_DUP << OP_HASH160 << h160 << OP_EQUALVERIFY << OP_CHECKSIG;
                 CWalletTx wtx;
-                wtx.mapValue["comment"] = strprintf("Pool payout height %d",
-                                                     pp.matureAtHeight);
-                if (SendMoney(sc, kv.second, wtx))
+                wtx.mapValue["comment"] = strprintf("Pool payout height %d", ppQueued.matureAtHeight);
+                wtx.mapValue["pool_payout_id"] = ppQueued.id;
+                wtx.mapValue["pool_payout_address"] = kv.first;
+                wtx.mapValue["pool_payout_amount"] = strprintf("%lld", kv.second);
+
+                std::string txid;
+                if (FindRecordedPoolPayout(ppQueued.id, kv.first, kv.second, txid))
+                {
+                    LogPrint("payout", "[payout] recovered recorded payout %s to %s"
+                             " from wallet tx %s\n",
+                             FormatMoney(kv.second).c_str(), kv.first.c_str(), txid.c_str());
+                }
+                else if (SendMoney(sc, kv.second, wtx))
+                {
+                    txid = wtx.GetHash().GetHex();
                     LogPrint("payout", "[payout] paid %s to %s\n",
-                             FormatMoney(kv.second).c_str(), kv.first.c_str());
+                              FormatMoney(kv.second).c_str(), kv.first.c_str());
+                }
                 else
+                {
                     LogPrint("payout", "[payout] FAILED to pay %s to %s"
-                             " (insufficient funds or wallet locked?)\n",
-                             FormatMoney(kv.second).c_str(), kv.first.c_str());
+                              " (insufficient funds or wallet locked?)\n",
+                              FormatMoney(kv.second).c_str(), kv.first.c_str());
+                    std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
+                    for (PendingPayout& pp : gPendingPayouts)
+                        if (pp.id == ppQueued.id)
+                            pp.nextAttempt = GetTime() + 60;
+                    SavePendingPayoutsLocked();
+                    fAbortBatch = true;
+                    break;
+                }
+
+                {
+                    std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
+                    for (PendingPayout& pp : gPendingPayouts) {
+                        if (pp.id != ppQueued.id)
+                            continue;
+                        pp.paidTxids[kv.first] = txid;
+                        pp.nextAttempt = 0;
+                        SavePendingPayoutsLocked();
+                        break;
+                    }
+                }
             }
+
+            {
+                std::lock_guard<std::mutex> ledger(gPayoutLedgerMutex);
+                for (auto it = gPendingPayouts.begin(); it != gPendingPayouts.end(); ) {
+                    if (it->id == ppQueued.id && PayoutFullyPaid(*it)) {
+                        LogPrint("payout", "[payout] payout %s complete -- removing from ledger\n",
+                                 it->id.c_str());
+                        it = gPendingPayouts.erase(it);
+                        SavePendingPayoutsLocked();
+                    } else {
+                        ++it;
+                    }
+                }
+            }
+            {
+                std::lock_guard<std::mutex> lk(gPayoutExecMutex);
+                gQueuedPayouts.erase(ppQueued.id);
+            }
+            if (fAbortBatch)
+                continue;
         }
 
         Sleep(500); // check for new work every 500ms
@@ -1073,16 +1213,21 @@ static void RefreshStats(int blocksFoundThisSession, uint64 roundShareTotal)
                                                   : a.lastSeen > b.lastSeen;
         });
 
-    // gPendingPayouts is event-loop-only data (no lock needed here since
-    // RefreshStats is always called from the event loop thread).
     gPayoutViews.clear();
+    std::lock_guard<std::mutex> ledger(gPayoutLedgerMutex);
     for (const PendingPayout& pp : gPendingPayouts) {
         PendingPayoutView pv;
         pv.matureAtHeight = pp.matureAtHeight;
-        pv.recipients     = (int)pp.amounts.size();
+        pv.recipients     = 0;
         pv.totalAmount    = 0;
-        for (auto& kv : pp.amounts) pv.totalAmount += kv.second;
-        gPayoutViews.push_back(pv);
+        for (auto& kv : pp.amounts) {
+            if (pp.paidTxids.count(kv.first))
+                continue;
+            pv.recipients++;
+            pv.totalAmount += kv.second;
+        }
+        if (pv.recipients > 0)
+            gPayoutViews.push_back(pv);
     }
 }
 
