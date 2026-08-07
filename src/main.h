@@ -86,6 +86,7 @@ extern bool   fMineModeFromCommandLine;
 extern string strParticipantPool; // participant: pool .btf address
 extern string strPoolName;        // operator: announced pool name
 extern string strPoolDashboardUrl; // operator: optional dashboard URL
+extern string strPoolStatusFile;   // operator: optional JSON status output path
 extern double dPoolFeePercent;     // operator: announced fee percent
 extern bool fSoloMineTest; // /solomine: mine without requiring a peer (local test)
 // Threads to hash with; 0 = decide from the hardware. Set by /genproclimit.

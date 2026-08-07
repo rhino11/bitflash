@@ -104,6 +104,7 @@ bool   fMineModeFromCommandLine = false;
 string strParticipantPool;           // participant mode: pool .btf address
 string strPoolName       = "Bitflash Pool";
 string strPoolDashboardUrl;
+string strPoolStatusFile;
 double dPoolFeePercent   = 0.0;
 
 static std::atomic<uint64> gParticipantSharesSent{0};

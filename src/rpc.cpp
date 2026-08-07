@@ -623,6 +623,7 @@ static StatsSnapshot                   gStats;
 static std::vector<PoolWorkerStatView> gWorkerStats;
 static std::vector<PendingPayoutView>  gPayoutViews;
 static std::mutex                      gStatsMutex;
+static int64                           gLastPoolStatusWrite = 0;
 
 void GetPoolOperatorStats(int& authorizedMiners, int& blocksFound, uint64& roundShares, double& totalHashRate)
 {
@@ -643,6 +644,82 @@ void GetPendingPayouts(std::vector<PendingPayoutView>& out)
 {
     std::lock_guard<std::mutex> lk(gStatsMutex);
     out = gPayoutViews;
+}
+
+static std::string PoolStatusFilePath()
+{
+    if (!strPoolStatusFile.empty())
+        return strPoolStatusFile;
+    return GetAppDir() + "/pool_status.json";
+}
+
+static void WritePoolStatusJsonLocked()
+{
+    nlohmann::json j;
+    j["schema"] = "bitflash-pool-status-1";
+    j["network"] = "bitflash";
+    j["updatedAt"] = GetTime();
+
+    j["operator"] = {
+        {"name", strPoolName},
+        {"btfAddress", BtfLocalAddress()},
+        {"feePercent", dPoolFeePercent},
+        {"dashboardUrl", strPoolDashboardUrl}
+    };
+
+    j["node"] = {
+        {"height", nBestHeight},
+        {"poolRunning", (bool)gPoolRunning},
+        {"mode", nMineMode}
+    };
+
+    j["pool"] = {
+        {"authorizedMiners", gStats.authorizedMiners},
+        {"blocksFoundSession", gStats.blocksFound},
+        {"roundShares", gStats.roundShares},
+        {"hashRate", gStats.totalHashRate}
+    };
+
+    j["workers"] = nlohmann::json::array();
+    for (const PoolWorkerStatView& row : gWorkerStats) {
+        j["workers"].push_back({
+            {"address", row.address},
+            {"worker", row.worker},
+            {"totalShares", row.totalShares},
+            {"roundShares", row.roundShares},
+            {"lastSeen", row.lastSeen},
+            {"hashRate", row.hashRate}
+        });
+    }
+
+    j["pendingPayouts"] = nlohmann::json::array();
+    for (const PendingPayoutView& row : gPayoutViews) {
+        j["pendingPayouts"].push_back({
+            {"matureAtHeight", row.matureAtHeight},
+            {"recipients", row.recipients},
+            {"totalAmountSatoshis", row.totalAmount},
+            {"totalAmountBtf", FormatMoney(row.totalAmount)}
+        });
+    }
+
+    std::string path = PoolStatusFilePath();
+    std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "w");
+    if (!f) {
+        LogPrint("pool", "[pool] WARNING: could not write status file %s\n", tmp.c_str());
+        return;
+    }
+    std::string s = j.dump(2);
+    fwrite(s.c_str(), 1, s.size(), f);
+    if (fclose(f) != 0) {
+        LogPrint("pool", "[pool] WARNING: could not close status file %s\n", tmp.c_str());
+        return;
+    }
+#ifdef _WIN32
+    remove(path.c_str());
+#endif
+    if (rename(tmp.c_str(), path.c_str()) != 0)
+        LogPrint("pool", "[pool] WARNING: could not replace status file %s\n", path.c_str());
 }
 
 // ---------------------------------------------------------------------------
@@ -1313,6 +1390,12 @@ static void RefreshStats(int blocksFoundThisSession, uint64 roundShareTotal)
         }
         if (pv.recipients > 0)
             gPayoutViews.push_back(pv);
+    }
+
+    int64 now = GetTime();
+    if (now - gLastPoolStatusWrite >= 10) {
+        WritePoolStatusJsonLocked();
+        gLastPoolStatusWrite = now;
     }
 }
 
