@@ -56,10 +56,15 @@ def render_html(pools, generated_at):
     rows = []
     for p in pools:
         dash = p["dashboardUrl"]
-        dash_html = (
-            '<a href="{0}">dashboard</a>'.format(html.escape(dash, quote=True))
-            if dash else "-"
-        )
+        # Only linkify http(s). The dashboard URL comes from an operator's
+        # self-published status file, so a "javascript:" or "data:" scheme
+        # would become a clickable script-injection on this public page.
+        dash_lower = dash.lower()
+        if dash_lower.startswith("http://") or dash_lower.startswith("https://"):
+            dash_html = '<a href="{0}" rel="noopener noreferrer">dashboard</a>'.format(
+                html.escape(dash, quote=True))
+        else:
+            dash_html = "-"
         rows.append(
             "<tr>"
             "<td>{status}</td>"
