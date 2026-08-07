@@ -19,12 +19,17 @@ static randomx_cache*  g_cache   = NULL;
 static randomx_dataset* g_dataset = NULL;
 static randomx_vm*     g_vmVerify = NULL;
 static CCriticalSection g_csVerify;
+static std::mutex      g_csInit;
 static bool            g_fInit    = false;
 static bool            g_fFast    = false;
 
 
 bool RandomXInit()
 {
+    if (g_fInit)
+        return true;
+
+    std::lock_guard<std::mutex> lock(g_csInit);
     if (g_fInit)
         return true;
 
