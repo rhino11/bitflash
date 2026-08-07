@@ -116,3 +116,4 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=wallet-encrypt
 	./bitflash.exe -selftest=net-message
 	./bitflash.exe -selftest=consensus-limits
+	./bitflash.exe -selftest=pool-stratum

@@ -1180,6 +1180,91 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
     return true;
 }
 
+int RunPoolStratumSelfTest()
+{
+    int nFail = 0;
+    auto check = [&](bool ok, const char* msg) {
+        fprintf(stdout, "  %s   %s\n", ok ? "ok" : "FAIL", msg);
+        if (!ok) nFail++;
+    };
+
+    fprintf(stdout, "pool-stratum self-test\n");
+
+    StratumJob savedJob = gCurrentJob;
+    bool savedHaveJob = gHaveJob;
+
+    CTransaction coinbase;
+    coinbase.vin.resize(1);
+    coinbase.vin[0].prevout.SetNull();
+    coinbase.vin[0].scriptSig << 1 << (CBigNum)1;
+    coinbase.vout.resize(1);
+    coinbase.vout[0].nValue = 50 * COIN;
+
+    CBlock block;
+    block.vtx.push_back(coinbase);
+    block.nVersion = 1;
+    block.nBits = 0x1f0fffff;
+    block.nTime = 1;
+    block.nNonce = 1;
+    block.hashMerkleRoot = block.BuildMerkleTree();
+
+    gCurrentJob.jobId = "selftest";
+    gCurrentJob.block = block;
+    gCurrentJob.target = 0; // accepted share, not a block candidate
+    gCurrentJob.height = 1;
+    gHaveJob = true;
+
+    Miner miner(INVALID_SOCKET);
+    miner.authorised = true;
+    miner.address = "selftest-address";
+    miner.worker = "worker";
+    miner.shareTarget = ~uint256(0); // every RandomX hash is a valid share
+    miner.difficulty = 0.001;
+    miner.vardiffWindowStart = GetTime();
+
+    std::map<std::string, uint64> roundShareCount;
+    uint64 roundShareTotal = 0;
+    int blocksFound = 0;
+
+    uint256 targetFromNotify;
+    CBlock minerBlock = BuildMinerBlock(gCurrentJob, miner.extranonce2);
+    json params = MakeNotifyParams(gCurrentJob, minerBlock, miner.shareTarget, true);
+    std::vector<unsigned char> targetBytes = FromHex(params[3].get<std::string>());
+    if (targetBytes.size() == 32)
+        memcpy(&targetFromNotify, &targetBytes[0], 32);
+    check(targetFromNotify == miner.shareTarget,
+          "mining.notify exposes the same share target the pool validates");
+
+    json submit = {
+        {"id", 7},
+        {"method", "mining.submit"},
+        {"params", json::array({miner.address, "selftest", ToHex(&minerBlock.nNonce, 4)})}
+    };
+    HandleLine(&miner, submit.dump(), roundShareCount, roundShareTotal, blocksFound);
+
+    check(roundShareTotal == 1, "fake low-difficulty share increments the round total");
+    check(roundShareCount[miner.address] == 1, "fake share is credited to the submitting address");
+    check(miner.sessionShares == 1 && miner.roundShares == 1 && miner.totalShares == 1,
+          "miner share counters advance together");
+    check(blocksFound == 0, "share below block target is not counted as a found block");
+
+    json stale = {
+        {"id", 8},
+        {"method", "mining.submit"},
+        {"params", json::array({miner.address, "stale", ToHex(&minerBlock.nNonce, 4)})}
+    };
+    HandleLine(&miner, stale.dump(), roundShareCount, roundShareTotal, blocksFound);
+    check(roundShareTotal == 1, "stale submit does not increment shares");
+
+    gCurrentJob = savedJob;
+    gHaveJob = savedHaveJob;
+
+    fprintf(stdout, "%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+            nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 // ---------------------------------------------------------------------------
 // Stats refresh -- called every 2s from event loop
 // ---------------------------------------------------------------------------

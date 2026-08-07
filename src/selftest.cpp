@@ -10,6 +10,8 @@
 #include "selftest.h"
 #include "walletcmd.h"
 
+extern int RunPoolStratumSelfTest();
+
 // Test results go to the terminal, not to debug.log.
 //
 // printf in this tree is OutputDebugStringF, which writes into the data
@@ -1234,8 +1236,10 @@ int RunSelfTest(const std::string& name)
         return RunNetMessageSelfTest();
     if (name == "consensus-limits")
         return RunConsensusLimitsSelfTest();
+    if (name == "pool-stratum")
+        return RunPoolStratumSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum\n");
     return 1;
 }
