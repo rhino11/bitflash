@@ -8,6 +8,7 @@ import html
 import json
 import os
 import time
+import urllib.parse
 import urllib.request
 
 
@@ -23,6 +24,10 @@ def normalize_pool(source, obj, now):
     operator = obj.get("operator", {})
     pool = obj.get("pool", {})
     node = obj.get("node", {})
+    rounds_file = operator.get("roundsFile") or "pool_rounds.json"
+    rounds_url = ""
+    if source.startswith("http://") or source.startswith("https://"):
+        rounds_url = urllib.parse.urljoin(source, rounds_file)
     updated = int(obj.get("updatedAt") or 0)
     age = max(0, now - updated) if updated else None
     online = bool(node.get("poolRunning")) and age is not None and age <= 120
@@ -39,6 +44,8 @@ def normalize_pool(source, obj, now):
         "blocksFoundSession": int(pool.get("blocksFoundSession") or 0),
         "roundShares": int(pool.get("roundShares") or 0),
         "hashRate": float(pool.get("hashRate") or 0.0),
+        "roundsUrl": rounds_url,
+        "recentRounds": obj.get("recentRounds", []),
     }
 
 
@@ -56,6 +63,7 @@ def render_html(pools, generated_at):
     rows = []
     for p in pools:
         dash = p["dashboardUrl"]
+        rounds = p.get("roundsUrl", "")
         # Only linkify http(s). The dashboard URL comes from an operator's
         # self-published status file, so a "javascript:" or "data:" scheme
         # would become a clickable script-injection on this public page.
@@ -65,6 +73,12 @@ def render_html(pools, generated_at):
                 html.escape(dash, quote=True))
         else:
             dash_html = "-"
+        rounds_lower = rounds.lower()
+        if rounds_lower.startswith("http://") or rounds_lower.startswith("https://"):
+            rounds_html = '<a href="{0}" rel="noopener noreferrer">proof</a>'.format(
+                html.escape(rounds, quote=True))
+        else:
+            rounds_html = "-"
         rows.append(
             "<tr>"
             "<td>{status}</td>"
@@ -76,6 +90,7 @@ def render_html(pools, generated_at):
             "<td>{height}</td>"
             "<td>{age}</td>"
             "<td>{dash}</td>"
+            "<td>{rounds}</td>"
             "</tr>".format(
                 status="online" if p["online"] else "stale",
                 name=html.escape(p["name"]),
@@ -87,6 +102,7 @@ def render_html(pools, generated_at):
                 height=p["height"],
                 age="{}s".format(p["ageSeconds"]) if p["ageSeconds"] is not None else "-",
                 dash=dash_html,
+                rounds=rounds_html,
             )
         )
 
@@ -110,7 +126,7 @@ def render_html(pools, generated_at):
   <p class="note">This directory is informational. Bitflash nodes discover pools through Nostr and .btf; this page only helps humans compare public operators.</p>
   <table>
     <thead>
-      <tr><th>Status</th><th>Pool</th><th>Fee</th><th>Miners</th><th>H/s</th><th>Blocks</th><th>Height</th><th>Age</th><th>Link</th></tr>
+      <tr><th>Status</th><th>Pool</th><th>Fee</th><th>Miners</th><th>H/s</th><th>Blocks</th><th>Height</th><th>Age</th><th>Link</th><th>Proof</th></tr>
     </thead>
     <tbody>
       {rows}

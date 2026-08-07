@@ -263,9 +263,45 @@ struct PendingPayout {
 static std::vector<PendingPayout> gPendingPayouts;
 static std::mutex                 gPayoutLedgerMutex;
 
+struct PoolRoundProof {
+    std::string                  id;
+    int                          blockHeight;
+    int                          matureAtHeight;
+    int64                        createdAt;
+    std::string                  blockHash;
+    std::string                  coinbaseTxid;
+    std::string                  foundBy;
+    double                       feePercent;
+    uint64                       totalShares;
+    int64                        coinbaseValue;
+    int64                        subsidy;
+    int64                        minerReward;
+    int64                        operatorReward;
+    int                          skippedDust;
+    int64                        forfeitedBadAddress;
+    std::map<std::string, uint64> shares;
+    std::map<std::string, int64>  payouts;
+    std::map<std::string, std::string> paidTxids;
+
+    PoolRoundProof()
+        : blockHeight(0), matureAtHeight(0), createdAt(0), feePercent(0.0),
+          totalShares(0), coinbaseValue(0), subsidy(0), minerReward(0), operatorReward(0),
+          skippedDust(0), forfeitedBadAddress(0) {}
+};
+static std::vector<PoolRoundProof> gPoolRounds;
+static std::mutex                  gPoolRoundsMutex;
+static const size_t                MAX_POOL_ROUNDS = 200;
+
 static std::string PayoutFilePath()
 {
     return GetAppDir() + "/pending_payouts.json";
+}
+
+static std::string PoolRoundsFilePath()
+{
+    if (!strPoolRoundsFile.empty())
+        return strPoolRoundsFile;
+    return GetAppDir() + "/pool_rounds.json";
 }
 
 static std::string PayoutIdForBlock(int blockHeight)
@@ -362,6 +398,167 @@ static void LoadPendingPayouts()
     }
 }
 
+static nlohmann::json PoolRoundToJson(const PoolRoundProof& r)
+{
+    nlohmann::json j;
+    j["id"] = r.id;
+    j["blockHeight"] = r.blockHeight;
+    j["matureAtHeight"] = r.matureAtHeight;
+    j["createdAt"] = r.createdAt;
+    j["blockHash"] = r.blockHash;
+    j["coinbaseTxid"] = r.coinbaseTxid;
+    j["foundBy"] = r.foundBy;
+    j["feePercent"] = r.feePercent;
+    j["totalShares"] = r.totalShares;
+    j["coinbaseValueSatoshis"] = r.coinbaseValue;
+    j["coinbaseValueBtf"] = FormatMoney(r.coinbaseValue);
+    j["subsidySatoshis"] = r.subsidy;
+    j["subsidyBtf"] = FormatMoney(r.subsidy);
+    j["minerRewardSatoshis"] = r.minerReward;
+    j["minerRewardBtf"] = FormatMoney(r.minerReward);
+    j["operatorRewardSatoshis"] = r.operatorReward;
+    j["operatorRewardBtf"] = FormatMoney(r.operatorReward);
+    j["skippedDust"] = r.skippedDust;
+    j["forfeitedBadAddressSatoshis"] = r.forfeitedBadAddress;
+    j["forfeitedBadAddressBtf"] = FormatMoney(r.forfeitedBadAddress);
+
+    j["shares"] = nlohmann::json::object();
+    for (const auto& kv : r.shares)
+        j["shares"][kv.first] = kv.second;
+
+    j["payouts"] = nlohmann::json::object();
+    for (const auto& kv : r.payouts) {
+        nlohmann::json p;
+        p["amountSatoshis"] = kv.second;
+        p["amountBtf"] = FormatMoney(kv.second);
+        std::map<std::string, std::string>::const_iterator tx = r.paidTxids.find(kv.first);
+        if (tx != r.paidTxids.end())
+            p["txid"] = tx->second;
+        else
+            p["txid"] = nullptr;
+        j["payouts"][kv.first] = p;
+    }
+    return j;
+}
+
+static void SavePoolRoundsLocked()
+{
+    nlohmann::json root;
+    root["schema"] = "bitflash-pool-rounds-1";
+    root["updatedAt"] = GetTime();
+    root["rounds"] = nlohmann::json::array();
+    for (const PoolRoundProof& r : gPoolRounds)
+        root["rounds"].push_back(PoolRoundToJson(r));
+
+    std::string path = PoolRoundsFilePath();
+    std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "w");
+    if (!f) {
+        LogPrint("payout", "[payout] WARNING: could not write %s\n", tmp.c_str());
+        return;
+    }
+    std::string s = root.dump(2);
+    fwrite(s.c_str(), 1, s.size(), f);
+    if (fclose(f) != 0) {
+        LogPrint("payout", "[payout] WARNING: could not close %s\n", tmp.c_str());
+        return;
+    }
+#ifdef _WIN32
+    remove(path.c_str());
+#endif
+    if (rename(tmp.c_str(), path.c_str()) != 0)
+        LogPrint("payout", "[payout] WARNING: could not replace %s\n", path.c_str());
+}
+
+static void LoadPoolRounds()
+{
+    std::string path = PoolRoundsFilePath();
+    FILE* f = fopen(path.c_str(), "r");
+    if (!f) return;
+    fseek(f, 0, SEEK_END);
+    long sz = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::string s(sz, '\0');
+    fread(&s[0], 1, sz, f);
+    fclose(f);
+
+    try {
+        nlohmann::json root = nlohmann::json::parse(s);
+        nlohmann::json arr = root.is_array() ? root : root["rounds"];
+        std::lock_guard<std::mutex> lk(gPoolRoundsMutex);
+        for (const auto& obj : arr) {
+            PoolRoundProof r;
+            if (obj.contains("id") && obj["id"].is_string()) r.id = obj["id"].get<std::string>();
+            if (obj.contains("blockHeight")) r.blockHeight = obj["blockHeight"].get<int>();
+            if (obj.contains("matureAtHeight")) r.matureAtHeight = obj["matureAtHeight"].get<int>();
+            if (obj.contains("createdAt")) r.createdAt = obj["createdAt"].get<int64>();
+            if (obj.contains("blockHash") && obj["blockHash"].is_string()) r.blockHash = obj["blockHash"].get<std::string>();
+            if (obj.contains("coinbaseTxid") && obj["coinbaseTxid"].is_string()) r.coinbaseTxid = obj["coinbaseTxid"].get<std::string>();
+            if (obj.contains("foundBy") && obj["foundBy"].is_string()) r.foundBy = obj["foundBy"].get<std::string>();
+            if (obj.contains("feePercent")) r.feePercent = obj["feePercent"].get<double>();
+            if (obj.contains("totalShares")) r.totalShares = obj["totalShares"].get<uint64>();
+            if (obj.contains("coinbaseValueSatoshis")) r.coinbaseValue = obj["coinbaseValueSatoshis"].get<int64>();
+            if (obj.contains("subsidySatoshis")) r.subsidy = obj["subsidySatoshis"].get<int64>();
+            if (obj.contains("minerRewardSatoshis")) r.minerReward = obj["minerRewardSatoshis"].get<int64>();
+            if (obj.contains("operatorRewardSatoshis")) r.operatorReward = obj["operatorRewardSatoshis"].get<int64>();
+            if (obj.contains("skippedDust")) r.skippedDust = obj["skippedDust"].get<int>();
+            if (obj.contains("forfeitedBadAddressSatoshis")) r.forfeitedBadAddress = obj["forfeitedBadAddressSatoshis"].get<int64>();
+            if (obj.contains("shares") && obj["shares"].is_object())
+                for (auto it = obj["shares"].begin(); it != obj["shares"].end(); ++it)
+                    r.shares[it.key()] = it.value().get<uint64>();
+            if (obj.contains("payouts") && obj["payouts"].is_object())
+                for (auto it = obj["payouts"].begin(); it != obj["payouts"].end(); ++it) {
+                    if (it.value().is_object()) {
+                        r.payouts[it.key()] = it.value().value("amountSatoshis", (int64)0);
+                        if (it.value().contains("txid") && it.value()["txid"].is_string())
+                            r.paidTxids[it.key()] = it.value()["txid"].get<std::string>();
+                    } else if (it.value().is_number_integer()) {
+                        r.payouts[it.key()] = it.value().get<int64>();
+                    }
+                }
+            if (!r.id.empty())
+                gPoolRounds.push_back(r);
+        }
+        while (gPoolRounds.size() > MAX_POOL_ROUNDS)
+            gPoolRounds.erase(gPoolRounds.begin());
+        LogPrint("payout", "[payout] loaded %zu pool round proof(s) from disk\n",
+                 gPoolRounds.size());
+    } catch (const std::exception& e) {
+        LogPrint("payout", "[payout] WARNING: failed to parse %s: %s\n",
+                 path.c_str(), e.what());
+    }
+}
+
+static void RecordPoolRound(const PoolRoundProof& round)
+{
+    std::lock_guard<std::mutex> lk(gPoolRoundsMutex);
+    for (PoolRoundProof& existing : gPoolRounds) {
+        if (existing.id == round.id) {
+            existing = round;
+            SavePoolRoundsLocked();
+            return;
+        }
+    }
+    gPoolRounds.push_back(round);
+    while (gPoolRounds.size() > MAX_POOL_ROUNDS)
+        gPoolRounds.erase(gPoolRounds.begin());
+    SavePoolRoundsLocked();
+}
+
+static void MarkPoolRoundPaid(const std::string& id,
+                              const std::string& address,
+                              const std::string& txid)
+{
+    std::lock_guard<std::mutex> lk(gPoolRoundsMutex);
+    for (PoolRoundProof& r : gPoolRounds) {
+        if (r.id != id)
+            continue;
+        r.paidTxids[address] = txid;
+        SavePoolRoundsLocked();
+        return;
+    }
+}
+
 // Payouts ready to execute are moved here under gPayoutExecMutex.
 // A dedicated thread drains this list so SendMoney (which takes cs_main)
 // never runs on the event loop thread and can't stall miner I/O.
@@ -399,10 +596,28 @@ static bool FindRecordedPoolPayout(const std::string& id,
 }
 
 static void QueuePayouts(int blockHeight,
+                         const std::string& blockHash,
+                         const std::string& coinbaseTxid,
+                         int64 coinbaseValue,
+                         const std::string& foundBy,
                          const std::map<std::string, uint64>& shareCount,
                          uint64 total)
 {
+    PoolRoundProof round;
+    round.id = PayoutIdForBlock(blockHeight);
+    round.blockHeight = blockHeight;
+    round.matureAtHeight = blockHeight + COINBASE_MATURITY;
+    round.createdAt = GetTime();
+    round.blockHash = blockHash;
+    round.coinbaseTxid = coinbaseTxid;
+    round.coinbaseValue = coinbaseValue;
+    round.foundBy = foundBy;
+    round.feePercent = dPoolFeePercent;
+    round.totalShares = total;
+    round.shares = shareCount;
+
     if (total == 0) {
+        RecordPoolRound(round);
         LogPrint("payout", "[payout] block %d: zero shares recorded -- nothing to pay out\n",
                  blockHeight);
         return;
@@ -418,9 +633,13 @@ static void QueuePayouts(int blockHeight,
     int64 nSubsidy = 50 * COIN;
     nSubsidy >>= (blockHeight / 210000); // halving schedule
     int64 minerReward = (int64)((double)nSubsidy * (1.0 - feeFrac));
+    int64 operatorCut = nSubsidy - minerReward;
+    round.subsidy = nSubsidy;
+    round.minerReward = minerReward;
+    round.operatorReward = operatorCut;
 
     PendingPayout pp;
-    pp.id = PayoutIdForBlock(blockHeight);
+    pp.id = round.id;
     pp.blockHeight = blockHeight;
     pp.matureAtHeight = blockHeight + COINBASE_MATURITY;
 
@@ -443,15 +662,18 @@ static void QueuePayouts(int blockHeight,
             continue;
         }
         pp.amounts[kv.first] = amount;
+        round.payouts[kv.first] = amount;
     }
+    round.skippedDust = skipped;
+    round.forfeitedBadAddress = burned;
 
     {
         std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
         gPendingPayouts.push_back(pp);
         SavePendingPayoutsLocked();
     }
+    RecordPoolRound(round);
 
-    int64 operatorCut = nSubsidy - minerReward;
     LogPrint("payout",
              "[payout] block %d: subsidy %s BTF, miners get %s"
              " (fee %.2f%% = %s to operator),"
@@ -548,12 +770,14 @@ static void PayoutThreadFn(void*)
                     LogPrint("payout", "[payout] recovered recorded payout %s to %s"
                              " from wallet tx %s\n",
                              FormatMoney(kv.second).c_str(), kv.first.c_str(), txid.c_str());
+                    MarkPoolRoundPaid(ppQueued.id, kv.first, txid);
                 }
                 else if (SendMoney(sc, kv.second, wtx))
                 {
                     txid = wtx.GetHash().GetHex();
                     LogPrint("payout", "[payout] paid %s to %s\n",
                               FormatMoney(kv.second).c_str(), kv.first.c_str());
+                    MarkPoolRoundPaid(ppQueued.id, kv.first, txid);
                 }
                 else
                 {
@@ -664,7 +888,8 @@ static void WritePoolStatusJsonLocked()
         {"name", strPoolName},
         {"btfAddress", BtfLocalAddress()},
         {"feePercent", dPoolFeePercent},
-        {"dashboardUrl", strPoolDashboardUrl}
+        {"dashboardUrl", strPoolDashboardUrl},
+        {"roundsFile", "pool_rounds.json"}
     };
 
     j["node"] = {
@@ -700,6 +925,30 @@ static void WritePoolStatusJsonLocked()
             {"totalAmountSatoshis", row.totalAmount},
             {"totalAmountBtf", FormatMoney(row.totalAmount)}
         });
+    }
+
+    j["recentRounds"] = nlohmann::json::array();
+    {
+        std::lock_guard<std::mutex> lk(gPoolRoundsMutex);
+        size_t start = gPoolRounds.size() > 10 ? gPoolRounds.size() - 10 : 0;
+        for (size_t i = start; i < gPoolRounds.size(); i++) {
+            const PoolRoundProof& r = gPoolRounds[i];
+            int unpaid = 0;
+            for (const auto& kv : r.payouts)
+                if (r.paidTxids.count(kv.first) == 0)
+                    unpaid++;
+            j["recentRounds"].push_back({
+                {"id", r.id},
+                {"blockHeight", r.blockHeight},
+                {"blockHash", r.blockHash},
+                {"coinbaseTxid", r.coinbaseTxid},
+                {"totalShares", r.totalShares},
+                {"payouts", (int)r.payouts.size()},
+                {"unpaidPayouts", unpaid},
+                {"coinbaseValueBtf", FormatMoney(r.coinbaseValue)},
+                {"minerRewardBtf", FormatMoney(r.minerReward)}
+            });
+        }
     }
 
     std::string path = PoolStatusFilePath();
@@ -1231,7 +1480,9 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
         if (accepted) {
             // Snapshot height before RebuildJob() (which increments it)
             int foundHeight = gCurrentJob.height;
-            QueuePayouts(foundHeight, roundShareCount, roundShareTotal);
+            QueuePayouts(foundHeight, b.GetHash().GetHex(), b.vtx[0].GetHash().GetHex(),
+                         b.vtx[0].vout[0].nValue, m->address,
+                         roundShareCount, roundShareTotal);
             // Reset round shares
             roundShareCount.clear();
             roundShareTotal = 0;
@@ -1332,6 +1583,62 @@ int RunPoolStratumSelfTest()
     };
     HandleLine(&miner, stale.dump(), roundShareCount, roundShareTotal, blocksFound);
     check(roundShareTotal == 1, "stale submit does not increment shares");
+
+    std::vector<PoolRoundProof> savedRounds = gPoolRounds;
+    std::string savedRoundsFile = strPoolRoundsFile;
+    std::string proofPath = "pool_rounds_selftest.json";
+    remove(proofPath.c_str());
+    remove((proofPath + ".tmp").c_str());
+    gPoolRounds.clear();
+    strPoolRoundsFile = proofPath;
+
+    PoolRoundProof proof;
+    proof.id = "selftest-round";
+    proof.blockHeight = 42;
+    proof.matureAtHeight = 42 + COINBASE_MATURITY;
+    proof.createdAt = GetTime();
+    proof.blockHash = block.GetHash().GetHex();
+    proof.coinbaseTxid = coinbase.GetHash().GetHex();
+    proof.foundBy = miner.address;
+    proof.feePercent = 1.25;
+    proof.totalShares = 3;
+    proof.coinbaseValue = 50 * COIN;
+    proof.subsidy = 50 * COIN;
+    proof.minerReward = 49 * COIN;
+    proof.operatorReward = 1 * COIN;
+    proof.shares[miner.address] = 3;
+    proof.payouts[miner.address] = 49 * COIN;
+    RecordPoolRound(proof);
+    MarkPoolRoundPaid(proof.id, miner.address, "selftest-txid");
+
+    bool proofOk = false;
+    FILE* pf = fopen(proofPath.c_str(), "r");
+    if (pf) {
+        fseek(pf, 0, SEEK_END);
+        long sz = ftell(pf);
+        fseek(pf, 0, SEEK_SET);
+        std::string s(sz, '\0');
+        fread(&s[0], 1, sz, pf);
+        fclose(pf);
+        try {
+            json root = json::parse(s);
+            proofOk =
+                root.value("schema", "") == "bitflash-pool-rounds-1" &&
+                root["rounds"].is_array() &&
+                root["rounds"].size() == 1 &&
+                root["rounds"][0].value("id", "") == proof.id &&
+                root["rounds"][0]["shares"].value(miner.address, (uint64)0) == 3 &&
+                root["rounds"][0]["payouts"][miner.address].value("txid", "") == "selftest-txid";
+        } catch (...) {
+            proofOk = false;
+        }
+    }
+    check(proofOk, "pool round proof ledger is written and paid txid is recorded");
+
+    remove(proofPath.c_str());
+    remove((proofPath + ".tmp").c_str());
+    strPoolRoundsFile = savedRoundsFile;
+    gPoolRounds = savedRounds;
 
     gCurrentJob = savedJob;
     gHaveJob = savedHaveJob;
@@ -1754,6 +2061,7 @@ void ThreadRPCServer(void*)
     }
 
     LoadPendingPayouts();
+    LoadPoolRounds();
 
     _beginthread(AcceptLoopFn, 0, NULL);
     _beginthread(ThreadBtfPoolAnnouncer, 0, NULL);

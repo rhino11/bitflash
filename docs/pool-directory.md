@@ -4,10 +4,13 @@
 Nodes discover pools through Nostr and `.btf`; the website only helps humans
 compare operators.
 
-Operators can publish the `pool_status.json` file produced by:
+Operators can publish the `pool_status.json` and `pool_rounds.json` files
+produced by:
 
 ```bash
-bitflash -nogui -gen -operator -poolstatusfile=/var/www/pool_status.json
+bitflash -nogui -gen -operator \
+  -poolstatusfile=/var/www/pool_status.json \
+  -poolroundsfile=/var/www/pool_rounds.json
 ```
 
 Build a static directory from one or more status files:
@@ -22,6 +25,11 @@ The generated output contains:
 
 - `index.html`: human-readable ranking page.
 - `pools.json`: machine-readable API for `api.bitflash.network/pools.json`.
+
+When a source is an HTTP(S) `pool_status.json`, the directory links to a
+`pool_rounds.json` proof file next to it. That file records the block height,
+block hash, coinbase txid, coinbase value, pool fee, total shares, per-address
+share counts, computed payouts, and payout txids once paid.
 
 Ranking order is intentionally simple:
 

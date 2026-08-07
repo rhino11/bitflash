@@ -105,6 +105,7 @@ string strParticipantPool;           // participant mode: pool .btf address
 string strPoolName       = "Bitflash Pool";
 string strPoolDashboardUrl;
 string strPoolStatusFile;
+string strPoolRoundsFile;
 double dPoolFeePercent   = 0.0;
 bool   fStratumBridge    = false;
 int    nStratumBridgePort = 3333;

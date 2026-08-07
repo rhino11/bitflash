@@ -87,6 +87,7 @@ extern string strParticipantPool; // participant: pool .btf address
 extern string strPoolName;        // operator: announced pool name
 extern string strPoolDashboardUrl; // operator: optional dashboard URL
 extern string strPoolStatusFile;   // operator: optional JSON status output path
+extern string strPoolRoundsFile;   // operator: optional public round proof path
 extern double dPoolFeePercent;     // operator: announced fee percent
 extern bool   fStratumBridge;      // participant helper: local Stratum bridge
 extern int    nStratumBridgePort;  // local bridge listen port, default 3333

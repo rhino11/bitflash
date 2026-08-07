@@ -219,10 +219,12 @@ Open **Options** from the menu bar. Under Mining Mode:
 
 Pool announcements are published on Nostr with live status fields, so external tools can query the latest pool state by `.btf` address.
 
-Pool operators also write a local `pool_status.json` every ten seconds. By
-default it is created in the data directory; use `-poolstatusfile=PATH` to write
-it somewhere a dashboard or web sync can read. The file is informational only:
-nodes still discover pools through Nostr and `.btf`, not through any web domain.
+Pool operators also write a local `pool_status.json` every ten seconds and a
+`pool_rounds.json` proof ledger whenever they find blocks or pay miners. By
+default both are created in the data directory; use `-poolstatusfile=PATH` and
+`-poolroundsfile=PATH` to write them somewhere a dashboard or web sync can read.
+The files are informational only: nodes still discover pools through Nostr and
+`.btf`, not through any web domain.
 
 **Participant** — mine to someone else's pool. Enter or select the pool's `.btf` address and enable Start Mining.
 
@@ -243,7 +245,9 @@ xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ./bitflash -nogui                     # node only
 ./bitflash -nogui -gen                # node + solo mining
 ./bitflash -nogui -gen -operator      # pool operator
-./bitflash -nogui -gen -operator -poolstatusfile=/var/www/api/pools.json
+./bitflash -nogui -gen -operator \
+  -poolstatusfile=/var/www/pool_status.json \
+  -poolroundsfile=/var/www/pool_rounds.json
 ./bitflash -nogui -gen -participant=POOL_BTF_ADDRESS  # mine to pool
 ./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS      # local bridge for XMRig/SRBMiner
 ```

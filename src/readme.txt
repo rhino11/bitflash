@@ -55,6 +55,10 @@ Command-line options (in addition to the original ones)
   /poolfee=PCT   operator announcement fee percent (example: 0.75)
   /pooldashboard=URL
                  operator announcement dashboard URL
+  /poolstatusfile=PATH
+                 write pool status JSON for dashboards
+  /poolroundsfile=PATH
+                 write public pool round proofs JSON
   /connectbtf=ADDR
                  keep an outbound .btf connection to ADDR
   /rvrelay=HOST:PORT

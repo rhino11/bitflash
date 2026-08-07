@@ -126,6 +126,7 @@ static void PrintUsage()
     printf("  /poolfee=PCT\n");
     printf("  /pooldashboard=URL  (alias: /pooldash=URL)\n");
     printf("  /poolstatusfile=PATH       (write pool status JSON for dashboards)\n");
+    printf("  /poolroundsfile=PATH       (write public pool round proofs JSON)\n");
     printf("\n");
     printf(".btf and rendezvous:\n");
     printf("  /connectbtf=PEER_BTF_ADDRESS\n");
@@ -261,6 +262,10 @@ static void ParseStartupArguments(int argc, char* argv[])
     string poolStatusFile = argval2(argc, argv, "/poolstatusfile", "-poolstatusfile");
     if (!poolStatusFile.empty())
         strPoolStatusFile = poolStatusFile;
+
+    string poolRoundsFile = argval2(argc, argv, "/poolroundsfile", "-poolroundsfile");
+    if (!poolRoundsFile.empty())
+        strPoolRoundsFile = poolRoundsFile;
 
     string btfConnect = argval2(argc, argv, "/connectbtf", "-connectbtf");
     if (!btfConnect.empty())
