@@ -88,6 +88,8 @@ extern string strPoolName;        // operator: announced pool name
 extern string strPoolDashboardUrl; // operator: optional dashboard URL
 extern string strPoolStatusFile;   // operator: optional JSON status output path
 extern double dPoolFeePercent;     // operator: announced fee percent
+extern bool   fStratumBridge;      // participant helper: local Stratum bridge
+extern int    nStratumBridgePort;  // local bridge listen port, default 3333
 extern bool fSoloMineTest; // /solomine: mine without requiring a peer (local test)
 // Threads to hash with; 0 = decide from the hardware. Set by /genproclimit.
 extern int nMinerThreads;
@@ -272,6 +274,7 @@ void LimitOrphanBlocks(unsigned int nMaxOrphans);
 // distinguishable, which the dedup filter would otherwise collapse into one.
 bool BitcoinMiner(int nThreadId = 1);
 void ThreadRPCServer(void* parg);  // rpc.cpp -- .btf pool server
+void ThreadStratumBridge(void* parg); // main.cpp -- local Stratum -> .btf bridge
 void GetParticipantMiningStats(uint64& sharesSent, uint64& sharesAccepted, double& hashRate);
 void SetParticipantMiningStatus(const std::string& status);
 std::string GetParticipantMiningStatus();

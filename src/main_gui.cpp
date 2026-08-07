@@ -115,6 +115,8 @@ static void PrintUsage()
     printf("Mining mode:\n");
     printf("  /operator\n");
     printf("  /participant=POOL_BTF_ADDRESS\n");
+    printf("  /stratumbridge=POOL_BTF_ADDRESS\n");
+    printf("  /stratumbridgeport=N       (default 3333; listen on 127.0.0.1)\n");
     printf("  /solomine\n");
     printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
     printf("  /checkblocks=N             (blocks re-verified at startup, default 288, 0 = all)\n");
@@ -224,6 +226,22 @@ static void ParseStartupArguments(int argc, char* argv[])
         nMineMode = MINE_PARTICIPANT;
         strParticipantPool = argval2(argc, argv, "/participant", "-participant");
         fMineModeFromCommandLine = true;
+    }
+
+    if (arg(argc,argv,"/stratumbridge") || arg(argc,argv,"-stratumbridge"))
+    {
+        fStratumBridge = true;
+        string bridgePool = argval2(argc, argv, "/stratumbridge", "-stratumbridge");
+        if (!bridgePool.empty())
+            strParticipantPool = bridgePool;
+    }
+
+    string bridgePort = argval2(argc, argv, "/stratumbridgeport", "-stratumbridgeport");
+    if (!bridgePort.empty())
+    {
+        int nPort = atoi(bridgePort.c_str());
+        if (nPort > 0 && nPort <= 65535)
+            nStratumBridgePort = nPort;
     }
 
     string poolName = argval2(argc, argv, "/poolname", "-poolname");
@@ -622,6 +640,10 @@ int main(int argc, char* argv[])
         gPoolRunning = true;
         if (_beginthread(ThreadRPCServer, 0, NULL) == (uintptr_t)-1)
             printf("Error: _beginthread(ThreadRPCServer) failed\n");
+    }
+    if (fStratumBridge) {
+        if (_beginthread(ThreadStratumBridge, 0, NULL) == (uintptr_t)-1)
+            printf("Error: _beginthread(ThreadStratumBridge) failed\n");
     }
     if (fGenerateBitcoins)
         StartMinerThreads();

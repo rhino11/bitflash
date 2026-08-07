@@ -63,6 +63,7 @@ enum
     SOCK_PAIR_APP,    // loopback pair: the app end handed to CNode
     SOCK_PAIR_PUMP,   // loopback pair: the pump end
     SOCK_NOSTR,       // outbound to a Nostr relay
+    SOCK_STRATUM_BRIDGE, // local Stratum bridge listener/miner sockets
     SOCK_SITES
 };
 

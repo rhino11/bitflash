@@ -226,11 +226,13 @@ nodes still discover pools through Nostr and `.btf`, not through any web domain.
 
 **Participant** — mine to someone else's pool. Enter or select the pool's `.btf` address and enable Start Mining.
 
-SRBMiner and XMRig connect to operator pools through the `.btf` path:
+The built-in participant miner connects to operator pools through the `.btf`
+path. External miners can use Bitflash as a local Stratum bridge:
 
 ```bash
-SRBMiner-MULTI --algorithm randomx --pool POOL_BTF_ADDRESS --wallet YOUR_BTF_ADDRESS --password x
-xmrig -a rx/0 -o POOL_BTF_ADDRESS -u YOUR_BTF_ADDRESS -p x
+./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS -stratumbridgeport=3333
+SRBMiner-MULTI --algorithm randomx --pool 127.0.0.1:3333 --wallet YOUR_BTF_ADDRESS --password x
+xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ```
 
 ---
@@ -243,6 +245,7 @@ xmrig -a rx/0 -o POOL_BTF_ADDRESS -u YOUR_BTF_ADDRESS -p x
 ./bitflash -nogui -gen -operator      # pool operator
 ./bitflash -nogui -gen -operator -poolstatusfile=/var/www/api/pools.json
 ./bitflash -nogui -gen -participant=POOL_BTF_ADDRESS  # mine to pool
+./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS      # local bridge for XMRig/SRBMiner
 ```
 
 Every option takes `-` or `/`. **Under MSYS2 use the `-` form** — the shell

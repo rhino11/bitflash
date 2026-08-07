@@ -46,6 +46,11 @@ Command-line options (in addition to the original ones)
   /operator      operator mode (run pool server)
   /participant=ADDR
                  participant mode; mine to pool .btf address ADDR
+  /stratumbridge=ADDR
+                 listen on 127.0.0.1:3333 and bridge external Stratum miners
+                 to pool .btf address ADDR
+  /stratumbridgeport=N
+                 local Stratum bridge port (default 3333)
   /poolname=NAME operator announcement pool name
   /poolfee=PCT   operator announcement fee percent (example: 0.75)
   /pooldashboard=URL

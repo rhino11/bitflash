@@ -153,7 +153,7 @@ static const char* pszSockSite[SOCK_SITES] = {
     "external-ip probe", "listen socket", "inbound accept",
     "rendezvous dial", "rendezvous listen", "rendezvous accept",
     "loopback pair listener", "loopback pair app end", "loopback pair pump end",
-    "nostr relay"
+    "nostr relay", "stratum bridge"
 };
 
 static string SockAccountingText()

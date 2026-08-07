@@ -106,6 +106,8 @@ string strPoolName       = "Bitflash Pool";
 string strPoolDashboardUrl;
 string strPoolStatusFile;
 double dPoolFeePercent   = 0.0;
+bool   fStratumBridge    = false;
+int    nStratumBridgePort = 3333;
 
 static std::atomic<uint64> gParticipantSharesSent{0};
 static std::atomic<uint64> gParticipantSharesAccepted{0};
@@ -3871,6 +3873,190 @@ static bool PoolParticipantMiner()
              (unsigned long long)sessionSharesSent,
              (unsigned long long)sessionSharesAccepted);
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// Local Stratum bridge -- lets external miners speak plain Stratum to
+// 127.0.0.1 while Bitflash opens the .btf tunnel to the selected pool.
+// ---------------------------------------------------------------------------
+
+struct StratumBridgeClientCtx
+{
+    SOCKET miner;
+    std::string pool;
+};
+
+static bool BridgeSendAll(SOCKET s, const char* p, int n)
+{
+    int off = 0;
+    while (off < n)
+    {
+        int r = send(s, p + off, n - off, 0);
+        if (r <= 0)
+            return false;
+        off += r;
+    }
+    return true;
+}
+
+static void BridgePump(SOCKET a, SOCKET b)
+{
+    char buf[8192];
+    while (!fShutdown)
+    {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(a, &rd);
+        FD_SET(b, &rd);
+        SOCKET maxfd = a > b ? a : b;
+        struct timeval tv = {1, 0};
+        int r = select((int)maxfd + 1, &rd, NULL, NULL, &tv);
+        if (r <= 0)
+            continue;
+
+        if (FD_ISSET(a, &rd))
+        {
+            int n = recv(a, buf, sizeof(buf), 0);
+            if (n <= 0 || !BridgeSendAll(b, buf, n))
+                break;
+        }
+        if (FD_ISSET(b, &rd))
+        {
+            int n = recv(b, buf, sizeof(buf), 0);
+            if (n <= 0 || !BridgeSendAll(a, buf, n))
+                break;
+        }
+    }
+}
+
+static void ThreadStratumBridgeClient(void* arg)
+{
+    StratumBridgeClientCtx* ctx = (StratumBridgeClientCtx*)arg;
+    SOCKET miner = ctx->miner;
+    std::string pool = ctx->pool;
+    delete ctx;
+
+    unsigned char target_pubkey[32];
+    if (!btf::ParseAddress(pool, target_pubkey))
+    {
+        LogPrint("worker", "[bridge] invalid pool .btf address: %s\n", pool.c_str());
+        BtfCloseSocket(miner);
+        return;
+    }
+
+    std::string meetingHostPort;
+    unsigned char service_enc_pub[32];
+    if (!BtfResolve(pool, meetingHostPort, service_enc_pub))
+    {
+        LogPrint("worker", "[bridge] failed to resolve pool %s\n", pool.c_str());
+        BtfCloseSocket(miner);
+        return;
+    }
+
+    size_t colon = meetingHostPort.rfind(':');
+    if (colon == std::string::npos)
+    {
+        LogPrint("worker", "[bridge] bad pool endpoint '%s'\n", meetingHostPort.c_str());
+        BtfCloseSocket(miner);
+        return;
+    }
+    std::string host = meetingHostPort.substr(0, colon);
+    int port = atoi(meetingHostPort.substr(colon + 1).c_str());
+    if (port <= 0 || port > 65535)
+    {
+        LogPrint("worker", "[bridge] bad pool port in '%s'\n", meetingHostPort.c_str());
+        BtfCloseSocket(miner);
+        return;
+    }
+
+    SOCKET poolSock = btf::BtfClientTunnel(host.c_str(), (unsigned short)port,
+                                           target_pubkey, service_enc_pub);
+    if (poolSock == INVALID_SOCKET)
+    {
+        LogPrint("worker", "[bridge] tunnel connect failed for pool %s via %s\n",
+                 pool.c_str(), meetingHostPort.c_str());
+        BtfCloseSocket(miner);
+        return;
+    }
+
+    LogPrint("worker", "[bridge] miner connected to pool %s via %s\n",
+             pool.c_str(), meetingHostPort.c_str());
+    BridgePump(miner, poolSock);
+    BtfCloseSocket(poolSock);
+    BtfCloseSocket(miner);
+    LogPrint("worker", "[bridge] miner disconnected from pool %s\n", pool.c_str());
+}
+
+void ThreadStratumBridge(void*)
+{
+    if (strParticipantPool.empty())
+    {
+        printf("Stratum bridge: no pool selected. Use /stratumbridge=POOL_BTF_ADDRESS\n");
+        return;
+    }
+
+    SOCKET listener = BtfSocketTag(socket(AF_INET, SOCK_STREAM, IPPROTO_TCP),
+                                   SOCK_STRATUM_BRIDGE);
+    if (listener == INVALID_SOCKET)
+    {
+        printf("Stratum bridge: could not create listen socket\n");
+        return;
+    }
+
+    int yes = 1;
+    setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, (char*)&yes, sizeof(yes));
+
+    sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(0x7f000001);
+    addr.sin_port = htons((unsigned short)nStratumBridgePort);
+
+    if (bind(listener, (sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 16) != 0)
+    {
+        printf("Stratum bridge: could not listen on 127.0.0.1:%d\n",
+               nStratumBridgePort);
+        BtfCloseSocket(listener);
+        return;
+    }
+
+    printf("Stratum bridge: listening on 127.0.0.1:%d for pool %s\n",
+           nStratumBridgePort, strParticipantPool.c_str());
+
+    while (!fShutdown)
+    {
+        fd_set rd;
+        FD_ZERO(&rd);
+        FD_SET(listener, &rd);
+        struct timeval tv = {1, 0};
+        if (select((int)listener + 1, &rd, NULL, NULL, &tv) <= 0)
+            continue;
+
+        sockaddr_in cli;
+#ifdef _WIN32
+        int len = sizeof(cli);
+#else
+        socklen_t len = sizeof(cli);
+#endif
+        SOCKET miner = BtfSocketTag(accept(listener, (sockaddr*)&cli, &len),
+                                    SOCK_STRATUM_BRIDGE);
+        if (miner == INVALID_SOCKET)
+            continue;
+
+        StratumBridgeClientCtx* ctx = new StratumBridgeClientCtx();
+        ctx->miner = miner;
+        ctx->pool = strParticipantPool;
+        if (_beginthread(ThreadStratumBridgeClient, 0, ctx) == (uintptr_t)-1)
+        {
+            delete ctx;
+            BtfCloseSocket(miner);
+            LogPrint("worker", "[bridge] failed to spawn client thread\n");
+        }
+    }
+
+    BtfCloseSocket(listener);
+    printf("Stratum bridge: stopped\n");
 }
 
 bool BitcoinMiner(int nThreadId)
