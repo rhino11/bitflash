@@ -3210,44 +3210,16 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
     }
 
 
-    else if (strCommand == "checkorder")
+    else if (strCommand == "checkorder" || strCommand == "submitorder")
     {
-        uint256 hashReply;
-        CWalletTx order;
-        vRecv >> hashReply >> order;
-
-        /// we have a chance to check the order here
-
-        // Keep giving the same key to the same ip until they use it
-        if (!mapReuseKey.count(pfrom->addr.ip))
-            mapReuseKey[pfrom->addr.ip] = GenerateNewKey();
-
-        // Send back approval of order and pubkey to use
-        CScript scriptPubKey;
-        scriptPubKey << mapReuseKey[pfrom->addr.ip] << OP_CHECKSIG;
-        pfrom->PushMessage("reply", hashReply, (int)0, scriptPubKey);
-    }
-
-
-    else if (strCommand == "submitorder")
-    {
-        uint256 hashReply;
-        CWalletTx wtxNew;
-        vRecv >> hashReply >> wtxNew;
-
-        // Broadcast
-        if (!wtxNew.AcceptWalletTransaction())
-        {
-            pfrom->PushMessage("reply", hashReply, (int)1);
-            return error("submitorder AcceptWalletTransaction() failed, returning error 1");
-        }
-        wtxNew.fTimeReceivedIsTxTime = true;
-        AddToWallet(wtxNew);
-        wtxNew.RelayWalletTransaction();
-        mapReuseKey.erase(pfrom->addr.ip);
-
-        // Send back confirmation
-        pfrom->PushMessage("reply", hashReply, (int)0);
+        // Legacy Bitcoin 0.1 marketplace messages are not part of Bitflash's
+        // supported protocol. They used to let a remote peer make this wallet
+        // reserve a key or import/broadcast a wallet transaction. Keep the
+        // command names explicit so old peers get a quiet no-op instead of a
+        // wallet side effect.
+        if (LogAcceptsCategory("net"))
+            printf("ProcessMessage(%s) : disabled legacy order message\n", strCommand.c_str());
+        vRecv.clear();
     }
 
 
