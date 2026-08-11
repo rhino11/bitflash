@@ -354,7 +354,7 @@ int CmdRecoveryAudit()
     if (audit.fHaveSeed)
     {
         printf("  derivation schema: %s\n", HDKeySchemaName(audit.nSchema).c_str());
-        printf("  BIP44 coin type: %u (provisional BITFLASH)\n", audit.nCoinType);
+        printf("  BIP44 coin type: %u (SLIP-0044 BITFLASH)\n", audit.nCoinType);
         printf("  derived keys known to this wallet: %u\n", audit.nDerivedKnown);
         printf("  receive/change counters: %u/%u\n",
                audit.nReceiveNext, audit.nChangeNext);

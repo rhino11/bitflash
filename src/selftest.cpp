@@ -350,17 +350,17 @@ static int RunWalletHDSelfTest()
         nFail += Check(HaveHDSeed(), "the wallet reports having a seed") ? 0 : 1;
         nFail += Check(nHDKeySchema == HD_SCHEMA_BIP44,
                        "a new recovery phrase records the BIP44 HD schema") ? 0 : 1;
-        nFail += Check(nHDCoinType == HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
-                       "a new recovery phrase records the provisional BIP44 coin type") ? 0 : 1;
+        nFail += Check(nHDCoinType == HD_BIP44_COIN_TYPE_BITFLASH,
+                       "a new recovery phrase records the SLIP-0044 BIP44 coin type") ? 0 : 1;
         nFail += Check(nHDReceiveNext == 1 && nHDChangeNext == 0,
                        "BIP44 receive/change counters reserve the default receive key") ? 0 : 1;
-        std::vector<unsigned int> vBIP44Path = HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+        std::vector<unsigned int> vBIP44Path = HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH,
                                                            HD_BIP44_ACCOUNT,
                                                            HD_BIP44_CHAIN_RECEIVE,
                                                            0);
         nFail += Check(vBIP44Path.size() == 5 &&
                        vBIP44Path[0] == (HD_BIP44_PURPOSE | bitflash::BIP32_HARDENED) &&
-                       vBIP44Path[1] == (HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL | bitflash::BIP32_HARDENED) &&
+                       vBIP44Path[1] == (HD_BIP44_COIN_TYPE_BITFLASH | bitflash::BIP32_HARDENED) &&
                        vBIP44Path[2] == (HD_BIP44_ACCOUNT | bitflash::BIP32_HARDENED) &&
                        vBIP44Path[3] == HD_BIP44_CHAIN_RECEIVE &&
                        vBIP44Path[4] == 0,
@@ -382,7 +382,7 @@ static int RunWalletHDSelfTest()
         hdParent.chainCode = vchHDChainCode;
         bitflash::BIP32PrivateNode hdBIP44ReceiveChild;
         if (!bitflash::BIP32DerivePath(hdParent,
-                                       HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+                                       HDBIP44Path(HD_BIP44_COIN_TYPE_BITFLASH,
                                                    HD_BIP44_ACCOUNT,
                                                    HD_BIP44_CHAIN_RECEIVE,
                                                    0),
@@ -570,7 +570,7 @@ static int RunWalletHDSelfTest()
         nFail += Check(audit.fHaveSeed, "the recovery audit reports the phrase") ? 0 : 1;
         nFail += Check(audit.nSchema == HD_SCHEMA_BIP44,
                        "the recovery audit reports the derivation schema") ? 0 : 1;
-        nFail += Check(audit.nCoinType == HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL,
+        nFail += Check(audit.nCoinType == HD_BIP44_COIN_TYPE_BITFLASH,
                        "the recovery audit reports the BIP44 coin type") ? 0 : 1;
         nFail += Check(audit.nReceiveNext == nHDReceiveNext && audit.nChangeNext == 1,
                        "the recovery audit reports receive/change counters") ? 0 : 1;
