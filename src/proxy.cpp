@@ -5,6 +5,8 @@
 #include "proxy.h"
 #include "sockcount.h"
 
+#include <errno.h>
+
 static CCriticalSection cs_socks5;
 static bool g_fSocks5Proxy = false;
 static std::string g_socks5Host;
@@ -60,34 +62,18 @@ static bool ValidProxyHostChar(char c)
     return isalnum((unsigned char)c) || c == '.' || c == '-' || c == '_';
 }
 
-bool BtfParseSocks5Proxy(const std::string& spec, std::string& hostOut,
-                         unsigned short& portOut, std::string& errOut)
+static bool ValidProxyIpv6HostChar(char c)
 {
-    hostOut.clear();
-    portOut = 0;
-    errOut.clear();
+    return isxdigit((unsigned char)c) || c == ':' || c == '.';
+}
 
-    size_t colon = spec.rfind(':');
-    if (colon == std::string::npos || colon == 0 || colon + 1 >= spec.size())
+static bool ParsePort(const std::string& port, unsigned short& portOut,
+                      std::string& errOut)
+{
+    if (port.empty())
     {
-        errOut = "expected HOST:PORT";
+        errOut = "port is empty";
         return false;
-    }
-
-    std::string host = spec.substr(0, colon);
-    std::string port = spec.substr(colon + 1);
-    if (host.size() > 255)
-    {
-        errOut = "host is too long";
-        return false;
-    }
-    for (size_t i = 0; i < host.size(); i++)
-    {
-        if (!ValidProxyHostChar(host[i]))
-        {
-            errOut = "host contains unsupported characters";
-            return false;
-        }
     }
     for (size_t i = 0; i < port.size(); i++)
     {
@@ -97,15 +83,96 @@ bool BtfParseSocks5Proxy(const std::string& spec, std::string& hostOut,
             return false;
         }
     }
-    int nPort = atoi(port.c_str());
-    if (nPort <= 0 || nPort > 65535)
+
+    errno = 0;
+    char* end = NULL;
+    long nPort = strtol(port.c_str(), &end, 10);
+    if (errno == ERANGE || end == NULL || *end != '\0' || nPort <= 0 || nPort > 65535)
     {
         errOut = "port is out of range";
         return false;
     }
+    portOut = (unsigned short)nPort;
+    return true;
+}
+
+bool BtfParseSocks5Proxy(const std::string& spec, std::string& hostOut,
+                         unsigned short& portOut, std::string& errOut)
+{
+    hostOut.clear();
+    portOut = 0;
+    errOut.clear();
+
+    std::string host;
+    std::string port;
+    bool fBracketedIpv6 = false;
+    if (!spec.empty() && spec[0] == '[')
+    {
+        size_t close = spec.find(']');
+        if (close == std::string::npos || close == 1 || close + 1 >= spec.size() || spec[close + 1] != ':')
+        {
+            errOut = "expected [IPv6]:PORT";
+            return false;
+        }
+        host = spec.substr(1, close - 1);
+        port = spec.substr(close + 2);
+        fBracketedIpv6 = true;
+    }
+    else
+    {
+        size_t colon = spec.rfind(':');
+        if (colon == std::string::npos || colon == 0 || colon + 1 >= spec.size())
+        {
+            errOut = "expected HOST:PORT";
+            return false;
+        }
+        host = spec.substr(0, colon);
+        port = spec.substr(colon + 1);
+        if (host.find(':') != std::string::npos)
+        {
+            errOut = "IPv6 proxy hosts must use [ADDR]:PORT";
+            return false;
+        }
+    }
+
+    if (host.size() > 255)
+    {
+        errOut = "host is too long";
+        return false;
+    }
+    if (fBracketedIpv6)
+    {
+        bool fHasColon = false;
+        for (size_t i = 0; i < host.size(); i++)
+        {
+            fHasColon = fHasColon || host[i] == ':';
+            if (!ValidProxyIpv6HostChar(host[i]))
+            {
+                errOut = "IPv6 proxy host contains unsupported characters";
+                return false;
+            }
+        }
+        if (!fHasColon)
+        {
+            errOut = "bracketed proxy host is not IPv6";
+            return false;
+        }
+    }
+    else
+    {
+        for (size_t i = 0; i < host.size(); i++)
+        {
+            if (!ValidProxyHostChar(host[i]))
+            {
+                errOut = "host contains unsupported characters";
+                return false;
+            }
+        }
+    }
+    if (!ParsePort(port, portOut, errOut))
+        return false;
 
     hostOut = host;
-    portOut = (unsigned short)nPort;
     return true;
 }
 
@@ -147,6 +214,8 @@ std::string BtfSocks5ProxyName()
     {
         if (!g_fSocks5Proxy)
             return "";
+        if (g_socks5Host.find(':') != std::string::npos)
+            return strprintf("[%s]:%u", g_socks5Host.c_str(), (unsigned)g_socks5Port);
         return strprintf("%s:%u", g_socks5Host.c_str(), (unsigned)g_socks5Port);
     }
     return "";
@@ -207,8 +276,14 @@ static bool Socks5Connect(SOCKET s, const std::string& destHost,
         return false;
 
     unsigned char rep[4] = {0,0,0,0};
-    if (!ReadN(s, rep, sizeof(rep)) || rep[0] != 0x05 || rep[1] != 0x00)
+    if (!ReadN(s, rep, sizeof(rep)) || rep[0] != 0x05)
         return false;
+    if (rep[1] != 0x00)
+    {
+        error("SOCKS5 CONNECT to %s:%u failed with reply 0x%02x\n",
+              destHost.c_str(), (unsigned)destPort, (unsigned)rep[1]);
+        return false;
+    }
     int nAddr = 0;
     if (rep[3] == 0x01) nAddr = 4;
     else if (rep[3] == 0x04) nAddr = 16;

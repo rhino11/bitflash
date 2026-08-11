@@ -322,7 +322,7 @@ the same one will refuse to start.
 `-socks=127.0.0.1:9050` routes outbound Nostr discovery and `.btf` rendezvous
 dials through a local SOCKS5 proxy such as Tor. When it is set, the node skips
 plain HTTP external-IP probes instead of leaking a direct request outside the
-proxy.
+proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
 
 ### When something looks wrong
 
