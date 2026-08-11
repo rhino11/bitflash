@@ -98,19 +98,16 @@ static const int          BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS = 2 * 60;
 
 // Ceiling on simultaneous connections.
 //
-// ThreadSocketHandler watches every peer through one select(), and select()
-// cannot watch more descriptors than FD_SETSIZE. On Windows FD_SET simply
-// stops adding once the set is full -- no error, no log -- so every socket
-// past the limit stays open and is never read again. Nothing capped vNodes,
-// so a node accepted connections it had no way to service, and because new
-// entries go on the end of vNodes it was always the newest connection that
-// starved, including the ones dialed to fix connectivity.
+// ThreadSocketHandler watches every peer in one socket loop. This used to be a
+// select() loop, which made FD_SETSIZE the real limit and silently starved
+// sockets past that bitmap. It is now poll()/WSAPoll(), so the ceiling below is
+// a deliberate resource bound rather than a descriptor-set accident.
 //
 // Measured on two nodes before this ceiling existed: 277 and 90 CNode objects
 // against 93 and 90 live sockets, and a status bar reporting hundreds of
 // peers for a node that was really talking to thirty.
 //
-// 125 is Bitcoin's number and sits far below FD_SETSIZE on both platforms.
+// 125 is Bitcoin's number and remains a conservative public-node default.
 static const unsigned int MAX_CONNECTIONS = 125;
 
 // A node marked for disconnect is normally held until its buffers drain, so
@@ -142,7 +139,7 @@ static const int          BTF_BEHIND_WARN_INTERVAL_SECS = 5 * 60;
 //
 // These counters exist so it can. Cheap to keep, and they name the failures
 // that actually happened rather than the ones that sound impressive.
-extern int   nPeersWatched;        // peers in the last select() set
+extern int   nPeersWatched;        // peers in the last poll() set
 extern int64 nBlocksReceived;      // blocks handed to ProcessBlock
 extern int64 nBlocksWithoutParent; // ...of those, how many arrived orphaned
 

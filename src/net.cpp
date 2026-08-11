@@ -13,6 +13,8 @@
 #include <thread>          // hardware_concurrency, for the miner thread count
 #ifdef _WIN32
 #include <winsock2.h>
+#else
+#include <poll.h>
 #endif
 #include <openssl/rand.h>
 #include "btfaddr.h"
@@ -21,6 +23,20 @@
 void ThreadReconnectCachedBtfPeers(void* parg);
 void ThreadMessageHandler2(void* parg);
 void ThreadSocketHandler2(void* parg);
+
+#ifdef _WIN32
+typedef WSAPOLLFD BtfPollFd;
+static int BtfPoll(BtfPollFd* pfd, unsigned int nfd, int nTimeoutMs)
+{
+    return WSAPoll(pfd, nfd, nTimeoutMs);
+}
+#else
+typedef struct pollfd BtfPollFd;
+static int BtfPoll(BtfPollFd* pfd, unsigned int nfd, int nTimeoutMs)
+{
+    return poll(pfd, (nfds_t)nfd, nTimeoutMs);
+}
+#endif
 
 
 
@@ -274,8 +290,8 @@ string GetDiagnosticsText()
 
     // The number that would have made the deafness obvious. Anything held but
     // not watched is a socket this node will never read again.
-    str += strprintf("  peers watched     %d of %d that select() can hold%s\n",
-                     nPeersWatched, (int)FD_SETSIZE - 1,
+    str += strprintf("  peers watched     %d of %d held by poll%s\n",
+                     nPeersWatched, nHeld,
                      nHeld > nPeersWatched ? "   <-- NOT ALL PEERS ARE BEING READ" : "");
 
     if (nBlocksReceived > 0)
@@ -1198,7 +1214,7 @@ void CNode::Disconnect()
 
     // Invalidate before anything else can look at it. This used to close the
     // socket and leave the handle number sitting in the object, so ~CNode
-    // closed it a second time and the select loop kept arming it in the
+    // closed it a second time and the socket loop kept arming it in the
     // meantime. See the note on ~CNode in net.h.
     BtfCloseSocket(hSocket);
     hSocket = INVALID_SOCKET;
@@ -1359,52 +1375,49 @@ void ThreadSocketHandler2(void* parg)
         //
         // Find which sockets have data to receive
         //
-        struct timeval timeout;
-        timeout.tv_sec  = 0;
-        timeout.tv_usec = 50000; // frequency to poll pnode->vSend
+        static const int nPollTimeoutMs = 50; // frequency to poll pnode->vSend
 
-        fd_set fdsetRecv;
-        fd_set fdsetSend;
-        FD_ZERO(&fdsetRecv);
-        FD_ZERO(&fdsetSend);
-        SOCKET hSocketMax = 0;
-        FD_SET(hListenSocket, &fdsetRecv);
-        hSocketMax = max(hSocketMax, hListenSocket);
-        // FD_SET drops silently once the set is full, so count what goes in
-        // and say so. A peer that never makes it into the set is never read,
-        // and that is indistinguishable from a peer with nothing to say --
-        // the failure this whole path used to hide.
-        unsigned int nWatched = 1; // the listen socket
+        struct NodePollResult
+        {
+            CNode* pnode;
+            SOCKET hSocket;
+            bool fRecv;
+            bool fSend;
+            bool fInvalid;
+            NodePollResult(CNode* pnodeIn, SOCKET hSocketIn)
+                : pnode(pnodeIn), hSocket(hSocketIn), fRecv(false), fSend(false), fInvalid(false) {}
+        };
+
+        vector<BtfPollFd> vPoll;
+        vector<NodePollResult> vPollNodes;
+
+        BtfPollFd listenPoll;
+        memset(&listenPoll, 0, sizeof(listenPoll));
+        listenPoll.fd = hListenSocket;
+        listenPoll.events = POLLIN;
+        vPoll.push_back(listenPoll);
+
         CRITICAL_BLOCK(cs_vNodes)
         {
             foreach(CNode* pnode, vNodes)
             {
-                if (nWatched >= FD_SETSIZE)
-                    break;
                 // A disconnected node stays in vNodes until its references go.
-                // Arming its closed handle asks select() to watch a number the
-                // operating system may already have given to somebody else.
+                // Do not watch a closed handle number: the OS may already have
+                // handed it to a different connection.
                 if (pnode->hSocket == INVALID_SOCKET)
                     continue;
-                FD_SET(pnode->hSocket, &fdsetRecv);
-                nWatched++;
-                hSocketMax = max(hSocketMax, pnode->hSocket);
+
+                BtfPollFd pfd;
+                memset(&pfd, 0, sizeof(pfd));
+                pfd.fd = pnode->hSocket;
+                pfd.events = POLLIN;
                 TRY_CRITICAL_BLOCK(pnode->cs_vSend)
                     if (!pnode->vSend.empty())
-                        FD_SET(pnode->hSocket, &fdsetSend);
+                        pfd.events |= POLLOUT;
+                vPoll.push_back(pfd);
+                vPollNodes.push_back(NodePollResult(pnode, pnode->hSocket));
             }
-            if (vNodes.size() + 1 > (size_t)FD_SETSIZE)
-            {
-                static int64 nLastWarned = 0;
-                if (GetTime() - nLastWarned > 60)
-                {
-                    nLastWarned = GetTime();
-                    printf("WARNING: %d peers but select() can only watch %d -- %d are not being read\n",
-                           (int)vNodes.size(), (int)FD_SETSIZE - 1,
-                           (int)vNodes.size() - (int)FD_SETSIZE + 1);
-                }
-            }
-            nPeersWatched = (int)nWatched - 1;   // less the listen socket
+            nPeersWatched = (int)vPollNodes.size();
         }
 
         // Say the state of the node out loud now and then, so a log pulled off
@@ -1425,32 +1438,17 @@ void ThreadSocketHandler2(void* parg)
         }
 
         vfThreadRunning[0] = false;
-        int nSelect = select(hSocketMax + 1, &fdsetRecv, &fdsetSend, NULL, &timeout);
+        int nPoll = BtfPoll(&vPoll[0], (unsigned int)vPoll.size(), nPollTimeoutMs);
         vfThreadRunning[0] = true;
         CheckForShutdown(0);
-        if (nSelect == SOCKET_ERROR)
+        if (nPoll == SOCKET_ERROR)
         {
-            // This used to answer a failed select() by marking every
-            // descriptor from 0 to hSocketMax ready, which is code written for
-            // POSIX, where a descriptor is a small integer. A Windows SOCKET is
-            // a kernel handle in the thousands, so the loop iterated over
-            // numbers that are not sockets and told the rest of the function
-            // that every peer had data. One bad handle in the set makes
-            // select() fail on every pass, so a single closed socket put the
-            // whole thread into that state permanently.
-            //
-            // Find the bad handle instead and let it be dropped.
             int nErr = WSAGetLastError();
-            LogPrint("net", "select failed: %d\n", nErr);
-            FD_ZERO(&fdsetRecv);
-            FD_ZERO(&fdsetSend);
+            LogPrint("net", "poll failed: %d\n", nErr);
             CRITICAL_BLOCK(cs_vNodes)
             {
                 foreach(CNode* pnode, vNodes)
                 {
-                    // Already disconnected: its handle is gone on purpose, and
-                    // reporting it here would name the wrong node for a select()
-                    // failure it did not cause.
                     if (pnode->hSocket == INVALID_SOCKET)
                         continue;
                     int nType = 0;
@@ -1467,7 +1465,17 @@ void ThreadSocketHandler2(void* parg)
                     }
                 }
             }
-            Sleep(timeout.tv_usec/1000);
+            Sleep(nPollTimeoutMs);
+        }
+        else
+        {
+            for (size_t i = 0; i < vPollNodes.size(); i++)
+            {
+                short revents = vPoll[i + 1].revents; // poll[0] is the listener
+                vPollNodes[i].fRecv = (revents & (POLLIN | POLLERR | POLLHUP)) != 0;
+                vPollNodes[i].fSend = (revents & POLLOUT) != 0;
+                vPollNodes[i].fInvalid = (revents & POLLNVAL) != 0;
+            }
         }
         RandAddSeed();
 
@@ -1483,7 +1491,7 @@ void ThreadSocketHandler2(void* parg)
         //
         // Accept new connections
         //
-        if (FD_ISSET(hListenSocket, &fdsetRecv))
+        if (nPoll != SOCKET_ERROR && (vPoll[0].revents & POLLIN))
         {
             struct sockaddr_in sockaddr;
 #ifdef _WIN32
@@ -1502,7 +1510,7 @@ void ThreadSocketHandler2(void* parg)
             {
                 // Refuse rather than accept a connection this node cannot
                 // watch. Without this the listen socket kept taking peers --
-                // it is always in the select set -- while everything past the
+                // it is always watched -- while everything past the
                 // limit sat open and unread, which fed on itself: the deafer
                 // the node got, the more connections it collected.
                 unsigned int nNodes = 0;
@@ -1529,18 +1537,28 @@ void ThreadSocketHandler2(void* parg)
         //
         // Service each socket
         //
-        vector<CNode*> vNodesCopy;
-        CRITICAL_BLOCK(cs_vNodes)
-            vNodesCopy = vNodes;
-        foreach(CNode* pnode, vNodesCopy)
+        for (size_t i = 0; i < vPollNodes.size(); i++)
         {
             CheckForShutdown(0);
-            SOCKET hSocket = pnode->hSocket;
+            NodePollResult& poll = vPollNodes[i];
+            CNode* pnode = poll.pnode;
+            SOCKET hSocket = poll.hSocket;
+
+            if (hSocket == INVALID_SOCKET || pnode->hSocket != hSocket)
+                continue;
+
+            if (poll.fInvalid)
+            {
+                LogPrint("net", "poll reported invalid socket for %s\n",
+                         pnode->addr.ToString().c_str());
+                pnode->fDisconnect = true;
+                continue;
+            }
 
             //
             // Receive
             //
-            if (FD_ISSET(hSocket, &fdsetRecv))
+            if (poll.fRecv)
             {
                 TRY_CRITICAL_BLOCK(pnode->cs_vRecv)
                 {
@@ -1580,7 +1598,7 @@ void ThreadSocketHandler2(void* parg)
             //
             // Send
             //
-            if (FD_ISSET(hSocket, &fdsetSend))
+            if (poll.fSend)
             {
                 TRY_CRITICAL_BLOCK(pnode->cs_vSend)
                 {
