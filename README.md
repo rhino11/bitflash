@@ -83,6 +83,16 @@ It reconstructs the best chain from local block files, computes the current
 UTXO root and supply, and writes canonical JSON that independent auditors can
 compare or timestamp externally with OpenTimestamps. See
 [UTXO-set commitments](docs/utxo-commitment.md).
+
+The same root can prove one unspent output without sharing the full UTXO set:
+
+```bash
+python3 scripts/prove-utxo.py TXID:VOUT --out utxo-proof.json --json
+python3 scripts/verify-utxo-proof.py utxo-proof.json
+```
+
+See [UTXO inclusion proofs](docs/utxo-proofs.md).
+
 Bitflash also ships a deterministic fair-launch verifier:
 
 ```bash

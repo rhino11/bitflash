@@ -54,6 +54,20 @@ SHA256("BTFNODE1|" || left_hash || right_hash)
 
 The final hash is the UTXO-set root.
 
+## Inclusion Proofs
+
+After a root has been computed, `scripts/prove-utxo.py` can create a compact
+inclusion proof for one unspent output:
+
+```bash
+python3 scripts/prove-utxo.py TXID:VOUT --out utxo-proof.json --json
+python3 scripts/verify-utxo-proof.py utxo-proof.json
+```
+
+The verifier does not need local block files. It recomputes the target leaf,
+walks the sibling path, and compares the result with the expected root. See
+[UTXO inclusion proofs](utxo-proofs.md).
+
 ## Deterministic Output
 
 `--json` and `--out` write canonical JSON with sorted keys, fixed separators,
