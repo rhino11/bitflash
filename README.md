@@ -73,6 +73,16 @@ scripts/verify-release.sh latest
 See [release verification](docs/release-verification.md) for the full release
 audit flow and the maintainer signing step.
 
+Bitflash also ships a deterministic UTXO-set commitment tool:
+
+```bash
+python3 scripts/verify-utxo-set.py --out utxo-report.json --json
+```
+
+It reconstructs the best chain from local block files, computes the current
+UTXO root and supply, and writes canonical JSON that independent auditors can
+compare or timestamp externally with OpenTimestamps. See
+[UTXO-set commitments](docs/utxo-commitment.md).
 Bitflash also ships a deterministic fair-launch verifier:
 
 ```bash
