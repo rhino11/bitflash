@@ -35,7 +35,10 @@ def hash160(b):
 
 
 def spk_info(script_hex):
-    spk = bytes.fromhex(script_hex)
+    try:
+        spk = bytes.fromhex(script_hex)
+    except ValueError:
+        return {"type": "malformed", "hex": script_hex[:80]}
     if (
         len(spk) == 25 and spk[0] == 0x76 and spk[1] == 0xA9
         and spk[2] == 0x14 and spk[23] == 0x88 and spk[24] == 0xAC

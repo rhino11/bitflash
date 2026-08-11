@@ -4,6 +4,7 @@
 import datetime as _dt
 import hashlib
 import json
+import mmap
 import os
 import struct
 from pathlib import Path
@@ -11,6 +12,9 @@ from pathlib import Path
 
 MAGIC = bytes([0xBF, 0x20, 0x5C, 0xFD])
 MAX_BLOCK_PAYLOAD = 32 * 1024 * 1024
+UTXO_LEAF_DOMAIN = "BTFUTXO1"
+UTXO_NODE_DOMAIN_TAG = "BTFNODE1"
+UTXO_NODE_DOMAIN = (UTXO_NODE_DOMAIN_TAG + "|").encode("ascii")
 COIN = 100_000_000
 GENESIS_HASH = "5bd7cb255d814e48cebcdfb72da4dc87b34bd774227f8ceb546c5640f4bdc169"
 GENESIS_MERKLE = "1a45b4482532abb29b10e234d3f13132230525a339ecea91658ffa675a5b1325"
@@ -181,40 +185,33 @@ def iter_block_files(datadir):
 def iter_blocks_from_file(path):
     path = Path(path)
     with path.open("rb") as f:
-        window = f.read(4)
-        offset = 0
-        while len(window) == 4:
-            if window != MAGIC:
-                nxt = f.read(1)
-                if not nxt:
+        f.seek(0, os.SEEK_END)
+        file_size = f.tell()
+        if file_size == 0:
+            return
+        f.seek(0)
+        mm = mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ)
+        try:
+            pos = 0
+            while True:
+                offset = mm.find(MAGIC, pos)
+                if offset < 0 or offset + 8 > file_size:
                     break
-                window = window[1:] + nxt
-                offset += 1
-                continue
-
-            size_bytes = f.read(4)
-            if len(size_bytes) != 4:
-                break
-            size = struct.unpack("<I", size_bytes)[0]
-            if size == 0 or size > MAX_BLOCK_PAYLOAD:
-                offset += 1
-                f.seek(offset)
-                window = f.read(4)
-                continue
-            payload_offset = offset + 8
-            payload = f.read(size)
-            if len(payload) != size:
-                break
-            try:
-                yield parse_block(payload, path.name, payload_offset)
-            except ParseError:
-                offset += 1
-                f.seek(offset)
-                window = f.read(4)
-                continue
-
-            offset = f.tell()
-            window = f.read(4)
+                size = struct.unpack("<I", mm[offset + 4:offset + 8])[0]
+                payload_offset = offset + 8
+                end = payload_offset + size
+                if size == 0 or size > MAX_BLOCK_PAYLOAD or end > file_size:
+                    pos = offset + 1
+                    continue
+                payload = mm[payload_offset:end]
+                try:
+                    yield parse_block(payload, path.name, payload_offset)
+                except ParseError:
+                    pos = offset + 1
+                    continue
+                pos = end
+        finally:
+            mm.close()
 
 
 def read_blocks_from_files(paths, max_blocks=0):
@@ -265,7 +262,7 @@ def is_coinbase(tx):
 
 def utxo_leaf_hash(outpoint, utxo):
     payload = "|".join([
-        "BTFUTXO1",
+        UTXO_LEAF_DOMAIN,
         outpoint,
         str(utxo["value_satoshis"]),
         utxo["script_pub_key_hex"],
@@ -285,7 +282,7 @@ def utxo_root(utxos):
         for i in range(0, len(layer), 2):
             left = layer[i]
             right = layer[i + 1] if i + 1 < len(layer) else left
-            nxt.append(sha256(b"BTFNODE1|" + left + right))
+            nxt.append(sha256(UTXO_NODE_DOMAIN + left + right))
         layer = nxt
     return layer[0].hex()
 
@@ -327,9 +324,9 @@ def apply_blocks(blocks, strict_duplicates=False):
             for n, out in enumerate(tx["vout"]):
                 key = "%s:%d" % (tx["txid"], n)
                 if key in utxos:
-                    duplicate_outputs.append({"height": height, "outpoint": key})
                     if strict_duplicates:
                         raise ParseError("duplicate output at height %d: %s" % (height, key))
+                    duplicate_outputs.append({"height": height, "outpoint": key})
                 utxos[key] = {
                     "txid": tx["txid"],
                     "vout": n,

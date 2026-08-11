@@ -10,8 +10,6 @@ from pathlib import Path
 import bitflash_chain as chain
 
 SCHEMA = "bitflash-utxo-inclusion-proof-1"
-LEAF_DOMAIN = "BTFUTXO1"
-NODE_DOMAIN = b"BTFNODE1|"
 
 
 def canonical_bytes(obj):
@@ -32,9 +30,9 @@ def verify(proof, expected_root=None):
     commitment = proof.get("commitment", {})
     if commitment.get("algorithm") != "sorted-outpoint-merkle-sha256":
         failures.append("unexpected commitment algorithm")
-    if commitment.get("leaf_domain") != LEAF_DOMAIN:
+    if commitment.get("leaf_domain") != chain.UTXO_LEAF_DOMAIN:
         failures.append("unexpected leaf domain")
-    if commitment.get("node_domain") != "BTFNODE1":
+    if commitment.get("node_domain") != chain.UTXO_NODE_DOMAIN_TAG:
         failures.append("unexpected node domain")
 
     target = proof.get("target", {})
@@ -64,9 +62,9 @@ def verify(proof, expected_root=None):
             failures.append("bad sibling hash length at proof level %d" % i)
         side = step.get("side")
         if side == "right":
-            current = chain.sha256(NODE_DOMAIN + current + sibling)
+            current = chain.sha256(chain.UTXO_NODE_DOMAIN + current + sibling)
         elif side == "left":
-            current = chain.sha256(NODE_DOMAIN + sibling + current)
+            current = chain.sha256(chain.UTXO_NODE_DOMAIN + sibling + current)
         else:
             failures.append("bad sibling side at proof level %d" % i)
 

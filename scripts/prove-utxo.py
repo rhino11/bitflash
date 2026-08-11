@@ -14,7 +14,6 @@ from pathlib import Path
 import bitflash_chain as chain
 
 SCHEMA = "bitflash-utxo-inclusion-proof-1"
-NODE_DOMAIN = b"BTFNODE1|"
 
 
 def canonical_bytes(obj):
@@ -61,7 +60,7 @@ def build_merkle_proof(keys, leaf_hashes, index):
         for i in range(0, len(layer), 2):
             left = layer[i]
             right = layer[i + 1] if i + 1 < len(layer) else left
-            next_layer.append(hashlib.sha256(NODE_DOMAIN + left + right).digest())
+            next_layer.append(hashlib.sha256(chain.UTXO_NODE_DOMAIN + left + right).digest())
         layer = next_layer
         current_index //= 2
         level += 1
@@ -106,8 +105,8 @@ def build_proof(args):
         },
         "commitment": {
             "algorithm": "sorted-outpoint-merkle-sha256",
-            "leaf_domain": "BTFUTXO1",
-            "node_domain": "BTFNODE1",
+            "leaf_domain": chain.UTXO_LEAF_DOMAIN,
+            "node_domain": chain.UTXO_NODE_DOMAIN_TAG,
             "root": root,
             "leaf_count": len(keys),
         },
