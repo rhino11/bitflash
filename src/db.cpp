@@ -880,9 +880,9 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         }
         if (!fHaveStoredHDCoinType)
         {
-            nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+            nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
             printf("LoadWallet: deterministic seed has no BIP44 coin type metadata; "
-                   "using provisional Bitflash coin type %u\n", nHDCoinType);
+                   "using Bitflash coin type %u\n", nHDCoinType);
         }
     }
     else
@@ -891,7 +891,7 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
         nHDNext = 0;
         nHDReceiveNext = 0;
         nHDChangeNext = 0;
-        nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+        nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
     }
 
     // fGenerateBitcoins and nMineMode only mean anything together, and a

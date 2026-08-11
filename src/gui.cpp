@@ -1250,7 +1250,7 @@ static void DrawWalletSafetyDialog()
         if (g_recoveryAudit.fHaveSeed)
         {
             ImGui::Text("Derivation schema: %s", HDKeySchemaName(g_recoveryAudit.nSchema).c_str());
-            ImGui::Text("BIP44 coin type: %u (provisional BITFLASH)", g_recoveryAudit.nCoinType);
+            ImGui::Text("BIP44 coin type: %u (SLIP-0044 BITFLASH)", g_recoveryAudit.nCoinType);
         }
         ImGui::Text("Phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableCredit).c_str());

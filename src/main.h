@@ -216,9 +216,9 @@ static const unsigned int HD_BIP44_PURPOSE = 44;
 static const unsigned int HD_BIP44_ACCOUNT = 0;
 static const unsigned int HD_BIP44_CHAIN_RECEIVE = 0;
 static const unsigned int HD_BIP44_CHAIN_CHANGE = 1;
-// Provisional until Bitflash has an official SLIP-0044 assignment.
-// Proposed registry row: 4346950 | BITFLASH | Bitflash.
-static const unsigned int HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL = 4346950;
+// Official SLIP-0044 assignment (registered 2026-08-07):
+// 4346950 | BITFLASH | Bitflash   (4346950 == 0x425446 == "BTF")
+static const unsigned int HD_BIP44_COIN_TYPE_BITFLASH = 4346950;
 extern int nHDKeySchema;
 extern unsigned int nHDReceiveNext;            // BIP44 external chain
 extern unsigned int nHDChangeNext;             // BIP44 internal chain
@@ -316,7 +316,7 @@ struct WalletRecoveryAudit
         nDerivedKnown = 0;
         nReceiveNext = 0;
         nChangeNext = 0;
-        nCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+        nCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
         nRecoverableTx = 0;
         nLegacyTx = 0;
         nRecoverableImmatureTx = 0;

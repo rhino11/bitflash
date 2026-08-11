@@ -642,7 +642,7 @@ unsigned int nHDNext = 0;
 int nHDKeySchema = HD_SCHEMA_NONE;
 unsigned int nHDReceiveNext = 0;
 unsigned int nHDChangeNext = 0;
-unsigned int nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+unsigned int nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
 
 string HDKeySchemaName(int nSchema)
 {
@@ -798,7 +798,7 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
 
         if (!CWalletDB().WriteHDMaster(master.privateKey, master.chainCode) ||
             !CWalletDB().WriteHDSchema(HD_SCHEMA_BIP44) ||
-            !CWalletDB().WriteHDCoinType(HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL) ||
+            !CWalletDB().WriteHDCoinType(HD_BIP44_COIN_TYPE_BITFLASH) ||
             !CWalletDB().WriteHDNext(0) ||
             !CWalletDB().WriteHDReceiveNext(1) ||
             !CWalletDB().WriteHDChangeNext(0))
@@ -811,7 +811,7 @@ bool SetHDSeedFromMnemonic(const string& strMnemonic, string& strErrorRet)
         nHDKeySchema   = HD_SCHEMA_BIP44;
         nHDReceiveNext = 1;
         nHDChangeNext  = 0;
-        nHDCoinType    = HD_BIP44_COIN_TYPE_BITFLASH_PROVISIONAL;
+        nHDCoinType    = HD_BIP44_COIN_TYPE_BITFLASH;
 
         // Index 0 is spoken for before it is derived, so a failure below cannot
         // leave the pool free to hand it out as an ordinary key. The cost of
