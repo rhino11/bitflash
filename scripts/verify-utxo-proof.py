@@ -7,6 +7,7 @@ import json
 import sys
 from pathlib import Path
 
+import bitflash_chain as chain
 
 SCHEMA = "bitflash-utxo-inclusion-proof-1"
 LEAF_DOMAIN = "BTFUTXO1"
@@ -15,22 +16,6 @@ NODE_DOMAIN = b"BTFNODE1|"
 
 def canonical_bytes(obj):
     return (json.dumps(obj, sort_keys=True, separators=(",", ":"), ensure_ascii=True) + "\n").encode("ascii")
-
-
-def sha256(data):
-    return hashlib.sha256(data).digest()
-
-
-def utxo_leaf_hash(outpoint, utxo):
-    payload = "|".join([
-        LEAF_DOMAIN,
-        outpoint,
-        str(utxo["value_satoshis"]),
-        utxo["script_pub_key_hex"],
-        str(utxo["created_height"]),
-        utxo["created_txid"],
-    ]).encode("ascii")
-    return sha256(payload)
 
 
 def load_proof(path):
@@ -59,7 +44,7 @@ def verify(proof, expected_root=None):
         failures.append("target outpoint does not match txid:vout")
 
     try:
-        current = utxo_leaf_hash(outpoint, utxo)
+        current = chain.utxo_leaf_hash(outpoint, utxo)
         leaf_ok = target.get("leaf_hash") == current.hex()
     except Exception as e:
         failures.append("could not hash target leaf: %s" % e)
@@ -79,9 +64,9 @@ def verify(proof, expected_root=None):
             failures.append("bad sibling hash length at proof level %d" % i)
         side = step.get("side")
         if side == "right":
-            current = sha256(NODE_DOMAIN + current + sibling)
+            current = chain.sha256(NODE_DOMAIN + current + sibling)
         elif side == "left":
-            current = sha256(NODE_DOMAIN + sibling + current)
+            current = chain.sha256(NODE_DOMAIN + sibling + current)
         else:
             failures.append("bad sibling side at proof level %d" % i)
 

@@ -7,25 +7,14 @@ included in the deterministic UTXO root produced by verify-utxo-set.py.
 
 import argparse
 import hashlib
-import importlib.util
 import json
-import os
 import sys
 from pathlib import Path
 
+import bitflash_chain as chain
 
 SCHEMA = "bitflash-utxo-inclusion-proof-1"
 NODE_DOMAIN = b"BTFNODE1|"
-
-
-def load_utxo_tool():
-    path = Path(__file__).with_name("verify-utxo-set.py")
-    spec = importlib.util.spec_from_file_location("bitflash_verify_utxo_set", path)
-    if spec is None or spec.loader is None:
-        raise SystemExit("could not load %s" % path)
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    return mod
 
 
 def canonical_bytes(obj):
@@ -80,25 +69,27 @@ def build_merkle_proof(keys, leaf_hashes, index):
 
 
 def build_proof(args):
-    tool = load_utxo_tool()
     txid, vout = split_outpoint(args.outpoint)
     outpoint = "%s:%d" % (txid, vout)
 
-    raw_blocks = tool.read_blocks(args.datadir, args.max_blocks)
+    raw_blocks = chain.read_blocks(args.datadir, args.max_blocks)
     if not raw_blocks:
         raise SystemExit("no Bitflash blocks found in %s" % args.datadir)
-    blocks = tool.select_main_chain(raw_blocks)
-    state = tool.apply_blocks(blocks)
+    try:
+        blocks = chain.select_main_chain(raw_blocks)
+        state = chain.apply_blocks(blocks, strict_duplicates=args.strict_duplicates)
+    except chain.ParseError as e:
+        raise SystemExit(str(e))
     utxos = state["utxos"]
     stats = state["stats"]
     if outpoint not in utxos:
         raise SystemExit("outpoint is not unspent in the scanned chain: %s" % outpoint)
 
     keys = sorted(utxos)
-    leaf_hashes = [tool.utxo_leaf_hash(k, utxos[k]) for k in keys]
+    leaf_hashes = [chain.utxo_leaf_hash(k, utxos[k]) for k in keys]
     index = keys.index(outpoint)
     proof_path, root = build_merkle_proof(keys, leaf_hashes, index)
-    direct_root = tool.utxo_root(utxos)
+    direct_root = chain.utxo_root(utxos)
     if root != direct_root:
         raise SystemExit("internal proof root mismatch")
 
@@ -110,8 +101,8 @@ def build_proof(args):
         "chain": {
             "name": "Bitflash",
             "ticker": "BTF",
-            "message_start_hex": tool.MAGIC.hex(),
-            "coin": tool.COIN,
+            "message_start_hex": chain.MAGIC.hex(),
+            "coin": chain.COIN,
         },
         "commitment": {
             "algorithm": "sorted-outpoint-merkle-sha256",
@@ -169,20 +160,14 @@ def print_text(proof):
     print("Verdict: %s" % proof["verdict"])
 
 
-def default_datadir():
-    if os.name == "nt" and os.environ.get("APPDATA"):
-        return os.path.join(os.environ["APPDATA"], "Bitflash")
-    if os.environ.get("HOME"):
-        return os.path.join(os.environ["HOME"], ".bitflash")
-    return "."
-
-
 def main(argv):
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("outpoint", help="unspent output to prove, as txid:vout")
-    ap.add_argument("--datadir", default=default_datadir(), help="Bitflash data directory")
+    ap.add_argument("--datadir", default=chain.default_datadir(), help="Bitflash data directory")
     ap.add_argument("--max-blocks", type=int, default=0,
                     help="number of blocks to scan; 0 means all block files")
+    ap.add_argument("--strict-duplicates", action="store_true",
+                    help="fail instead of using legacy last-write-wins duplicate output handling")
     ap.add_argument("--json", action="store_true", help="print canonical JSON")
     ap.add_argument("--out", help="write canonical JSON proof to this path")
     args = ap.parse_args(argv)

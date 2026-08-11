@@ -21,7 +21,8 @@ python3 scripts/verify-utxo-set.py --out utxo-report.json --json
 
 The verifier:
 
-- parses Bitflash block files directly;
+- parses Bitflash block files directly with the shared Python chain parser;
+- streams `blk*.dat` records instead of loading full block files into memory;
 - reconstructs the best chain rooted at the Bitflash genesis block;
 - ignores side blocks that may also be present in `blk*.dat`;
 - verifies every scanned block merkle root;
@@ -97,6 +98,23 @@ The verifier reports duplicate-output overwrites as warnings and uses
 last-write-wins semantics for the UTXO map, matching the legacy index model.
 Those warnings are part of the report so auditors can see the historical debt
 instead of relying on a polished summary.
+
+For synthetic chains or future clean consensus ranges, auditors can make
+duplicates a hard failure:
+
+```bash
+python3 scripts/verify-utxo-set.py --strict-duplicates
+```
+
+The default remains compatible with the current historical chain because it has
+known legacy duplicate-output overwrites.
+
+## Shared Parser
+
+The audit scripts share `scripts/bitflash_chain.py` for block parsing,
+main-chain selection, UTXO application, canonical JSON, and genesis
+reconstruction. That keeps `verify-utxo-set.py`, `verify-fair-launch.py`,
+`prove-utxo.py`, and the explorer on the same serialization rules.
 
 ## Future Consensus Path
 

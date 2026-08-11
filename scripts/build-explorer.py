@@ -1,134 +1,161 @@
 #!/usr/bin/env python3
-#
-# Build a static Bitflash block explorer (v0) from a node's blk0001.dat.
-# Emits into <out-dir>:
-#   blocks.json            summary of every main-chain block (newest first)
-#   block/<height>.json    full detail per block (header + all txs)
-#   index.html             self-contained viewer (vanilla JS, same-origin fetch)
-#
-# Scope (v0, deliberately): block list, block detail, and coinbase. No mempool,
-# no per-address history. On this chain the coinbase payout key rotates every
-# block, so an address index would be nearly useless; block-level transparency is
-# what lets miners and users confirm the chain is honest.
-#
-# Usage: build-explorer.py <blk0001.dat> <out-dir>
+"""Build a static Bitflash block explorer from local blk*.dat files."""
 
-import sys, os, json, hashlib, struct
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
 
-MAGIC = bytes([0xbf, 0x20, 0x5c, 0xfd])
-ADDRESS_VERSION = 25  # Bitflash addresses start with "B"
+import bitflash_chain as chain
 
-def sha256d(b): return hashlib.sha256(hashlib.sha256(b).digest()).digest()
 
+ADDRESS_VERSION = 25
 B58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz"
+
+
 def b58check(payload):
     v = bytes([ADDRESS_VERSION]) + payload
-    v += sha256d(v)[:4]
-    n = int.from_bytes(v, 'big')
+    v += chain.sha256d(v)[:4]
+    n = int.from_bytes(v, "big")
     s = ""
     while n > 0:
-        n, r = divmod(n, 58); s = B58[r] + s
+        n, r = divmod(n, 58)
+        s = B58[r] + s
     for byte in v:
-        if byte == 0: s = "1" + s
-        else: break
+        if byte == 0:
+            s = "1" + s
+        else:
+            break
     return s
 
+
 def hash160(b):
-    return hashlib.new('ripemd160', hashlib.sha256(b).digest()).digest()
+    return hashlib.new("ripemd160", hashlib.sha256(b).digest()).digest()
 
-class R:
-    def __init__(s, b, o=0): s.b = b; s.o = o
-    def u(s, n): v = s.b[s.o:s.o+n]; s.o += n; return v
-    def i32(s): return struct.unpack('<i', s.u(4))[0]
-    def u32(s): return struct.unpack('<I', s.u(4))[0]
-    def i64(s): return struct.unpack('<q', s.u(8))[0]
-    def cs(s):
-        c = s.b[s.o]; s.o += 1
-        if c < 253: return c
-        if c == 253: return struct.unpack('<H', s.u(2))[0]
-        if c == 254: return struct.unpack('<I', s.u(4))[0]
-        return struct.unpack('<Q', s.u(8))[0]
-    def script(s): n = s.cs(); return s.u(n)
 
-def spk_info(spk):
-    # P2PKH: OP_DUP OP_HASH160 <20> OP_EQUALVERIFY OP_CHECKSIG
-    if len(spk) == 25 and spk[0] == 0x76 and spk[1] == 0xa9 and spk[2] == 0x14 and spk[23] == 0x88 and spk[24] == 0xac:
+def spk_info(script_hex):
+    spk = bytes.fromhex(script_hex)
+    if (
+        len(spk) == 25 and spk[0] == 0x76 and spk[1] == 0xA9
+        and spk[2] == 0x14 and spk[23] == 0x88 and spk[24] == 0xAC
+    ):
         return {"type": "p2pkh", "address": b58check(spk[3:23])}
-    # P2PK: <pubkey> OP_CHECKSIG (65- or 33-byte key)
-    if len(spk) >= 35 and spk[-1] == 0xac:
+    if len(spk) >= 35 and spk[-1] == 0xAC:
         if spk[0] == 0x41 and len(spk) == 67:
-            pk = spk[1:66]; return {"type": "p2pk", "pubkey": pk.hex(), "address": b58check(hash160(pk))}
+            pk = spk[1:66]
+            return {"type": "p2pk", "pubkey": pk.hex(), "address": b58check(hash160(pk))}
         if spk[0] == 0x21 and len(spk) == 35:
-            pk = spk[1:34]; return {"type": "p2pk", "pubkey": pk.hex(), "address": b58check(hash160(pk))}
-    return {"type": "other", "hex": spk.hex()[:80]}
+            pk = spk[1:34]
+            return {"type": "p2pk", "pubkey": pk.hex(), "address": b58check(hash160(pk))}
+    return {"type": "other", "hex": script_hex[:80]}
 
-def parse_tx(r):
-    start = r.o
-    r.i32()
-    nin = r.cs(); vin = []
-    for _ in range(nin):
-        ph = r.u(32); idx = r.u32(); r.script(); r.u32()
-        coinbase = (ph == b'\x00' * 32 and idx == 0xffffffff)
-        vin.append({"coinbase": coinbase, "prev": (None if coinbase else ph[::-1].hex()), "vout": (None if coinbase else idx)})
-    nout = r.cs(); vout = []
-    for _ in range(nout):
-        val = r.i64(); spk = r.script(); vout.append(dict({"value": val}, **spk_info(spk)))
-    r.u32()
-    raw = r.b[start:r.o]
-    return {"txid": sha256d(raw)[::-1].hex(), "vin": vin, "vout": vout, "size": len(raw)}
 
-def main():
-    if len(sys.argv) != 3:
-        print("usage: build-explorer.py <blk0001.dat> <out-dir>", file=sys.stderr); sys.exit(2)
-    blkpath, out = sys.argv[1], sys.argv[2]
-    data = open(blkpath, 'rb').read()
-    blocks = {}; o = 0; n = len(data)
-    while o + 8 <= n:
-        if data[o:o+4] != MAGIC: o += 1; continue
-        o += 4; size = struct.unpack('<I', data[o:o+4])[0]; o += 4
-        blk = data[o:o+size]; o += size
-        if len(blk) < 80: continue
-        h = sha256d(blk[:80])[::-1].hex()
-        r = R(blk, 0)
-        ver = r.i32(); prev = r.u(32)[::-1].hex(); merk = r.u(32)[::-1].hex()
-        t = r.u32(); bits = r.u32(); nonce = r.u32()
-        ntx = r.cs(); txs = []
-        try:
-            for _ in range(ntx): txs.append(parse_tx(r))
-        except Exception:
-            continue
-        blocks[h] = {"hash": h, "prev": prev, "merkleRoot": merk, "version": ver,
-                     "time": t, "bits": bits, "nonce": nonce, "size": size, "txs": txs}
-    if not blocks:
-        print("no blocks parsed", file=sys.stderr); sys.exit(1)
+def explorer_tx(tx):
+    vin = []
+    for txin in tx["vin"]:
+        coinbase = (
+            txin["prevout_hash"] == "0" * 64
+            and txin["prevout_n"] == 0xFFFFFFFF
+        )
+        vin.append({
+            "coinbase": coinbase,
+            "prev": None if coinbase else txin["prevout_hash"],
+            "vout": None if coinbase else txin["prevout_n"],
+        })
+    vout = []
+    for out in tx["vout"]:
+        vout.append(dict({"value": out["value_satoshis"]}, **spk_info(out["script_pub_key_hex"])))
+    return {"txid": tx["txid"], "vin": vin, "vout": vout, "size": len(chain.ser_tx(tx))}
 
-    hc = {}
-    def height(h):
-        chain = []; cur = h
-        while cur in blocks and cur not in hc:
-            chain.append(cur); cur = blocks[cur]["prev"]
-        base = hc.get(cur, 0)
-        for hh in reversed(chain): base += 1; hc[hh] = base
-        return hc[h]
-    for h in blocks: height(h)
-    tip = max(blocks, key=lambda h: hc[h])
-    chain = []; cur = tip
-    while cur in blocks: chain.append(cur); cur = blocks[cur]["prev"]
-    chain.reverse()
 
-    os.makedirs(os.path.join(out, "block"), exist_ok=True)
+def parse_args(argv):
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--datadir", help="Bitflash data directory containing blk*.dat")
+    ap.add_argument("--max-blocks", type=int, default=0,
+                    help="number of blocks to scan; 0 means all block files")
+    ap.add_argument("paths", nargs="+",
+                    help="with --datadir: <out-dir>; otherwise: <blk*.dat>... <out-dir>")
+    args = ap.parse_args(argv)
+    if args.datadir:
+        if len(args.paths) != 1:
+            raise SystemExit("usage with --datadir: build-explorer.py --datadir DATADIR <out-dir>")
+        args.block_files = None
+        args.out_dir = args.paths[0]
+    else:
+        if len(args.paths) < 2:
+            raise SystemExit("usage: build-explorer.py <blk*.dat>... <out-dir>")
+        args.block_files = args.paths[:-1]
+        args.out_dir = args.paths[-1]
+    return args
+
+
+def load_blocks(args):
+    if args.datadir:
+        return chain.read_blocks(args.datadir, args.max_blocks)
+    return chain.read_blocks_from_files(args.block_files, args.max_blocks)
+
+
+def build_explorer(raw_blocks, out_dir):
+    try:
+        blocks = chain.select_main_chain(raw_blocks)
+    except chain.ParseError as e:
+        raise SystemExit(str(e))
+    out = Path(out_dir)
+    (out / "block").mkdir(parents=True, exist_ok=True)
+
     summaries = []
-    for h in chain:
-        b = blocks[h]; H = hc[h]
-        cb = b["txs"][0]["vout"][0] if b["txs"] and b["txs"][0]["vout"] else {}
-        summaries.append({"height": H, "hash": h, "time": b["time"], "nTx": len(b["txs"]),
-                          "size": b["size"], "cbValue": cb.get("value", 0), "cbAddr": cb.get("address", "")})
-        json.dump(dict({"height": H}, **b), open(os.path.join(out, "block", "%d.json" % H), "w"), separators=(',', ':'))
+    for height, block in enumerate(blocks):
+        txs = [explorer_tx(tx) for tx in block["transactions"]]
+        detail = {
+            "height": height,
+            "hash": block["hash"],
+            "prev": block["previous_hash"],
+            "merkleRoot": block["merkle_root"],
+            "version": block["version"],
+            "time": block["time"],
+            "bits": int(block["bits"], 16),
+            "nonce": block["nonce"],
+            "size": block["size"],
+            "txs": txs,
+        }
+        cb = txs[0]["vout"][0] if txs and txs[0]["vout"] else {}
+        summaries.append({
+            "height": height,
+            "hash": block["hash"],
+            "time": block["time"],
+            "nTx": len(txs),
+            "size": block["size"],
+            "cbValue": cb.get("value", 0),
+            "cbAddr": cb.get("address", ""),
+        })
+        (out / "block" / ("%d.json" % height)).write_text(
+            json.dumps(detail, sort_keys=True, separators=(",", ":")) + "\n",
+            encoding="ascii",
+        )
+
     summaries.sort(key=lambda x: -x["height"])
-    json.dump({"network": "bitflash", "tipHeight": hc[tip], "count": len(chain), "blocks": summaries},
-              open(os.path.join(out, "blocks.json"), "w"), separators=(',', ':'))
-    open(os.path.join(out, "index.html"), "w").write(INDEX_HTML)
-    print("explorer built: %d main-chain blocks, tip %d, into %s" % (len(chain), hc[tip], out))
+    (out / "blocks.json").write_text(
+        json.dumps({
+            "network": "bitflash",
+            "tipHeight": len(blocks) - 1,
+            "count": len(blocks),
+            "blocks": summaries,
+        }, sort_keys=True, separators=(",", ":")) + "\n",
+        encoding="ascii",
+    )
+    (out / "index.html").write_text(INDEX_HTML, encoding="utf-8")
+    return len(blocks), len(blocks) - 1
+
+
+def main(argv):
+    args = parse_args(argv)
+    raw_blocks = load_blocks(args)
+    if not raw_blocks:
+        raise SystemExit("no Bitflash blocks parsed")
+    count, tip = build_explorer(raw_blocks, args.out_dir)
+    print("explorer built: %d main-chain blocks, tip %d, into %s" % (count, tip, args.out_dir))
+    return 0
 
 
 INDEX_HTML = r"""<!doctype html>
@@ -144,6 +171,7 @@ INDEX_HTML = r"""<!doctype html>
   body { font: 15px/1.5 system-ui, sans-serif; margin:0; background:var(--bg); color:var(--fg); }
   header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
   h1 { font-size:18px; margin:0; }
+  h2 { font-size:16px; }
   .mut { color:var(--mut); }
   .wrap { padding:16px 24px; max-width:1100px; margin:0 auto; }
   input { width:100%; max-width:420px; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); font-size:14px; }
@@ -154,7 +182,6 @@ INDEX_HTML = r"""<!doctype html>
   tr.blk:hover td { background:var(--card); }
   code { font-size:12px; word-break:break-all; }
   .scroll { overflow-x:auto; }
-  a { color:var(--acc); text-decoration:none; }
   .card { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:14px 16px; margin-top:12px; }
   .kv { display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:13px; }
   .kv div:nth-child(odd){ color:var(--mut); }
@@ -174,7 +201,7 @@ INDEX_HTML = r"""<!doctype html>
   <button class="link" id="home" style="display:none">back to blocks</button>
 </header>
 <div class="wrap">
-  <p class="note">Read-only view of the main chain: blocks, their transactions, and the coinbase payout. There is no mempool and no per-address history here. On Bitflash the coinbase payout key rotates every block, so an address index would say almost nothing; what matters is that every block and every coinbase is here to check.</p>
+  <p class="note">Read-only view of the main chain: blocks, their transactions, and the coinbase payout. There is no mempool and no per-address history here.</p>
   <div id="listview">
     <input id="q" placeholder="Search by height or block hash">
     <div class="scroll"><table>
@@ -186,52 +213,114 @@ INDEX_HTML = r"""<!doctype html>
   <div id="detail" style="display:none"></div>
 </div>
 <script>
-var SUM = [], BYH = {}, SHOWN = 200;
+var SUM = [], SHOWN = 200;
 function btf(sat){ return (sat/1e8).toFixed(8).replace(/0+$/,'').replace(/\.$/,'')+" BTF"; }
 function ts(t){ return new Date(t*1000).toISOString().replace('T',' ').replace('.000Z',' UTC'); }
-function esc(s){ return String(s).replace(/[&<>]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c];}); }
-function short(h){ return h ? h.slice(0,10)+"…"+h.slice(-6) : "-"; }
-
-function renderList(filter){
-  var q=(filter||"").trim().toLowerCase(), rows=document.getElementById('rows'), out="";
-  var list = q ? SUM.filter(function(b){ return String(b.height)===q || b.hash.indexOf(q)===0; }) : SUM.slice(0,SHOWN);
-  for(var i=0;i<list.length;i++){ var b=list[i];
-    out += '<tr class="blk" data-h="'+b.height+'"><td>'+b.height+'</td><td>'+ts(b.time)+'</td><td>'+b.nTx+'</td><td>'+b.size+' B</td><td>'+btf(b.cbValue)+'</td><td><code>'+(b.cbAddr?esc(b.cbAddr):'-')+'</code></td></tr>';
-  }
-  rows.innerHTML = out || '<tr><td colspan="6" class="mut">no match</td></tr>';
-  document.getElementById('more').textContent = (!q && SUM.length>SHOWN) ? ("showing latest "+SHOWN+" of "+SUM.length+" blocks; search to find any") : "";
-  Array.prototype.forEach.call(rows.querySelectorAll('tr.blk'), function(tr){ tr.onclick=function(){ openBlock(tr.getAttribute('data-h')); }; });
+function short(h){ return h ? h.slice(0,10)+"..."+h.slice(-6) : "-"; }
+function E(tag, cls, text){
+  var e = document.createElement(tag);
+  if(cls) e.className = cls;
+  if(text !== undefined) e.textContent = text;
+  return e;
 }
-function ioSide(title, items, html){
-  var s='<div><div class="mut">'+title+'</div>'; for(var i=0;i<items.length;i++){ s+=html(items[i]); } return s+'</div>';
+function code(text){ return E('code', '', text); }
+function clear(e){ while(e.firstChild) e.removeChild(e.firstChild); }
+function append(parent){
+  for(var i=1;i<arguments.length;i++) parent.appendChild(arguments[i]);
+  return parent;
+}
+function row(cells, cls){
+  var tr = E('tr', cls || '');
+  cells.forEach(function(c){ append(tr, E('td', '', c)); });
+  return tr;
+}
+function renderList(filter){
+  var q=(filter||"").trim().toLowerCase(), rows=document.getElementById('rows');
+  clear(rows);
+  var list = q ? SUM.filter(function(b){ return String(b.height)===q || b.hash.indexOf(q)===0; }) : SUM.slice(0,SHOWN);
+  if(!list.length){
+    var empty = E('tr');
+    var td = E('td', 'mut', 'no match');
+    td.colSpan = 6;
+    append(empty, td); append(rows, empty);
+  }
+  list.forEach(function(b){
+    var tr = row([String(b.height), ts(b.time), String(b.nTx), b.size+' B', btf(b.cbValue), ''], 'blk');
+    tr.dataset.h = b.height;
+    clear(tr.children[5]);
+    append(tr.children[5], code(b.cbAddr || '-'));
+    tr.onclick = function(){ openBlock(tr.dataset.h); };
+    append(rows, tr);
+  });
+  document.getElementById('more').textContent = (!q && SUM.length>SHOWN) ? ("showing latest "+SHOWN+" of "+SUM.length+" blocks; search to find any") : "";
+}
+function kv(parent, key, value, isCode){
+  append(parent, E('div', '', key));
+  append(parent, isCode ? append(E('div'), code(value)) : E('div', '', value));
+}
+function ioSide(title, items, render){
+  var side = E('div');
+  append(side, E('div', 'mut', title));
+  items.forEach(function(item){ append(side, render(item)); });
+  return side;
 }
 function openBlock(h){
   fetch('block/'+h+'.json').then(function(r){return r.json();}).then(function(b){
-    var s='<div class="card"><div class="kv">'+
-      '<div>Height</div><div>'+b.height+'</div>'+
-      '<div>Hash</div><div><code>'+esc(b.hash)+'</code></div>'+
-      '<div>Previous</div><div><button class="link" onclick="openBlock('+(b.height-1)+')"><code>'+esc(short(b.prev))+'</code></button></div>'+
-      '<div>Merkle root</div><div><code>'+esc(b.merkleRoot)+'</code></div>'+
-      '<div>Time (UTC)</div><div>'+ts(b.time)+'</div>'+
-      '<div>Bits / Nonce</div><div>'+b.bits.toString(16)+' / '+b.nonce+'</div>'+
-      '<div>Size / Txs</div><div>'+b.size+' B / '+b.txs.length+'</div>'+
-      '</div></div>';
-    for(var i=0;i<b.txs.length;i++){ var t=b.txs[i];
-      s+='<div class="tx"><div><code>'+esc(t.txid)+'</code> '+(i===0?'<span class="pill">coinbase</span>':'')+'</div><div class="io">';
-      s+=ioSide('Inputs', t.vin, function(v){ return '<div>'+(v.coinbase?'<span class="pill">coinbase</span>':'<code>'+esc(short(v.prev))+':'+v.vout+'</code>')+'</div>'; });
-      s+=ioSide('Outputs', t.vout, function(o){ var to=o.address?esc(o.address):(o.pubkey?'pubkey '+esc(o.pubkey.slice(0,16))+'…':esc(o.type)); return '<div>'+btf(o.value)+' → <code>'+to+'</code></div>'; });
-      s+='</div></div>';
+    var detail = document.getElementById('detail');
+    clear(detail);
+    append(detail, E('h2', '', 'Block '+b.height));
+    var card = E('div', 'card'), grid = E('div', 'kv');
+    kv(grid, 'Height', String(b.height));
+    kv(grid, 'Hash', b.hash, true);
+    var prev = E('div');
+    if(b.height > 0){
+      var btn = E('button', 'link');
+      append(btn, code(short(b.prev)));
+      btn.onclick = function(){ openBlock(b.height - 1); };
+      append(prev, btn);
+    } else {
+      append(prev, code(short(b.prev)));
     }
+    append(grid, E('div', '', 'Previous'), prev);
+    kv(grid, 'Merkle root', b.merkleRoot, true);
+    kv(grid, 'Time (UTC)', ts(b.time));
+    kv(grid, 'Bits / Nonce', b.bits.toString(16)+' / '+b.nonce);
+    kv(grid, 'Size / Txs', b.size+' B / '+b.txs.length);
+    append(card, grid); append(detail, card);
+    b.txs.forEach(function(t, i){
+      var tx = E('div', 'tx');
+      var head = E('div');
+      append(head, code(t.txid));
+      if(i === 0) append(head, E('span', 'pill', 'coinbase'));
+      var io = E('div', 'io');
+      append(io, ioSide('Inputs', t.vin, function(v){
+        var d = E('div');
+        if(v.coinbase) append(d, E('span', 'pill', 'coinbase'));
+        else append(d, code(short(v.prev)+':'+v.vout));
+        return d;
+      }));
+      append(io, ioSide('Outputs', t.vout, function(o){
+        var d = E('div');
+        var to = o.address ? o.address : (o.pubkey ? 'pubkey '+o.pubkey.slice(0,16)+'...' : o.type);
+        append(d, document.createTextNode(btf(o.value)+' -> '), code(to));
+        return d;
+      }));
+      append(tx, head, io); append(detail, tx);
+    });
     document.getElementById('listview').style.display='none';
-    var d=document.getElementById('detail'); d.style.display='block'; d.innerHTML='<h2 style="font-size:16px">Block '+b.height+'</h2>'+s;
+    detail.style.display='block';
     document.getElementById('home').style.display='inline';
     window.scrollTo(0,0);
   });
 }
-document.getElementById('home').onclick=function(){ document.getElementById('detail').style.display='none'; document.getElementById('listview').style.display='block'; this.style.display='none'; };
+document.getElementById('home').onclick=function(){
+  document.getElementById('detail').style.display='none';
+  document.getElementById('listview').style.display='block';
+  this.style.display='none';
+};
 document.getElementById('q').oninput=function(){ renderList(this.value); };
 fetch('blocks.json').then(function(r){return r.json();}).then(function(d){
-  SUM=d.blocks; document.getElementById('tip').textContent='tip height '+d.tipHeight+' · '+d.count+' blocks';
+  SUM=d.blocks; document.getElementById('tip').textContent='tip height '+d.tipHeight+' - '+d.count+' blocks';
   renderList('');
 });
 </script>
@@ -239,5 +328,6 @@ fetch('blocks.json').then(function(r){return r.json();}).then(function(d){
 </html>
 """
 
+
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main(sys.argv[1:]))
