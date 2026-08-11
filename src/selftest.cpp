@@ -7,6 +7,7 @@
 
 #include "headers_core.h"
 #include "bip32.h"
+#include "proxy.h"
 #include "selftest.h"
 #include "walletcmd.h"
 
@@ -1253,6 +1254,43 @@ static int RunParseMoneySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunSocks5ProxySelfTest()
+{
+    printf("socks5-proxy self-test\n");
+    int nFail = 0;
+    std::string host, err;
+    unsigned short port = 0;
+
+    nFail += Check(BtfParseSocks5Proxy("127.0.0.1:9050", host, port, err) &&
+                   host == "127.0.0.1" && port == 9050,
+                   "parses local Tor proxy endpoint") ? 0 : 1;
+    nFail += Check(BtfParseSocks5Proxy("localhost:9050", host, port, err) &&
+                   host == "localhost" && port == 9050,
+                   "parses hostname proxy endpoint") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost", host, port, err),
+                   "rejects missing port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost:0", host, port, err),
+                   "rejects zero port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost:70000", host, port, err),
+                   "rejects out-of-range port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("user:pass@localhost:9050", host, port, err),
+                   "rejects unsupported authenticated proxy syntax") ? 0 : 1;
+
+    BtfClearSocks5Proxy();
+    nFail += Check(!BtfSocks5ProxyEnabled(), "starts disabled after clear") ? 0 : 1;
+    nFail += Check(BtfSetSocks5Proxy("127.0.0.1:9050", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfSocks5ProxyName() == "127.0.0.1:9050",
+                   "enables parsed SOCKS5 proxy") ? 0 : 1;
+    BtfClearSocks5Proxy();
+    nFail += Check(!BtfSocks5ProxyEnabled(), "clear disables proxy") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -1275,8 +1313,10 @@ int RunSelfTest(const std::string& name)
         return RunPoolStratumSelfTest();
     if (name == "parse-money")
         return RunParseMoneySelfTest();
+    if (name == "socks5-proxy")
+        return RunSocks5ProxySelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy\n");
     return 1;
 }

@@ -1,6 +1,7 @@
 // Bitflash entry point -- starts node threads then runs GUI (or headless).
 
 #include "headers_core.h"
+#include "proxy.h"
 #include "selftest.h"
 #include "walletcmd.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
@@ -110,7 +111,8 @@ static void PrintUsage()
     printf("  /debug\n");
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
-    printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, or wallet-encrypt\n");
+    printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt,\n");
+    printf("            net-message, consensus-limits, pool-stratum, parse-money, or socks5-proxy\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -135,6 +137,7 @@ static void PrintUsage()
     printf("\n");
     printf("Network:\n");
     printf("  /port=N                    (P2P listen port, default 8433)\n");
+    printf("  /socks=HOST:PORT           (SOCKS5 proxy for outbound Nostr and .btf relay dials)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -281,6 +284,17 @@ static void ParseStartupArguments(int argc, char* argv[])
     string announceRelay = argval2(argc, argv, "/announcerelay", "-announcerelay");
     if (!announceRelay.empty())
         strBtfAnnounceRelay = announceRelay;
+
+    string socksProxy = argval2(argc, argv, "/socks", "-socks");
+    if (!socksProxy.empty())
+    {
+        string err;
+        if (!BtfSetSocks5Proxy(socksProxy, err))
+            fprintf(stderr, "Ignoring /socks=%s: %s\n", socksProxy.c_str(), err.c_str());
+        else
+            fprintf(stderr, "SOCKS5 proxy enabled for outbound discovery/relay dials: %s\n",
+                    BtfSocks5ProxyName().c_str());
+    }
 
     // /btfseed=ADDRESS:ENCHEX -- extra bootstrap peers, repeatable. Useful for
     // testing the seed path and for private networks that ship no compiled list.

@@ -310,6 +310,7 @@ Other options worth knowing:
 ```bash
 -datadir=PATH    # wallet and chain data elsewhere
 -port=N          # P2P listen port, default 8433
+-socks=HOST:PORT # SOCKS5 for outbound Nostr and .btf rendezvous dials
 -debug           # verbose log; without it debug.log is nearly silent
 -help            # full list
 ```
@@ -317,6 +318,11 @@ Other options worth knowing:
 `-port` plus `-datadir` is what lets two nodes share one machine. Both are
 needed — the data directory takes an exclusive lock, so a second node pointed at
 the same one will refuse to start.
+
+`-socks=127.0.0.1:9050` routes outbound Nostr discovery and `.btf` rendezvous
+dials through a local SOCKS5 proxy such as Tor. When it is set, the node skips
+plain HTTP external-IP probes instead of leaking a direct request outside the
+proxy.
 
 ### When something looks wrong
 

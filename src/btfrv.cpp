@@ -5,6 +5,9 @@
 // Windows/Winsock implementation (Layer 6 will #ifdef this for Linux/BSD sockets).
 
 #include "btfrv.h"
+#ifdef BITFLASH_NODE_BUILD
+#include "proxy.h"
+#endif
 
 // Portable sockets: Winsock on Windows, BSD sockets on Linux/POSIX (for the
 // headless relay `bitflashd` that runs on the VPS).
@@ -92,6 +95,11 @@ static bool WriteN(SOCKET s, const void* buf, int n)
 
 static SOCKET ConnectTo(const char* host, unsigned short port)
 {
+#ifdef BITFLASH_NODE_BUILD
+    SOCKET s = BtfConnectSocket(host, port, SOCK_RV_DIAL, 10);
+    if (s == INVALID_SOCKET)
+        return INVALID_SOCKET;
+#else
     struct addrinfo hints, *res = NULL;
     memset(&hints, 0, sizeof(hints));
     hints.ai_family = AF_INET;
@@ -119,6 +127,7 @@ static SOCKET ConnectTo(const char* host, unsigned short port)
         CLOSESOCK(s); freeaddrinfo(res); return INVALID_SOCKET;
     }
     freeaddrinfo(res);
+#endif
 
     // Clear the timeout -- the socket is now a live tunnel and must not
     // time out when idle. recv() will block until data arrives or peer closes.
