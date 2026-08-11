@@ -289,6 +289,11 @@ static void ParseStartupArguments(int argc, char* argv[])
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
     if (fTorMode)
     {
+        string socksProxy = argval2(argc, argv, "/socks", "-socks");
+        if (!socksProxy.empty())
+            fprintf(stderr, "Warning: /tor takes precedence over /socks=%s\n",
+                    socksProxy.c_str());
+
         string torProxy = argval2(argc, argv, "/tor", "-tor");
         string err;
         if (!BtfEnableTorProxy(torProxy, err))
