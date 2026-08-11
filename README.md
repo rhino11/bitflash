@@ -73,6 +73,17 @@ scripts/verify-release.sh latest
 See [release verification](docs/release-verification.md) for the full release
 audit flow and the maintainer signing step.
 
+Bitflash also ships a deterministic fair-launch verifier:
+
+```bash
+python3 scripts/verify-fair-launch.py --max-blocks 1000 --out bitflash-fair-launch-report.json --json
+```
+
+The report reads the local chain directly, checks the genesis launch baseline,
+and produces canonical JSON whose hash can be compared by independent auditors
+or timestamped externally with OpenTimestamps. See
+[fair-launch verification](docs/fair-launch.md).
+
 **Keep your node current.** Consensus rules have changed since the first
 releases — 1.2.1 fixed a bug that let anyone spend anyone's coins, and 1.2.2
 added a per-block signature-operation cap. A node on an older build will accept
