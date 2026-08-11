@@ -1218,6 +1218,41 @@ static int RunConsensusLimitsSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunParseMoneySelfTest()
+{
+    printf("parse-money self-test\n");
+    int nFail = 0;
+    struct Case { const char* in; bool ok; int64 val; };
+    Case cases[] = {
+        {"0.5", true, 50000000LL},
+        {"1", true, 100000000LL},
+        {"1.23456789", true, 123456789LL},
+        {"0.00000001", true, 1LL},
+        {"10.00000000", true, 1000000000LL},
+        {"1,000", true, 100000000000LL},
+        {"1.5 ", true, 150000000LL},
+        {"0.123456789", false, 0LL},
+        {"1.2.3", false, 0LL},
+        {"abc", false, 0LL},
+        {"-1", false, 0LL},
+        {"1e5", false, 0LL},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++)
+    {
+        int64 v = -1;
+        bool r = ParseMoney(cases[i].in, v);
+        bool pass = (r == cases[i].ok) && (!r || v == cases[i].val);
+        char desc[160];
+        snprintf(desc, sizeof(desc), "ParseMoney(\"%s\") %s and value matches",
+                 cases[i].in, cases[i].ok ? "accepts" : "rejects");
+        nFail += Check(pass, desc) ? 0 : 1;
+    }
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -1238,6 +1273,8 @@ int RunSelfTest(const std::string& name)
         return RunConsensusLimitsSelfTest();
     if (name == "pool-stratum")
         return RunPoolStratumSelfTest();
+    if (name == "parse-money")
+        return RunParseMoneySelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
     printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum\n");

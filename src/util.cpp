@@ -337,7 +337,7 @@ string FormatMoney(int64 n, bool fPlus)
 bool ParseMoney(const char* pszIn, int64& nRet)
 {
     string strWhole;
-    int64 nCents = 0;
+    int64 nUnits = 0;                 // fractional part, scaled to COIN (8 decimals)
     const char* p = pszIn;
     while (isspace(*p))
         p++;
@@ -348,12 +348,16 @@ bool ParseMoney(const char* pszIn, int64& nRet)
         if (*p == '.')
         {
             p++;
-            if (!isdigit(p[0]) || !isdigit(p[1]))
+            int64 nMult = COIN / 10;  // weight of the first decimal digit
+            while (isdigit(*p) && nMult > 0)
+            {
+                nUnits += nMult * (*p - '0');
+                nMult /= 10;
+                p++;
+            }
+            // reject more than 8 fractional digits rather than silently truncate
+            if (isdigit(*p))
                 return false;
-            nCents = atoi64(p);
-            if (nCents < 0 || nCents > 99)
-                return false;
-            p += 2;
             break;
         }
         if (isspace(*p))
@@ -365,13 +369,12 @@ bool ParseMoney(const char* pszIn, int64& nRet)
     for (; *p; p++)
         if (!isspace(*p))
             return false;
-    if (strWhole.size() > 17)
+    if (strWhole.size() > 10)         // 10 whole digits * COIN stays within int64
         return false;
     int64 nWhole = atoi64(strWhole);
-    int64 nValue = nWhole * 100 + nCents;
-    if (nValue / 100 != nWhole)
+    int64 nValue = nWhole * COIN + nUnits;
+    if (nValue < 0 || (nValue - nUnits) / COIN != nWhole)
         return false;
-    nValue *= CENT;
     nRet = nValue;
     return true;
 }

@@ -192,5 +192,6 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=net-message
 	./bitflash-node -selftest=consensus-limits
 	./bitflash-node -selftest=pool-stratum
+	./bitflash-node -selftest=parse-money
 
 .PHONY: tests fuzz-net-message-smoke fuzz-script-smoke
