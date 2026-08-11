@@ -1474,6 +1474,11 @@ static int RunSocks5ProxySelfTest()
                    "rejects overflowing port") ? 0 : 1;
     nFail += Check(!BtfParseSocks5Proxy("user:pass@localhost:9050", host, port, err),
                    "rejects unsupported authenticated proxy syntax") ? 0 : 1;
+    nFail += Check(BtfIsTorOnionHost("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd.onion") &&
+                   BtfIsTorOnionHost("Relay.Example.ONION.") &&
+                   !BtfIsTorOnionHost("relay.example") &&
+                   !BtfIsTorOnionHost(".onion"),
+                   "detects .onion hosts without accepting lookalikes") ? 0 : 1;
 
     BtfClearSocks5Proxy();
     nFail += Check(!BtfSocks5ProxyEnabled(), "starts disabled after clear") ? 0 : 1;
@@ -1488,6 +1493,26 @@ static int RunSocks5ProxySelfTest()
                    BtfSocks5ProxyEnabled() &&
                    BtfSocks5ProxyName() == "[::1]:9050",
                    "enables bracketed IPv6 proxy endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfEnableTorProxy("", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfTorProxyEnabled() &&
+                   BtfSocks5ProxyName() == "127.0.0.1:9050",
+                   "enables Tor mode on the default local SOCKS5 endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfEnableTorProxy("[::1]:9050", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfTorProxyEnabled() &&
+                   BtfSocks5ProxyName() == "[::1]:9050",
+                   "enables Tor mode on a custom IPv6 endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfSetSocks5Proxy("127.0.0.1:9051", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   !BtfTorProxyEnabled(),
+                   "plain SOCKS5 mode is distinct from Tor mode") ? 0 : 1;
     BtfClearSocks5Proxy();
 
     std::string handshakeErr;

@@ -21,8 +21,11 @@
 bool BtfParseSocks5Proxy(const std::string& spec, std::string& hostOut,
                          unsigned short& portOut, std::string& errOut);
 bool BtfSetSocks5Proxy(const std::string& spec, std::string& errOut);
+bool BtfEnableTorProxy(const std::string& spec, std::string& errOut);
 void BtfClearSocks5Proxy();
 bool BtfSocks5ProxyEnabled();
+bool BtfTorProxyEnabled();
+bool BtfIsTorOnionHost(const std::string& host);
 std::string BtfSocks5ProxyName();
 
 SOCKET BtfConnectSocket(const std::string& destHost, unsigned short destPort,

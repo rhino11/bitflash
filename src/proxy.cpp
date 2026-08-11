@@ -9,8 +9,10 @@
 
 static CCriticalSection cs_socks5;
 static bool g_fSocks5Proxy = false;
+static bool g_fTorProxy = false;
 static std::string g_socks5Host;
 static unsigned short g_socks5Port = 0;
+static const char* DEFAULT_TOR_SOCKS5_PROXY = "127.0.0.1:9050";
 
 static void SetSocketTimeout(SOCKET s, int nTimeoutSecs)
 {
@@ -65,6 +67,24 @@ static bool ValidProxyHostChar(char c)
 static bool ValidProxyIpv6HostChar(char c)
 {
     return isxdigit((unsigned char)c) || c == ':' || c == '.';
+}
+
+static std::string LowerProxyHost(std::string host)
+{
+    if (!host.empty() && host[host.size() - 1] == '.')
+        host.erase(host.size() - 1);
+    for (size_t i = 0; i < host.size(); i++)
+        host[i] = (char)tolower((unsigned char)host[i]);
+    return host;
+}
+
+bool BtfIsTorOnionHost(const std::string& host)
+{
+    std::string lower = LowerProxyHost(host);
+    static const char* suffix = ".onion";
+    size_t suffixLen = strlen(suffix);
+    return lower.size() > suffixLen &&
+           lower.compare(lower.size() - suffixLen, suffixLen, suffix) == 0;
 }
 
 static bool ParsePort(const std::string& port, unsigned short& portOut,
@@ -176,7 +196,8 @@ bool BtfParseSocks5Proxy(const std::string& spec, std::string& hostOut,
     return true;
 }
 
-bool BtfSetSocks5Proxy(const std::string& spec, std::string& errOut)
+static bool SetSocks5Proxy(const std::string& spec, bool fTorMode,
+                           std::string& errOut)
 {
     std::string host;
     unsigned short port = 0;
@@ -187,8 +208,19 @@ bool BtfSetSocks5Proxy(const std::string& spec, std::string& errOut)
         g_socks5Host = host;
         g_socks5Port = port;
         g_fSocks5Proxy = true;
+        g_fTorProxy = fTorMode;
     }
     return true;
+}
+
+bool BtfSetSocks5Proxy(const std::string& spec, std::string& errOut)
+{
+    return SetSocks5Proxy(spec, false, errOut);
+}
+
+bool BtfEnableTorProxy(const std::string& spec, std::string& errOut)
+{
+    return SetSocks5Proxy(spec.empty() ? DEFAULT_TOR_SOCKS5_PROXY : spec, true, errOut);
 }
 
 void BtfClearSocks5Proxy()
@@ -196,6 +228,7 @@ void BtfClearSocks5Proxy()
     CRITICAL_BLOCK(cs_socks5)
     {
         g_fSocks5Proxy = false;
+        g_fTorProxy = false;
         g_socks5Host.clear();
         g_socks5Port = 0;
     }
@@ -205,6 +238,13 @@ bool BtfSocks5ProxyEnabled()
 {
     CRITICAL_BLOCK(cs_socks5)
         return g_fSocks5Proxy;
+    return false;
+}
+
+bool BtfTorProxyEnabled()
+{
+    CRITICAL_BLOCK(cs_socks5)
+        return g_fSocks5Proxy && g_fTorProxy;
     return false;
 }
 
@@ -315,7 +355,15 @@ SOCKET BtfConnectSocket(const std::string& destHost, unsigned short destPort,
     }
 
     if (!fProxy)
+    {
+        if (BtfIsTorOnionHost(destHost))
+        {
+            error("Refusing direct .onion connection to %s:%u; use /tor or /socks\n",
+                  destHost.c_str(), (unsigned)destPort);
+            return INVALID_SOCKET;
+        }
         return ConnectDirect(destHost, destPort, nSockSite, nTimeoutSecs);
+    }
 
     SOCKET s = ConnectDirect(proxyHost, proxyPort, nSockSite, nTimeoutSecs);
     if (s == INVALID_SOCKET)
