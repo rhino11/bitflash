@@ -248,6 +248,19 @@ SRBMiner-MULTI --algorithm randomx --pool 127.0.0.1:3333 --wallet YOUR_BTF_ADDRE
 xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ```
 
+Estimate rewards and electricity cost locally:
+
+```bash
+python3 scripts/bitflash-mining-calculator.py \
+  --hashrate 21 --hashrate-unit kh/s \
+  --network-hashrate 1.56 --network-hashrate-unit mh/s \
+  --watts 140 --kwh-cost 0.10 \
+  --price 0.001 --pool-fee 1
+```
+
+See [mining calculator](docs/mining-calculator.md). Price is manual until
+Bitflash has a reliable public market.
+
 ---
 
 ## Headless / server mode
