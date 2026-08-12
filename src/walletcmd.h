@@ -7,7 +7,9 @@
 #ifndef BITFLASH_WALLETCMD_H
 #define BITFLASH_WALLETCMD_H
 
+#include <map>
 #include <string>
+#include <vector>
 
 // Create a phrase for a wallet that does not have one, install the seed, and
 // show the words once. Refuses if a phrase already exists. Returns 0 on success.
@@ -40,6 +42,13 @@ bool RestoreScanReachedDepth(int nSchema,
                              unsigned int nChangeNext,
                              unsigned int nLegacyNext,
                              int nStopDepth);
+
+// Given the pubkeys derived while scanning a compatibility branch, return the
+// next index after the highest one that actually appears in wallet
+// transactions. The scan depth can be much larger than this; hdnext must record
+// use, not how far a restore looked ahead.
+unsigned int WalletLastUsedPubKeyIndexNext(
+    const std::map<unsigned int, std::vector<unsigned char> >& mapPubKeysByIndex);
 
 // Take the next address from the key pool and print it. With a recovery phrase
 // installed the address is derived, so the phrase can bring back whatever is

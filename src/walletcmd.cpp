@@ -54,6 +54,37 @@ bool RestoreScanReachedDepth(int nSchema,
     return nLegacyNext >= nDepth;
 }
 
+unsigned int WalletLastUsedPubKeyIndexNext(
+    const std::map<unsigned int, std::vector<unsigned char> >& mapPubKeysByIndex)
+{
+    std::map<std::vector<unsigned char>, unsigned int> mapIndexByPubKey;
+    for (std::map<unsigned int, std::vector<unsigned char> >::const_iterator it =
+             mapPubKeysByIndex.begin();
+         it != mapPubKeysByIndex.end(); ++it)
+        mapIndexByPubKey[it->second] = it->first;
+
+    unsigned int nNext = 0;
+    CRITICAL_BLOCK(cs_mapWallet)
+    {
+        for (map<uint256, CWalletTx>::iterator it = mapWallet.begin();
+             it != mapWallet.end(); ++it)
+        {
+            CWalletTx& wtx = (*it).second;
+            for (int i = 0; i < (int)wtx.vout.size(); i++)
+            {
+                vector<unsigned char> vchPubKey;
+                if (!ExtractPubKey(wtx.vout[i].scriptPubKey, false, vchPubKey))
+                    continue;
+                std::map<std::vector<unsigned char>, unsigned int>::const_iterator mi =
+                    mapIndexByPubKey.find(vchPubKey);
+                if (mi != mapIndexByPubKey.end() && mi->second + 1 > nNext)
+                    nNext = mi->second + 1;
+            }
+        }
+    }
+    return nNext;
+}
+
 int CmdNewPhrase()
 {
     AttachTerminal();
@@ -132,7 +163,10 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
     // Derive forward in batches, scanning after each, until a whole batch turns
     // up nothing. Every derived key is written to the wallet before the scan,
     // because the scan asks the wallet what belongs to it.
-    int nTotalDerived = nHDKeySchema == HD_SCHEMA_BIP44
+    const bool fRestoreBIP44 = nHDKeySchema == HD_SCHEMA_BIP44;
+    unsigned int nLegacyScanNext = nHDNext;
+    std::map<unsigned int, vector<unsigned char> > mapLegacyScanPubKeys;
+    int nTotalDerived = fRestoreBIP44
         ? (int)(nHDReceiveNext + nHDChangeNext)
         : (int)nHDNext;
     int nStopDepth = max(nMinDepth, RESTORE_MIN_SCAN);
@@ -151,7 +185,7 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             nWalletBefore = mapWallet.size();
 
         std::string strDeriveError;
-        if (nHDKeySchema == HD_SCHEMA_BIP44)
+        if (fRestoreBIP44)
         {
             for (int i = 0; i < RESTORE_BATCH; i++)
             {
@@ -182,15 +216,15 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             for (int i = 0; i < RESTORE_BATCH; i++)
             {
                 CKey key;
-                if (!DeriveHDKey(nHDNext, key, strDeriveError))
+                if (!DeriveHDKey(nLegacyScanNext, key, strDeriveError))
                     break;
                 if (!AddKey(key))
                     break;
-                nHDNext++;
+                mapLegacyScanPubKeys[nLegacyScanNext] = key.GetPubKey();
+                nLegacyScanNext++;
                 nTotalDerived++;
             }
             nHDKeySchema = nSavedSchema;
-            CWalletDB().WriteHDNext(nHDNext);
         }
         else
         {
@@ -208,6 +242,22 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
         }
 
         ScanForWalletTransactions(pindexGenesisBlock);
+
+        if (fRestoreBIP44)
+        {
+            // The legacy branch is scanned only for compatibility with phrases
+            // created before BIP44. Persist the last used legacy index + 1, not
+            // the lookahead depth. Otherwise a restore with no legacy hits can
+            // leave hdnext at RESTORE_MAX and make future compatibility scans
+            // look exhausted even though no legacy key was ever used.
+            unsigned int nLegacyUsedNext =
+                WalletLastUsedPubKeyIndexNext(mapLegacyScanPubKeys);
+            if (nLegacyUsedNext != nHDNext)
+            {
+                nHDNext = nLegacyUsedNext;
+                CWalletDB().WriteHDNext(nHDNext);
+            }
+        }
 
         size_t nWalletAfter = 0;
         CRITICAL_BLOCK(cs_mapWallet)
@@ -239,7 +289,7 @@ bool RestoreFromPhrase(const std::string& strMnemonic,
             RestoreScanReachedDepth(nHDKeySchema,
                                     nHDReceiveNext,
                                     nHDChangeNext,
-                                    nHDNext,
+                                    fRestoreBIP44 ? nLegacyScanNext : nHDNext,
                                     nStopDepth))
             break;
     }
