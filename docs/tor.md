@@ -25,6 +25,17 @@ bitflash -tor=127.0.0.1:9150
 bitflash -tor=[::1]:9050
 ```
 
+For a SOCKS5 proxy that is not Tor, use `-socks` directly:
+
+```bash
+bitflash -socks=127.0.0.1:9050
+bitflash -socks=[::1]:9050
+```
+
+If both `-tor` and `-socks` are present, Tor mode wins and the node prints a
+warning. That keeps a command line with `-tor` from silently becoming a custom
+proxy route.
+
 When Tor mode is enabled:
 
 - outbound Nostr relay dials use Tor;
@@ -33,6 +44,24 @@ When Tor mode is enabled:
   the local DNS resolver does not see them;
 - direct `.onion` dials are refused unless a SOCKS5/Tor proxy is enabled;
 - plain HTTP external-IP probes are skipped.
+
+Tor mode affects outbound discovery and relay dials. It does not encrypt
+`wallet.dat`, hide mining rewards on-chain, or change the `.btf` identity. A
+relay still sees the TCP client that connected to it; with Tor mode that client
+is the Tor exit or onion circuit endpoint instead of the user's direct IP.
+
+## What to test
+
+Use the public status page only as a rough health check. To prove the local node
+is using Tor/SOCKS, test from the node machine:
+
+```bash
+bitflash -tor -debug
+```
+
+Then confirm in `debug.log` that Nostr and rendezvous dials report the proxy
+path. A DNS leak test should show no local resolver lookup for relay hostnames:
+the SOCKS5 request uses the domain-name form and asks the proxy to resolve it.
 
 ## Onion rendezvous relay
 

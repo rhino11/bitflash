@@ -4,6 +4,7 @@
 import argparse
 import hashlib
 import json
+import shutil
 import sys
 from pathlib import Path
 
@@ -148,6 +149,11 @@ def build_explorer(raw_blocks, out_dir):
         encoding="ascii",
     )
     (out / "index.html").write_text(INDEX_HTML, encoding="utf-8")
+    (out / "style.css").write_text(STYLE_CSS, encoding="utf-8")
+    (out / "explorer.js").write_text(EXPLORER_JS, encoding="utf-8")
+    logo = Path(__file__).resolve().parents[1] / "docs" / "logo.png"
+    if logo.exists():
+        shutil.copyfile(logo, out / "logo.png")
     return len(blocks), len(blocks) - 1
 
 
@@ -167,43 +173,26 @@ INDEX_HTML = r"""<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Bitflash Block Explorer</title>
-<style>
-  :root { color-scheme: light dark; --bg:#fff; --fg:#111; --mut:#666; --line:#e2e2e2; --card:#fafafa; --acc:#2b6cb0; }
-  @media (prefers-color-scheme: dark){ :root{ --bg:#0e0f11; --fg:#e6e6e6; --mut:#9aa0a6; --line:#26282c; --card:#16181b; --acc:#63b3ed; } }
-  * { box-sizing: border-box; }
-  body { font: 15px/1.5 system-ui, sans-serif; margin:0; background:var(--bg); color:var(--fg); }
-  header { padding:20px 24px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
-  h1 { font-size:18px; margin:0; }
-  h2 { font-size:16px; }
-  .mut { color:var(--mut); }
-  .wrap { padding:16px 24px; max-width:1100px; margin:0 auto; }
-  input { width:100%; max-width:420px; padding:9px 12px; border:1px solid var(--line); border-radius:8px; background:var(--card); color:var(--fg); font-size:14px; }
-  table { width:100%; border-collapse:collapse; margin-top:12px; }
-  th,td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); font-variant-numeric:tabular-nums; }
-  th { font-size:12px; text-transform:uppercase; letter-spacing:.05em; color:var(--mut); }
-  tr.blk { cursor:pointer; }
-  tr.blk:hover td { background:var(--card); }
-  code { font-size:12px; word-break:break-all; }
-  .scroll { overflow-x:auto; }
-  .card { border:1px solid var(--line); border-radius:10px; background:var(--card); padding:14px 16px; margin-top:12px; }
-  .kv { display:grid; grid-template-columns:150px 1fr; gap:4px 12px; font-size:13px; }
-  .kv div:nth-child(odd){ color:var(--mut); }
-  .tx { border-top:1px solid var(--line); padding:10px 0; }
-  .io { display:grid; grid-template-columns:1fr 1fr; gap:16px; }
-  @media (max-width:640px){ .io{ grid-template-columns:1fr; } .kv{ grid-template-columns:110px 1fr; } }
-  .pill { display:inline-block; font-size:11px; padding:1px 7px; border-radius:99px; border:1px solid var(--line); color:var(--mut); }
-  button.link { background:none; border:none; color:var(--acc); cursor:pointer; font:inherit; padding:0; }
-  .note { color:var(--mut); font-size:13px; max-width:820px; }
-</style>
+<meta name="description" content="Read-only Bitflash block explorer generated from local blk*.dat files.">
+<link rel="icon" href="logo.png" type="image/png">
+<link rel="stylesheet" href="style.css">
+<script src="explorer.js" defer></script>
 </head>
 <body>
-<header>
-  <h1>Bitflash Block Explorer</h1>
-  <span class="mut" id="tip"></span>
-  <span style="flex:1"></span>
-  <button class="link" id="home" style="display:none">back to blocks</button>
+<header class="topbar">
+  <a class="brand" href="https://bitflash.network/"><img src="logo.png" width="22" height="22" alt="">Bitflash</a>
+  <nav aria-label="Bitflash sites">
+    <a href="https://bitflash.network/">home</a>
+    <a href="https://git.bitflash.network/bitflash/bitflash">code</a>
+    <a href="https://docs.bitflash.network/">docs</a>
+    <a href="https://releases.bitflash.network/">downloads</a>
+    <a href="https://explorer.bitflash.network/" aria-current="page">explorer</a>
+    <a href="https://status.bitflash.network/">status</a>
+  </nav>
+  <span class="meta" id="tip"></span>
 </header>
 <div class="wrap">
+  <h1>Block explorer <button class="link" id="home" hidden>back to blocks</button></h1>
   <p class="note">Read-only view of the main chain: blocks, their transactions, and the coinbase payout. There is no mempool and no per-address history here.</p>
   <div id="listview">
     <input id="q" placeholder="Search by height or block hash">
@@ -213,9 +202,63 @@ INDEX_HTML = r"""<!doctype html>
     </table></div>
     <p class="mut" id="more"></p>
   </div>
-  <div id="detail" style="display:none"></div>
+  <div id="detail" hidden></div>
 </div>
-<script>
+</body>
+</html>
+"""
+
+
+STYLE_CSS = r""":root{
+  color-scheme: light dark;
+  --bg:#fff; --bg-2:#f6f6f6; --fg:#111; --dim:#6b6b6b; --line:#d7d7d7; --line-hard:#111;
+  --accent:#0b7a34; --accent-2:#12a047; --bar:3rem;
+  --mono: ui-monospace,"Cascadia Mono","Segoe UI Mono",Consolas,"DejaVu Sans Mono","Liberation Mono","Courier New",monospace;
+}
+@media (prefers-color-scheme: dark){:root{
+  --bg:#000; --bg-2:#0b0b0b; --fg:#dcdcdc; --dim:#8a8a8a; --line:#242424; --line-hard:#4a4a4a;
+  --accent:#2ee06a; --accent-2:#6bff9f;
+}}
+*{box-sizing:border-box;}
+html,body{margin:0;background:var(--bg);color:var(--fg);font:15px/1.55 var(--mono);-webkit-text-size-adjust:100%;}
+a{color:var(--accent);}
+.topbar{display:flex;align-items:center;gap:1rem;flex-wrap:wrap;min-height:var(--bar);
+        padding:.5rem clamp(.9rem,2.5vw,3rem);border-bottom:1px solid var(--line);position:sticky;top:0;background:var(--bg);z-index:5;}
+.brand{display:flex;align-items:center;gap:.6rem;text-decoration:none;color:var(--fg);font-weight:bold;}
+.brand img{width:22px;height:22px;display:block;}
+.topbar nav{display:flex;flex-wrap:wrap;gap:.15rem 1.4rem;font-size:.86rem;}
+.topbar nav a{text-decoration:none;color:var(--dim);}
+.topbar nav a::before{content:"/";color:var(--line-hard);margin-right:.3rem;}
+.topbar nav a:hover{color:var(--fg);text-decoration:underline;}
+.topbar nav a[aria-current="page"]{color:var(--accent);font-weight:bold;}
+.topbar nav a[aria-current="page"]::before{color:var(--accent);}
+.topbar .meta{margin-left:auto;font-size:.76rem;color:var(--dim);letter-spacing:.06em;}
+.wrap{padding:1.4rem clamp(.9rem,2.5vw,3rem) 4rem;}
+h1{font-size:1rem;margin:0 0 .3rem;letter-spacing:.02em;}
+h2{font-size:.95rem;margin:1.2rem 0 .4rem;}
+.mut{color:var(--dim);}
+.note{color:var(--dim);font-size:.82rem;max-width:60rem;margin:.2rem 0 1rem;}
+input{width:100%;max-width:28rem;padding:.5rem .7rem;border:1px solid var(--line);background:var(--bg-2);color:var(--fg);font:inherit;font-size:.86rem;}
+input:focus{outline:none;border-color:var(--accent);}
+.scroll{overflow-x:auto;}
+table{width:100%;border-collapse:collapse;margin-top:.8rem;font-size:.86rem;}
+th,td{text-align:left;padding:.5rem .6rem;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;}
+th{font-size:.72rem;text-transform:uppercase;letter-spacing:.1em;color:var(--dim);font-weight:normal;}
+tr.blk{cursor:pointer;}
+tr.blk:hover td{background:var(--bg-2);}
+code{font-size:.8rem;word-break:break-all;color:var(--fg);}
+.card{border:1px solid var(--line);background:var(--bg-2);padding:.9rem 1rem;margin-top:.8rem;}
+.kv{display:grid;grid-template-columns:11rem 1fr;gap:.25rem .8rem;font-size:.82rem;}
+.kv div:nth-child(odd){color:var(--dim);}
+.tx{border-top:1px solid var(--line);padding:.7rem 0;}
+.io{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+@media (max-width:640px){.io{grid-template-columns:1fr;}.kv{grid-template-columns:7rem 1fr;}.topbar .meta{margin-left:0;width:100%;}}
+.pill{display:inline-block;font-size:.68rem;padding:.05rem .5rem;border:1px solid var(--line);color:var(--dim);text-transform:uppercase;letter-spacing:.05em;}
+button.link{background:none;border:none;color:var(--accent);cursor:pointer;font:inherit;padding:0;text-decoration:underline;}
+"""
+
+
+EXPLORER_JS = r"""
 var SUM = [], SHOWN = 200;
 function btf(sat){ return (sat/1e8).toFixed(8).replace(/0+$/,'').replace(/\.$/,'')+" BTF"; }
 function ts(t){ return new Date(t*1000).toISOString().replace('T',' ').replace('.000Z',' UTC'); }
@@ -310,25 +353,22 @@ function openBlock(h){
       }));
       append(tx, head, io); append(detail, tx);
     });
-    document.getElementById('listview').style.display='none';
-    detail.style.display='block';
-    document.getElementById('home').style.display='inline';
+    document.getElementById('listview').hidden = true;
+    detail.hidden = false;
+    document.getElementById('home').hidden = false;
     window.scrollTo(0,0);
   });
 }
 document.getElementById('home').onclick=function(){
-  document.getElementById('detail').style.display='none';
-  document.getElementById('listview').style.display='block';
-  this.style.display='none';
+  document.getElementById('detail').hidden = true;
+  document.getElementById('listview').hidden = false;
+  this.hidden = true;
 };
 document.getElementById('q').oninput=function(){ renderList(this.value); };
 fetch('blocks.json').then(function(r){return r.json();}).then(function(d){
   SUM=d.blocks; document.getElementById('tip').textContent='tip height '+d.tipHeight+' - '+d.count+' blocks';
   renderList('');
 });
-</script>
-</body>
-</html>
 """
 
 

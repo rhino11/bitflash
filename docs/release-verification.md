@@ -34,6 +34,16 @@ From a shell with `curl` or `wget`, `sha256sum` and `gpg`:
 scripts/verify-release.sh latest
 ```
 
+The public release host should expose latest-file aliases for convenience:
+
+```text
+https://releases.bitflash.network/SHA256SUMS
+https://releases.bitflash.network/SHA256SUMS.asc
+```
+
+Those aliases must point at the current versioned directory. They do not replace
+signature verification; they only make the common manual path shorter.
+
 For a specific release:
 
 ```bash
