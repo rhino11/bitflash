@@ -342,7 +342,7 @@ probes disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
 ### When something looks wrong
 
 **Menu > Diagnostics**, and the same report in `debug.log` every ten minutes:
-peers held against peers `select()` is actually watching, blocks received and how
+peers held against peers the socket loop is actually watching, blocks received and how
 many arrived without a parent, the proof-of-work mode with the live miner thread
 count, sockets by the part of the program that opened them, and per peer how long
 since the last message each way. There is a copy button — if you open an issue,
