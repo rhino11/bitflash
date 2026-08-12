@@ -10,7 +10,7 @@
 ROOT    := $(shell pwd)
 NPROC   := $(shell nproc 2>/dev/null || echo 2)
 SUDO    := $(shell [ "$$(id -u)" = "0" ] && echo "" || echo "sudo")
-VERSION := 1.2.17
+VERSION := 1.2.18
 
 SECP256K1_REPO   := https://github.com/bitcoin-core/secp256k1
 SECP256K1_COMMIT := 7fecac74aed8e1fd9078380d67dd04663705c989
