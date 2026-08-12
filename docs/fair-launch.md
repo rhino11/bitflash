@@ -8,7 +8,8 @@ python3 scripts/verify-fair-launch.py --max-blocks 1000 --out bitflash-fair-laun
 
 The verifier reads `blk*.dat` directly from the local Bitflash data directory.
 It does not use Berkeley DB, does not call the node binary, and does not need
-network access.
+network access. It uses the same shared Python chain parser as the UTXO
+commitment and proof tools, so block serialization fixes land in one place.
 
 The report proves the launch baseline that can be checked from the chain:
 

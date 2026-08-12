@@ -29,6 +29,7 @@
 
 #include "btfaddr.h"
 #include "btfchan.h"
+#include "proxy.h"
 
 using json = nlohmann::json;
 
@@ -540,53 +541,8 @@ public:
         size_t colon = host.find(':');
         if (colon != string::npos) { port = atoi(host.substr(colon + 1).c_str()); host = host.substr(0, colon); }
 
-        // Resolve and connect (TCP). AF_UNSPEC so we get both A and AAAA
-        // records back and try them in the order the resolver prefers,
-        // rather than hard-failing whenever the IPv4 path to a relay is
-        // filtered/rate-limited (increasingly common for CDN-fronted
-        // relays) while a working IPv6 route exists right there in the
-        // same getaddrinfo() result.
-        struct addrinfo hints, *res = NULL, *rp = NULL;
-        memset(&hints, 0, sizeof(hints));
-        hints.ai_family = AF_UNSPEC;
-        hints.ai_socktype = SOCK_STREAM;
-        char portstr[16]; sprintf(portstr, "%d", port);
-        if (getaddrinfo(host.c_str(), portstr, &hints, &res) != 0 || !res)
-            return error("Nostr: getaddrinfo %s failed", host.c_str());
-
-        bool fConnected = false;
-        for (rp = res; rp != NULL; rp = rp->ai_next)
-        {
-            hSocket = BtfSocketTag(socket(rp->ai_family, rp->ai_socktype, rp->ai_protocol), SOCK_NOSTR);
-            if (hSocket == INVALID_SOCKET)
-                continue;
-
-            // Socket receive/send timeout: Windows takes a DWORD of
-            // milliseconds; POSIX takes a struct timeval.
-#ifdef _WIN32
-            DWORD tv = timeoutSec * 1000;
-            setsockopt(hSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
-            setsockopt(hSocket, SOL_SOCKET, SO_SNDTIMEO, (char*)&tv, sizeof(tv));
-#else
-            struct timeval tv;
-            tv.tv_sec = timeoutSec;
-            tv.tv_usec = 0;
-            setsockopt(hSocket, SOL_SOCKET, SO_RCVTIMEO, (char*)&tv, sizeof(tv));
-            setsockopt(hSocket, SOL_SOCKET, SO_SNDTIMEO, (char*)&tv, sizeof(tv));
-#endif
-
-            if (connect(hSocket, rp->ai_addr, (int)rp->ai_addrlen) == 0)
-            {
-                fConnected = true;
-                break;
-            }
-
-            BtfCloseSocket(hSocket);
-            hSocket = INVALID_SOCKET;
-        }
-        freeaddrinfo(res);
-
-        if (!fConnected)
+        hSocket = BtfConnectSocket(host, (unsigned short)port, SOCK_NOSTR, timeoutSec);
+        if (hSocket == INVALID_SOCKET)
             return error("Nostr: connect %s:%d failed", host.c_str(), port);
 
         // TLS

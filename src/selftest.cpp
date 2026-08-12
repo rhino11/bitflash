@@ -7,7 +7,9 @@
 
 #include "headers_core.h"
 #include "bip32.h"
+#include "proxy.h"
 #include "selftest.h"
+#include "sockcount.h"
 #include "walletcmd.h"
 
 extern int RunPoolStratumSelfTest();
@@ -1253,6 +1255,279 @@ static int RunParseMoneySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static bool SelfTestReadN(SOCKET s, void* buf, int n)
+{
+    char* p = (char*)buf;
+    int off = 0;
+    while (off < n)
+    {
+        int r = recv(s, p + off, n - off, 0);
+        if (r <= 0)
+            return false;
+        off += r;
+    }
+    return true;
+}
+
+static bool SelfTestWriteN(SOCKET s, const void* buf, int n)
+{
+    const char* p = (const char*)buf;
+    int off = 0;
+    while (off < n)
+    {
+        int r = send(s, p + off, n - off, 0);
+        if (r <= 0)
+            return false;
+        off += r;
+    }
+    return true;
+}
+
+static void SelfTestSetSocketTimeout(SOCKET s, int nTimeoutSecs)
+{
+#ifdef _WIN32
+    DWORD tv = (DWORD)nTimeoutSecs * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&tv, sizeof(tv));
+#else
+    struct timeval tv;
+    tv.tv_sec = nTimeoutSecs;
+    tv.tv_usec = 0;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+#ifdef _WIN32
+struct SelfTestWinsock
+{
+    bool fStarted;
+    SelfTestWinsock() : fStarted(false)
+    {
+        WSADATA wsadata;
+        fStarted = (WSAStartup(MAKEWORD(2,2), &wsadata) == 0);
+    }
+    ~SelfTestWinsock()
+    {
+        if (fStarted)
+            WSACleanup();
+    }
+};
+#endif
+
+static bool RunSocks5HandshakeProbe(std::string& errOut)
+{
+    errOut.clear();
+#ifdef _WIN32
+    SelfTestWinsock winsock;
+    if (!winsock.fStarted)
+    {
+        errOut = "could not start Winsock";
+        return false;
+    }
+#endif
+
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET)
+    {
+        errOut = "could not create listener";
+        return false;
+    }
+    SelfTestSetSocketTimeout(listener, 5);
+
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (bind(listener, (struct sockaddr*)&addr, sizeof(addr)) != 0 ||
+        listen(listener, 1) != 0)
+    {
+        closesocket(listener);
+        errOut = "could not bind/listen on loopback";
+        return false;
+    }
+
+#ifdef _WIN32
+    int addrLen = sizeof(addr);
+#else
+    socklen_t addrLen = sizeof(addr);
+#endif
+    if (getsockname(listener, (struct sockaddr*)&addr, &addrLen) != 0)
+    {
+        closesocket(listener);
+        errOut = "could not read listener port";
+        return false;
+    }
+    unsigned short proxyPort = ntohs(addr.sin_port);
+
+    bool fServerOk = false;
+    std::string serverErr;
+    std::string requestedHost;
+    unsigned short requestedPort = 0;
+    std::thread server([&]() {
+        SOCKET s = accept(listener, NULL, NULL);
+        if (s == INVALID_SOCKET)
+        {
+            serverErr = "accept failed";
+            return;
+        }
+        SelfTestSetSocketTimeout(s, 5);
+
+        unsigned char hello[3] = {0,0,0};
+        if (!SelfTestReadN(s, hello, sizeof(hello)) ||
+            hello[0] != 0x05 || hello[1] != 0x01 || hello[2] != 0x00)
+        {
+            serverErr = "bad SOCKS5 greeting";
+            closesocket(s);
+            return;
+        }
+        unsigned char choice[2] = {0x05, 0x00};
+        if (!SelfTestWriteN(s, choice, sizeof(choice)))
+        {
+            serverErr = "could not write method choice";
+            closesocket(s);
+            return;
+        }
+
+        unsigned char hdr[5] = {0,0,0,0,0};
+        if (!SelfTestReadN(s, hdr, sizeof(hdr)) ||
+            hdr[0] != 0x05 || hdr[1] != 0x01 || hdr[2] != 0x00 || hdr[3] != 0x03)
+        {
+            serverErr = "CONNECT did not use domain-name address type";
+            closesocket(s);
+            return;
+        }
+
+        unsigned char len = hdr[4];
+        std::vector<unsigned char> rest((size_t)len + 2);
+        if (!SelfTestReadN(s, &rest[0], (int)rest.size()))
+        {
+            serverErr = "could not read CONNECT target";
+            closesocket(s);
+            return;
+        }
+        requestedHost.assign((const char*)&rest[0], (size_t)len);
+        requestedPort = ((unsigned short)rest[len] << 8) | rest[len + 1];
+
+        unsigned char reply[10] = {0x05, 0x00, 0x00, 0x01, 0,0,0,0, 0,0};
+        if (!SelfTestWriteN(s, reply, sizeof(reply)))
+        {
+            serverErr = "could not write CONNECT reply";
+            closesocket(s);
+            return;
+        }
+        fServerOk = true;
+        closesocket(s);
+    });
+
+    std::string err;
+    BtfClearSocks5Proxy();
+    bool fClientOk = BtfSetSocks5Proxy(strprintf("127.0.0.1:%u", (unsigned)proxyPort), err);
+    SOCKET client = INVALID_SOCKET;
+    if (fClientOk)
+        client = BtfConnectSocket("relay.example", 443, SOCK_NOSTR, 5);
+    if (client != INVALID_SOCKET)
+        BtfCloseSocket(client);
+    BtfClearSocks5Proxy();
+    closesocket(listener);
+    server.join();
+
+    if (!fClientOk)
+        errOut = strprintf("could not enable proxy: %s", err.c_str());
+    else if (client == INVALID_SOCKET)
+        errOut = "client SOCKS5 connect failed";
+    else if (!fServerOk)
+        errOut = serverErr.empty() ? "mock server failed" : serverErr;
+    else if (requestedHost != "relay.example" || requestedPort != 443)
+        errOut = strprintf("unexpected CONNECT target %s:%u", requestedHost.c_str(), (unsigned)requestedPort);
+    else
+        return true;
+    return false;
+}
+
+static int RunSocks5ProxySelfTest()
+{
+    printf("socks5-proxy self-test\n");
+    int nFail = 0;
+    std::string host, err;
+    unsigned short port = 0;
+
+    nFail += Check(BtfParseSocks5Proxy("127.0.0.1:9050", host, port, err) &&
+                   host == "127.0.0.1" && port == 9050,
+                   "parses local Tor proxy endpoint") ? 0 : 1;
+    nFail += Check(BtfParseSocks5Proxy("localhost:9050", host, port, err) &&
+                   host == "localhost" && port == 9050,
+                   "parses hostname proxy endpoint") ? 0 : 1;
+    nFail += Check(BtfParseSocks5Proxy("[::1]:9050", host, port, err) &&
+                   host == "::1" && port == 9050,
+                   "parses bracketed IPv6 proxy endpoint") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("::1:9050", host, port, err),
+                   "rejects unbracketed IPv6 proxy endpoint") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost", host, port, err),
+                   "rejects missing port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost:0", host, port, err),
+                   "rejects zero port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost:70000", host, port, err),
+                   "rejects out-of-range port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("localhost:999999999999999999999999999999", host, port, err),
+                   "rejects overflowing port") ? 0 : 1;
+    nFail += Check(!BtfParseSocks5Proxy("user:pass@localhost:9050", host, port, err),
+                   "rejects unsupported authenticated proxy syntax") ? 0 : 1;
+    nFail += Check(BtfIsTorOnionHost("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd.onion") &&
+                   BtfIsTorOnionHost("Relay.Example.ONION.") &&
+                   !BtfIsTorOnionHost("relay.example") &&
+                   !BtfIsTorOnionHost(".onion"),
+                   "detects .onion hosts without accepting lookalikes") ? 0 : 1;
+
+    BtfClearSocks5Proxy();
+    nFail += Check(!BtfSocks5ProxyEnabled(), "starts disabled after clear") ? 0 : 1;
+    nFail += Check(BtfSetSocks5Proxy("127.0.0.1:9050", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfSocks5ProxyName() == "127.0.0.1:9050",
+                   "enables parsed SOCKS5 proxy") ? 0 : 1;
+    BtfClearSocks5Proxy();
+    nFail += Check(!BtfSocks5ProxyEnabled(), "clear disables proxy") ? 0 : 1;
+
+    nFail += Check(BtfSetSocks5Proxy("[::1]:9050", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfSocks5ProxyName() == "[::1]:9050",
+                   "enables bracketed IPv6 proxy endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfEnableTorProxy("", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfTorProxyEnabled() &&
+                   BtfSocks5ProxyName() == "127.0.0.1:9050",
+                   "enables Tor mode on the default local SOCKS5 endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfEnableTorProxy("[::1]:9050", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   BtfTorProxyEnabled() &&
+                   BtfSocks5ProxyName() == "[::1]:9050",
+                   "enables Tor mode on a custom IPv6 endpoint") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    nFail += Check(BtfSetSocks5Proxy("127.0.0.1:9051", err) &&
+                   BtfSocks5ProxyEnabled() &&
+                   !BtfTorProxyEnabled(),
+                   "plain SOCKS5 mode is distinct from Tor mode") ? 0 : 1;
+    BtfClearSocks5Proxy();
+
+    std::string handshakeErr;
+    bool fHandshakeOk = RunSocks5HandshakeProbe(handshakeErr);
+    nFail += Check(fHandshakeOk, handshakeErr.empty() ?
+                   "completes SOCKS5 domain-name CONNECT handshake" :
+                   strprintf("completes SOCKS5 domain-name CONNECT handshake (%s)",
+                             handshakeErr.c_str()).c_str()) ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -1275,8 +1550,10 @@ int RunSelfTest(const std::string& name)
         return RunPoolStratumSelfTest();
     if (name == "parse-money")
         return RunParseMoneySelfTest();
+    if (name == "socks5-proxy")
+        return RunSocks5ProxySelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy\n");
     return 1;
 }

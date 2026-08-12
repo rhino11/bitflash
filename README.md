@@ -36,7 +36,8 @@ Worth being precise, because the difference matters if you are relying on it.
 
 **The node still listens on 8433.** Nothing dials by IP any more, but the listener is still there, so anyone who already knows your address and can reach that port may connect directly. If that matters to you, firewall it.
 
-This is unlinkability between peers, not anonymity against a network observer. It is not Tor.
+This is unlinkability between peers, not anonymity against a network observer.
+For Tor routing, start the node with `-tor`; see [Tor mode](docs/tor.md).
 
 ---
 
@@ -103,6 +104,14 @@ The report reads the local chain directly, checks the genesis launch baseline,
 and produces canonical JSON whose hash can be compared by independent auditors
 or timestamped externally with OpenTimestamps. See
 [fair-launch verification](docs/fair-launch.md).
+
+For a static local block explorer, generate HTML and JSON from either a data
+directory or explicit block files:
+
+```bash
+python3 scripts/build-explorer.py --datadir ~/.bitflash ./explorer-out
+python3 scripts/build-explorer.py ~/.bitflash/blk0001.dat ~/.bitflash/blk0002.dat ./explorer-out
+```
 
 **Keep your node current.** Consensus rules have changed since the first
 releases — 1.2.1 fixed a bug that let anyone spend anyone's coins, and 1.2.2
@@ -310,6 +319,8 @@ Other options worth knowing:
 ```bash
 -datadir=PATH    # wallet and chain data elsewhere
 -port=N          # P2P listen port, default 8433
+-socks=HOST:PORT # SOCKS5 for outbound Nostr and .btf rendezvous dials
+-tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
 -debug           # verbose log; without it debug.log is nearly silent
 -help            # full list
 ```
@@ -317,6 +328,16 @@ Other options worth knowing:
 `-port` plus `-datadir` is what lets two nodes share one machine. Both are
 needed — the data directory takes an exclusive lock, so a second node pointed at
 the same one will refuse to start.
+
+`-socks=127.0.0.1:9050` routes outbound Nostr discovery and `.btf` rendezvous
+dials through a local SOCKS5 proxy such as Tor. When it is set, the node skips
+plain HTTP external-IP probes instead of leaking a direct request outside the
+proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
+
+`-tor` is a privacy shorthand for the usual local Tor SOCKS5 listener at
+`127.0.0.1:9050`. It routes outbound Nostr discovery and `.btf` rendezvous
+dials through Tor, refuses direct `.onion` resolution, and keeps external-IP
+probes disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
 
 ### When something looks wrong
 

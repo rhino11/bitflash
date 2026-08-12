@@ -19,6 +19,7 @@
 #include <openssl/rand.h>
 #include "btfaddr.h"
 #include "btftunnel.h"
+#include "proxy.h"
 
 void ThreadReconnectCachedBtfPeers(void* parg);
 void ThreadMessageHandler2(void* parg);
@@ -377,6 +378,9 @@ string GetDiagnosticsText()
 
 bool GetMyExternalIP(unsigned int& ipRet)
 {
+    if (BtfSocks5ProxyEnabled())
+        return error("GetMyExternalIP() skipped while SOCKS5 proxy is enabled\n");
+
     // Try several plain-text IP echo services in order.
     // Each returns just the IPv4 address as the first line of the HTTP body.
     struct { const char* host; const char* path; } services[] = {

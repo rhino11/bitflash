@@ -42,6 +42,13 @@ The resulting executable is src/bitflash.exe.
 Command-line options (in addition to the original ones)
 -------------------------------------------------------
   /port=N        listen on P2P port N (default 8433)
+  /socks=HOST:PORT
+                 route outbound Nostr and .btf rendezvous dials through a
+                 SOCKS5 proxy, e.g. /socks=127.0.0.1:9050 for local Tor
+                 or /socks=[::1]:9050 for an IPv6 loopback proxy
+  /tor[=HOST:PORT]
+                 Tor mode for outbound Nostr and .btf rendezvous dials;
+                 defaults to the local Tor SOCKS5 proxy at 127.0.0.1:9050
   /solomine      mine without requiring a connected peer (local testing)
   /operator      operator mode (run pool server)
   /participant=ADDR
