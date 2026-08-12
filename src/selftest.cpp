@@ -586,6 +586,34 @@ static int RunWalletHDSelfTest()
                        "the recovery audit finds wallet.dat-only immature mining rewards") ? 0 : 1;
         nFail += Check(audit.nLegacyImmatureTx == 1,
                        "the recovery audit counts wallet.dat-only immature mining rewards") ? 0 : 1;
+
+        CKey keyLegacyHD11;
+        nSchemaForLegacyAudit = nHDKeySchema;
+        nHDKeySchema = HD_SCHEMA_LEGACY;
+        if (!DeriveHDKey(11, keyLegacyHD11, strError))
+            throw std::runtime_error("legacy compatibility index 11 derivation failed: " + strError);
+        nHDKeySchema = nSchemaForLegacyAudit;
+        if (!AddKey(keyLegacyHD11))
+            throw std::runtime_error("could not store the legacy compatibility index 11 key");
+
+        std::map<unsigned int, std::vector<unsigned char> > mapLegacyProbe;
+        mapLegacyProbe[0] = keyAuditLegacyHD.GetPubKey();
+        mapLegacyProbe[11] = keyLegacyHD11.GetPubKey();
+
+        CWalletTx wtxLegacyHD11;
+        wtxLegacyHD11.vout.push_back(CTxOut(19 * COIN, CScript() << keyLegacyHD11.GetPubKey() << OP_CHECKSIG));
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            mapWallet.clear();
+            mapWallet[wtxLegacyHD11.GetHash()] = wtxLegacyHD11;
+        }
+        nFail += Check(WalletLastUsedPubKeyIndexNext(mapLegacyProbe) == 12,
+                       "restore collapses legacy hdnext to the last used compatibility index plus one") ? 0 : 1;
+
+        CRITICAL_BLOCK(cs_mapWallet)
+            mapWallet.clear();
+        nFail += Check(WalletLastUsedPubKeyIndexNext(mapLegacyProbe) == 0,
+                       "restore does not persist legacy hdnext at the scan depth when no compatibility key was used") ? 0 : 1;
     }
     catch (const std::exception& e)
     {
