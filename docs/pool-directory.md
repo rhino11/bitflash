@@ -26,6 +26,10 @@ The generated output contains:
 - `index.html`: human-readable ranking page.
 - `pools.json`: machine-readable API for `api.bitflash.network/pools.json`.
 
+The website is a convenience layer, not a consensus or discovery dependency.
+Nodes discover pools through Nostr descriptors and `.btf`; a missing website
+must not stop mining or pool operation.
+
 When a source is an HTTP(S) `pool_status.json`, the directory links to a
 `pool_rounds.json` proof file next to it. That file records the block height,
 block hash, coinbase txid, coinbase value, pool fee, total shares, per-address
@@ -41,3 +45,17 @@ Ranking order is intentionally simple:
 
 An entry is considered online when the source says the pool is running and its
 status file is no more than 120 seconds old.
+
+## Recommended Hostnames
+
+Use:
+
+```text
+pool.bitflash.network        human-readable pool directory
+api.bitflash.network/pools.json
+status.bitflash.network      relay/node health, not pool ranking
+docs.bitflash.network        operator setup guide
+```
+
+The GUI may use the API as a shortcut for humans, but it should keep the
+existing decentralized pool discovery path as the source of truth.

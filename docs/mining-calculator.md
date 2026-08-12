@@ -84,3 +84,25 @@ The script is intentionally standalone so the same math can later back a
 website widget or status dashboard. Until a public price exists, a website
 calculator should keep price as a manual field and label fiat profit as
 speculative.
+
+## Website Fields
+
+A public calculator should ask for:
+
+- miner hashrate and unit;
+- power draw in watts;
+- electricity price per kWh;
+- pool fee percent;
+- optional BTF price;
+- either current Bitflash difficulty or current network hashrate.
+
+The output should separate:
+
+- estimated BTF per day;
+- estimated gross fiat revenue, if a manual price was provided;
+- electricity cost;
+- net profit/loss;
+- the difficulty/hashrate assumptions used.
+
+Never present the fiat number as a market quote unless it comes from a real
+public market. Before that exists, label it as a manual scenario.

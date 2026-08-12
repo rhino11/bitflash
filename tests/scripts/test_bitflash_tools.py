@@ -159,8 +159,11 @@ def compare_golden(name, actual, update):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(actual)
         return
-    expected = path.read_bytes()
-    if actual != expected:
+    # The tools promise canonical LF-terminated JSON. On Windows checkouts a
+    # fixture may still appear as CRLF in the working tree; normalize only line
+    # endings so content, field order and compact serialization still drift-test.
+    expected = path.read_bytes().replace(b"\r\n", b"\n")
+    if actual.replace(b"\r\n", b"\n") != expected:
         raise AssertionError("golden mismatch: %s" % name)
 
 

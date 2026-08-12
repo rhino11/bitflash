@@ -38,6 +38,8 @@ Worth being precise, because the difference matters if you are relying on it.
 
 This is unlinkability between peers, not anonymity against a network observer.
 For Tor routing, start the node with `-tor`; see [Tor mode](docs/tor.md).
+For a plain SOCKS5 proxy without Tor-specific defaults, use
+`-socks=HOST:PORT`.
 
 ---
 
@@ -73,6 +75,14 @@ scripts/verify-release.sh latest
 
 See [release verification](docs/release-verification.md) for the full release
 audit flow and the maintainer signing step.
+
+Public mirrors should make the latest checksum files available both under the
+versioned release directory and at the release root:
+
+```text
+https://releases.bitflash.network/v1.2.18/SHA256SUMS
+https://releases.bitflash.network/SHA256SUMS        # alias to latest
+```
 
 Bitflash also ships a deterministic UTXO-set commitment tool:
 
@@ -112,6 +122,12 @@ directory or explicit block files:
 python3 scripts/build-explorer.py --datadir ~/.bitflash ./explorer-out
 python3 scripts/build-explorer.py ~/.bitflash/blk0001.dat ~/.bitflash/blk0002.dat ./explorer-out
 ```
+
+The generated explorer is static and self-contained: `index.html`,
+`style.css`, `explorer.js`, `blocks.json`, `block/*.json`, and `logo.png`. It is
+safe to host behind a strict policy such as `default-src 'none'; img-src 'self';
+style-src 'self'; script-src 'self'; connect-src 'self'; base-uri 'none';
+form-action 'none'`.
 
 **Keep your node current.** Consensus rules have changed since the first
 releases — 1.2.1 fixed a bug that let anyone spend anyone's coins, and 1.2.2
@@ -265,6 +281,7 @@ default both are created in the data directory; use `-poolstatusfile=PATH` and
 `-poolroundsfile=PATH` to write them somewhere a dashboard or web sync can read.
 The files are informational only: nodes still discover pools through Nostr and
 `.btf`, not through any web domain.
+See [public pool directory](docs/pool-directory.md) for the website/API shape.
 
 **Participant** — mine to someone else's pool. Enter or select the pool's `.btf` address and enable Start Mining.
 
