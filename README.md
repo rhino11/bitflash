@@ -104,6 +104,14 @@ and produces canonical JSON whose hash can be compared by independent auditors
 or timestamped externally with OpenTimestamps. See
 [fair-launch verification](docs/fair-launch.md).
 
+For a static local block explorer, generate HTML and JSON from either a data
+directory or explicit block files:
+
+```bash
+python3 scripts/build-explorer.py --datadir ~/.bitflash ./explorer-out
+python3 scripts/build-explorer.py ~/.bitflash/blk0001.dat ~/.bitflash/blk0002.dat ./explorer-out
+```
+
 **Keep your node current.** Consensus rules have changed since the first
 releases — 1.2.1 fixed a bug that let anyone spend anyone's coins, and 1.2.2
 added a per-block signature-operation cap. A node on an older build will accept
