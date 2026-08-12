@@ -30,7 +30,7 @@ WARNFLAGS = -Wformat -Werror=format \
             -Wno-narrowing -Wno-unused-result
 
 CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
-           -DSECP256K1_STATIC \
+           -DSECP256K1_STATIC -DBITFLASH_NODE_BUILD \
            -I$(SECP_INC) -I$(RANDOMX_DIR)/src \
            -I/usr/include/nlohmann \
            -I$(IMGUI_DIR)
@@ -53,7 +53,7 @@ LIBS = -L$(SECP_LIB) -lsecp256k1 \
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
           randomx_pow.h btfaddr.h btfchan.h btfrv.h btftunnel.h market.h \
-          selftest.h walletcmd.h compat.h sockcount.h font_roboto.h
+          selftest.h walletcmd.h compat.h sockcount.h proxy.h font_roboto.h
 
 IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
              obj/imgui_widgets.o obj/imgui_impl_glfw.o obj/imgui_impl_opengl3.o
@@ -61,7 +61,7 @@ IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
 NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/btfrv.o obj/btftunnel.o obj/rpc.o \
-            obj/selftest.o obj/bip32.o obj/walletcmd.o
+            obj/selftest.o obj/bip32.o obj/walletcmd.o obj/proxy.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o
 
@@ -193,5 +193,6 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=consensus-limits
 	./bitflash-node -selftest=pool-stratum
 	./bitflash-node -selftest=parse-money
+	./bitflash-node -selftest=socks5-proxy
 
 .PHONY: tests fuzz-net-message-smoke fuzz-script-smoke
