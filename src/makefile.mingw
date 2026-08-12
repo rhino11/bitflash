@@ -15,13 +15,8 @@ WARNFLAGS = -Wformat -Werror=format \
             -Wno-narrowing -Wno-unused-result
 
 CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
-<<<<<<< HEAD
            -DWIN32 -DNOPCH \
-           -DSECP256K1_STATIC \
-=======
-           -DWIN32 -DNOPCH -DFD_SETSIZE=1024 \
            -DSECP256K1_STATIC -DBITFLASH_NODE_BUILD \
->>>>>>> origin/main
            -I$(DEPS)/include -I$(RANDOMX)/src \
            -I$(DEPS)/include/nlohmann \
            -IC:/msys64/ucrt64/include \
