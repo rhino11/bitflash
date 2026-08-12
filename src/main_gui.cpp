@@ -138,6 +138,7 @@ static void PrintUsage()
     printf("Network:\n");
     printf("  /port=N                    (P2P listen port, default 8433)\n");
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for outbound Nostr and .btf relay dials)\n");
+    printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -285,15 +286,34 @@ static void ParseStartupArguments(int argc, char* argv[])
     if (!announceRelay.empty())
         strBtfAnnounceRelay = announceRelay;
 
-    string socksProxy = argval2(argc, argv, "/socks", "-socks");
-    if (!socksProxy.empty())
+    bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
+    if (fTorMode)
     {
+        string socksProxy = argval2(argc, argv, "/socks", "-socks");
+        if (!socksProxy.empty())
+            fprintf(stderr, "Warning: /tor takes precedence over /socks=%s\n",
+                    socksProxy.c_str());
+
+        string torProxy = argval2(argc, argv, "/tor", "-tor");
         string err;
-        if (!BtfSetSocks5Proxy(socksProxy, err))
-            fprintf(stderr, "Ignoring /socks=%s: %s\n", socksProxy.c_str(), err.c_str());
+        if (!BtfEnableTorProxy(torProxy, err))
+            fprintf(stderr, "Ignoring /tor=%s: %s\n", torProxy.c_str(), err.c_str());
         else
-            fprintf(stderr, "SOCKS5 proxy enabled for outbound discovery/relay dials: %s\n",
+            fprintf(stderr, "Tor mode enabled through SOCKS5 proxy %s\n",
                     BtfSocks5ProxyName().c_str());
+    }
+    else
+    {
+        string socksProxy = argval2(argc, argv, "/socks", "-socks");
+        if (!socksProxy.empty())
+        {
+            string err;
+            if (!BtfSetSocks5Proxy(socksProxy, err))
+                fprintf(stderr, "Ignoring /socks=%s: %s\n", socksProxy.c_str(), err.c_str());
+            else
+                fprintf(stderr, "SOCKS5 proxy enabled for outbound discovery/relay dials: %s\n",
+                        BtfSocks5ProxyName().c_str());
+        }
     }
 
     // /btfseed=ADDRESS:ENCHEX -- extra bootstrap peers, repeatable. Useful for
