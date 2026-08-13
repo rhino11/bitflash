@@ -13,6 +13,10 @@
 #include "bip32.h"
 #include "walletcmd.h"
 
+#ifndef _WIN32
+#include <dirent.h>
+#endif
+
 #undef printf
 
 // How far ahead to look for used addresses when restoring.
@@ -656,6 +660,139 @@ static bool WriteAuditTextFile(const std::string& strPath,
         return false;
     }
     return true;
+}
+
+static bool DirectoryHasFileWithPrefixLocal(const std::string& strDir,
+                                            const std::string& strPrefix)
+{
+#ifdef _WIN32
+    std::string pattern = strDir + "/*";
+    WIN32_FIND_DATAA findData;
+    HANDLE hFind = FindFirstFileA(pattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return false;
+    bool fFound = false;
+    do
+    {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
+        {
+            std::string name = findData.cFileName;
+            if (name.compare(0, strPrefix.size(), strPrefix) == 0)
+            {
+                fFound = true;
+                break;
+            }
+        }
+    }
+    while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+    return fFound;
+#else
+    DIR* dir = opendir(strDir.c_str());
+    if (!dir)
+        return false;
+    bool fFound = false;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL)
+    {
+        std::string name = ent->d_name;
+        if (name.compare(0, strPrefix.size(), strPrefix) == 0)
+        {
+            fFound = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return fFound;
+#endif
+}
+
+static void AddWalletStorageFailure(std::vector<std::string>& vFailures,
+                                    const std::string& strFailure)
+{
+    vFailures.push_back(strFailure);
+}
+
+static void BuildWalletStorageSanityFailures(const WalletStorageAuditCounts& counts,
+                                             std::vector<std::string>& vFailures)
+{
+    bool fPlainHD = counts.nPlainHDMaster > 0 || counts.nPlainHDChainCode > 0;
+    bool fCryptedHD = counts.nCryptedHDMaster > 0 || counts.nCryptedHDChainCode > 0;
+    bool fEncryptedRecords = counts.nEncryptedKeys > 0 ||
+                             counts.nMasterKeys > 0 ||
+                             fCryptedHD;
+
+    if (counts.nMalformed > 0)
+        AddWalletStorageFailure(vFailures, "wallet.dat contains malformed records");
+    if (counts.nUnknown > 0)
+        AddWalletStorageFailure(vFailures, "wallet.dat contains unknown records");
+    if ((counts.nPlainHDMaster > 0) != (counts.nPlainHDChainCode > 0))
+        AddWalletStorageFailure(vFailures, "plain HD seed is incomplete");
+    if ((counts.nCryptedHDMaster > 0) != (counts.nCryptedHDChainCode > 0))
+        AddWalletStorageFailure(vFailures, "encrypted HD seed is incomplete");
+    if (fPlainHD && fCryptedHD)
+        AddWalletStorageFailure(vFailures, "wallet.dat contains both plain and encrypted HD seed records");
+    if (counts.nDefaultKey > 1)
+        AddWalletStorageFailure(vFailures, "wallet.dat contains more than one default public key record");
+    if (counts.nWalletMinVersion > 1)
+        AddWalletStorageFailure(vFailures, "wallet.dat contains more than one minimum-version record");
+
+    if (fEncryptedRecords)
+    {
+        if (counts.nPlainKeys > 0)
+            AddWalletStorageFailure(vFailures, "encrypted wallet still contains plain private key records");
+        if (fPlainHD)
+            AddWalletStorageFailure(vFailures, "encrypted wallet still contains plain HD seed records");
+        if (counts.nMasterKeys == 0)
+            AddWalletStorageFailure(vFailures, "encrypted wallet has no encryption master key record");
+        if (counts.nWalletMinVersion == 0)
+            AddWalletStorageFailure(vFailures, "encrypted wallet has no minimum-version record");
+        if (DirectoryHasFileWithPrefixLocal(GetAppDir() + "/database", "log."))
+            AddWalletStorageFailure(vFailures, "Berkeley DB log files are still present for an encrypted wallet");
+    }
+}
+
+int CmdWalletStorageCheck()
+{
+    AttachTerminal();
+
+    WalletStorageAuditCounts counts;
+    std::string strError;
+    if (!ReadWalletStorageCounts(counts, strError))
+    {
+        fprintf(stderr, "Cannot check wallet storage: %s\n", strError.c_str());
+        return 1;
+    }
+
+    std::vector<std::string> vFailures;
+    BuildWalletStorageSanityFailures(counts, vFailures);
+
+    printf("Wallet storage sanity check\n");
+    printf("  records total:             %u\n", counts.nTotal);
+    printf("  encrypted records:         %s\n",
+           (counts.nEncryptedKeys || counts.nMasterKeys ||
+            counts.nCryptedHDMaster || counts.nCryptedHDChainCode) ? "yes" : "no");
+    printf("  plain private keys:        %u\n", counts.nPlainKeys);
+    printf("  encrypted private keys:    %u\n", counts.nEncryptedKeys);
+    printf("  plain HD seed:             %s\n",
+           HDSeedStorageState(counts.nPlainHDMaster,
+                              counts.nPlainHDChainCode).c_str());
+    printf("  encrypted HD seed:         %s\n",
+           HDSeedStorageState(counts.nCryptedHDMaster,
+                              counts.nCryptedHDChainCode).c_str());
+    if (vFailures.empty())
+    {
+        printf("  storage sanity:            ok\n");
+        fflush(stdout);
+        return 0;
+    }
+
+    printf("  storage sanity:            failed\n");
+    for (std::vector<std::string>::const_iterator it = vFailures.begin();
+         it != vFailures.end(); ++it)
+        printf("  failure:                   %s\n", it->c_str());
+    fflush(stdout);
+    return 2;
 }
 
 int CmdWalletStorageAudit(const std::string& strJsonOut)

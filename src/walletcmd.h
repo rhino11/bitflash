@@ -66,6 +66,10 @@ int CmdRecoveryAudit();
 // addresses, transaction ids, labels, or other wallet values.
 int CmdWalletStorageAudit(const std::string& strJsonOut = "");
 
+// Diagnostic: fail closed when wallet.dat contains an internally inconsistent
+// or migration-unsafe mix of storage records.
+int CmdWalletStorageCheck();
+
 // Rewrite wallet.dat so private keys and the HD seed are encrypted with the
 // given passphrase. Returns 0 on success and exits without starting the node.
 int CmdEncryptWallet(const std::string& strPassphrase);

@@ -1329,6 +1329,19 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strOriginalStorageAudit, "malformed records:         0"),
                        "the storage audit recognizes a plaintext phrase wallet") ? 0 : 1;
 
+        string strOriginalStorageCheck = tmp + "/original-storage-check.txt";
+        vector<string> vOriginalStorageCheckArgs;
+        vOriginalStorageCheckArgs.push_back("-datadir=" + strOriginal);
+        vOriginalStorageCheckArgs.push_back("-nomanagedtor");
+        vOriginalStorageCheckArgs.push_back("-nogui");
+        vOriginalStorageCheckArgs.push_back("-walletstoragecheck");
+        int nOriginalStorageCheckRet =
+            RunBitflashChild(strExe, vOriginalStorageCheckArgs, NULL, &strOriginalStorageCheck);
+        nFail += Check(nOriginalStorageCheckRet == 0 &&
+                       FileContainsText(strOriginalStorageCheck, "storage sanity:            ok") &&
+                       FileContainsText(strOriginalStorageCheck, "plain HD seed:             complete"),
+                       "the storage sanity check accepts a plaintext phrase wallet") ? 0 : 1;
+
         string strOriginalStorageAuditJson = tmp + "/original-storage-audit.json";
         vector<string> vOriginalStorageAuditJsonArgs;
         vOriginalStorageAuditJsonArgs.push_back("-datadir=" + strOriginal);
@@ -1418,6 +1431,20 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strEncryptedStorageAudit, "wallet minimum version:    present") &&
                        FileContainsText(strEncryptedStorageAudit, "malformed records:         0"),
                        "the storage audit recognizes an encrypted wallet") ? 0 : 1;
+
+        string strEncryptedStorageCheck = tmp + "/encrypted-storage-check.txt";
+        vector<string> vEncryptedStorageCheckArgs;
+        vEncryptedStorageCheckArgs.push_back("-datadir=" + strOriginal);
+        vEncryptedStorageCheckArgs.push_back("-nomanagedtor");
+        vEncryptedStorageCheckArgs.push_back("-nogui");
+        vEncryptedStorageCheckArgs.push_back("-walletstoragecheck");
+        int nEncryptedStorageCheckRet =
+            RunBitflashChild(strExe, vEncryptedStorageCheckArgs, NULL, &strEncryptedStorageCheck);
+        nFail += Check(nEncryptedStorageCheckRet == 0 &&
+                       FileContainsText(strEncryptedStorageCheck, "storage sanity:            ok") &&
+                       FileContainsText(strEncryptedStorageCheck, "plain private keys:        0") &&
+                       FileContainsText(strEncryptedStorageCheck, "encrypted HD seed:         complete"),
+                       "the storage sanity check accepts an encrypted wallet") ? 0 : 1;
 
         string strEncryptedStorageAuditJson = tmp + "/encrypted-storage-audit.json";
         vector<string> vEncryptedStorageAuditJsonArgs;
