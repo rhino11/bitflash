@@ -1314,6 +1314,21 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strOriginalAudit, "SLIP-0044 BITFLASH"),
                        "the original wallet reports its recovery phrase") ? 0 : 1;
 
+        string strOriginalStorageAudit = tmp + "/original-storage-audit.txt";
+        vector<string> vOriginalStorageAuditArgs;
+        vOriginalStorageAuditArgs.push_back("-datadir=" + strOriginal);
+        vOriginalStorageAuditArgs.push_back("-nomanagedtor");
+        vOriginalStorageAuditArgs.push_back("-nogui");
+        vOriginalStorageAuditArgs.push_back("-walletstorageaudit");
+        int nOriginalStorageAuditRet =
+            RunBitflashChild(strExe, vOriginalStorageAuditArgs, NULL, &strOriginalStorageAudit);
+        nFail += Check(nOriginalStorageAuditRet == 0 &&
+                       FileContainsText(strOriginalStorageAudit, "Wallet storage audit") &&
+                       FileContainsText(strOriginalStorageAudit, "plain HD seed:             complete") &&
+                       FileContainsText(strOriginalStorageAudit, "encrypted HD seed:         none") &&
+                       FileContainsText(strOriginalStorageAudit, "malformed records:         0"),
+                       "the storage audit recognizes a plaintext phrase wallet") ? 0 : 1;
+
         string strPortableWallet = tmp + "/portable-wallet.dat";
         string strBackupOut = tmp + "/backupwallet.txt";
         vector<string> vBackupArgs;
@@ -1368,6 +1383,23 @@ static int RunWalletPortabilitySelfTest()
         nFail += Check(nEncryptRet == 0 &&
                        !DirectoryHasFileWithPrefix(strOriginal + "/database", "log."),
                        "the encryptwallet command purges Berkeley DB environment logs") ? 0 : 1;
+
+        string strEncryptedStorageAudit = tmp + "/encrypted-storage-audit.txt";
+        vector<string> vEncryptedStorageAuditArgs;
+        vEncryptedStorageAuditArgs.push_back("-datadir=" + strOriginal);
+        vEncryptedStorageAuditArgs.push_back("-nomanagedtor");
+        vEncryptedStorageAuditArgs.push_back("-nogui");
+        vEncryptedStorageAuditArgs.push_back("-walletstorageaudit");
+        int nEncryptedStorageAuditRet =
+            RunBitflashChild(strExe, vEncryptedStorageAuditArgs, NULL, &strEncryptedStorageAudit);
+        nFail += Check(nEncryptedStorageAuditRet == 0 &&
+                       FileContainsText(strEncryptedStorageAudit, "plain private keys:        0") &&
+                       FileContainsText(strEncryptedStorageAudit, "encrypted private keys:") &&
+                       FileContainsText(strEncryptedStorageAudit, "plain HD seed:             none") &&
+                       FileContainsText(strEncryptedStorageAudit, "encrypted HD seed:         complete") &&
+                       FileContainsText(strEncryptedStorageAudit, "wallet minimum version:    present") &&
+                       FileContainsText(strEncryptedStorageAudit, "malformed records:         0"),
+                       "the storage audit recognizes an encrypted wallet") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

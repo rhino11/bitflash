@@ -172,6 +172,8 @@ static void PrintUsage()
     printf("  /recoveryaudit             (show how much spendable balance is\n");
     printf("                              covered by the recovery phrase;\n");
     printf("                              exits 2 when wallet.dat is still needed)\n");
+    printf("  /walletstorageaudit        (count wallet.dat record types without\n");
+    printf("                              printing wallet values, then exit)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -700,6 +702,13 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/recoveryaudit") || arg(argc,argv,"-recoveryaudit"))
     {
         int nRet = CmdRecoveryAudit();
+        DBFlush(true);
+        return nRet;
+    }
+
+    if (arg(argc,argv,"/walletstorageaudit") || arg(argc,argv,"-walletstorageaudit"))
+    {
+        int nRet = CmdWalletStorageAudit();
         DBFlush(true);
         return nRet;
     }

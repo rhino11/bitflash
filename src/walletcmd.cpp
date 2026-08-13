@@ -470,6 +470,184 @@ int CmdRecoveryAudit()
     return 0;
 }
 
+struct WalletStorageAuditCounts
+{
+    unsigned int nTotal;
+    unsigned int nMalformed;
+    unsigned int nUnknown;
+    unsigned int nVersion;
+    unsigned int nNames;
+    unsigned int nTransactions;
+    unsigned int nPlainKeys;
+    unsigned int nEncryptedKeys;
+    unsigned int nMasterKeys;
+    unsigned int nDefaultKey;
+    unsigned int nPlainHDMaster;
+    unsigned int nPlainHDChainCode;
+    unsigned int nCryptedHDMaster;
+    unsigned int nCryptedHDChainCode;
+    unsigned int nWalletMinVersion;
+    unsigned int nPool;
+    unsigned int nSettings;
+    unsigned int nHDNext;
+    unsigned int nHDSchema;
+    unsigned int nHDCoinType;
+    unsigned int nHDReceiveNext;
+    unsigned int nHDChangeNext;
+
+    WalletStorageAuditCounts()
+    {
+        memset(this, 0, sizeof(*this));
+    }
+};
+
+static std::string HDSeedStorageState(unsigned int nMaster, unsigned int nChain)
+{
+    if (nMaster == 0 && nChain == 0)
+        return "none";
+    if (nMaster > 0 && nChain > 0)
+        return "complete";
+    return "incomplete";
+}
+
+static void CountWalletStorageType(const std::string& strType,
+                                   WalletStorageAuditCounts& c)
+{
+    if (strType == "version")
+        c.nVersion++;
+    else if (strType == "name")
+        c.nNames++;
+    else if (strType == "tx")
+        c.nTransactions++;
+    else if (strType == "key")
+        c.nPlainKeys++;
+    else if (strType == "ckey")
+        c.nEncryptedKeys++;
+    else if (strType == "mkey")
+        c.nMasterKeys++;
+    else if (strType == "defaultkey")
+        c.nDefaultKey++;
+    else if (strType == "hdmaster")
+        c.nPlainHDMaster++;
+    else if (strType == "hdchaincode")
+        c.nPlainHDChainCode++;
+    else if (strType == "cryptedhdmaster")
+        c.nCryptedHDMaster++;
+    else if (strType == "cryptedhdchaincode")
+        c.nCryptedHDChainCode++;
+    else if (strType == "walletminversion")
+        c.nWalletMinVersion++;
+    else if (strType == "pool")
+        c.nPool++;
+    else if (strType == "setting")
+        c.nSettings++;
+    else if (strType == "hdnext")
+        c.nHDNext++;
+    else if (strType == "hdschema")
+        c.nHDSchema++;
+    else if (strType == "hdcointype")
+        c.nHDCoinType++;
+    else if (strType == "hdreceivenext")
+        c.nHDReceiveNext++;
+    else if (strType == "hdchangenext")
+        c.nHDChangeNext++;
+    else
+        c.nUnknown++;
+}
+
+static bool ReadWalletStorageCounts(WalletStorageAuditCounts& counts,
+                                    std::string& strError)
+{
+    class CWalletAuditDB : public CWalletDB
+    {
+    public:
+        CWalletAuditDB() : CWalletDB("r") { }
+        using CDB::GetCursor;
+        using CDB::ReadAtCursor;
+    };
+
+    CWalletAuditDB walletdb;
+    Dbc* pcursor = walletdb.GetCursor();
+    if (!pcursor)
+    {
+        strError = "cannot open wallet.dat cursor";
+        return false;
+    }
+
+    for (;;)
+    {
+        CDataStream ssKey(SER_DISK);
+        CDataStream ssValue(SER_DISK);
+        int ret = walletdb.ReadAtCursor(pcursor, ssKey, ssValue);
+        if (ret == DB_NOTFOUND)
+            break;
+        if (ret != 0)
+        {
+            pcursor->close();
+            strError = strprintf("Berkeley DB cursor read failed (%d)", ret);
+            return false;
+        }
+
+        counts.nTotal++;
+        try
+        {
+            std::string strType;
+            ssKey >> strType;
+            CountWalletStorageType(strType, counts);
+        }
+        catch (...)
+        {
+            counts.nMalformed++;
+        }
+    }
+
+    pcursor->close();
+    return true;
+}
+
+int CmdWalletStorageAudit()
+{
+    AttachTerminal();
+
+    WalletStorageAuditCounts counts;
+    std::string strError;
+    if (!ReadWalletStorageCounts(counts, strError))
+    {
+        fprintf(stderr, "Cannot audit wallet storage: %s\n", strError.c_str());
+        return 1;
+    }
+
+    printf("Wallet storage audit\n");
+    printf("  records total:             %u\n", counts.nTotal);
+    printf("  malformed records:         %u\n", counts.nMalformed);
+    printf("  unknown records:           %u\n", counts.nUnknown);
+    printf("  plain private keys:        %u\n", counts.nPlainKeys);
+    printf("  encrypted private keys:    %u\n", counts.nEncryptedKeys);
+    printf("  encryption master keys:    %u\n", counts.nMasterKeys);
+    printf("  default public key:        %s\n", counts.nDefaultKey ? "present" : "none");
+    printf("  plain HD seed:             %s\n",
+           HDSeedStorageState(counts.nPlainHDMaster,
+                              counts.nPlainHDChainCode).c_str());
+    printf("  encrypted HD seed:         %s\n",
+           HDSeedStorageState(counts.nCryptedHDMaster,
+                              counts.nCryptedHDChainCode).c_str());
+    printf("  wallet minimum version:    %s\n",
+           counts.nWalletMinVersion ? "present" : "none");
+    printf("  keypool entries:           %u\n", counts.nPool);
+    printf("  wallet transactions:       %u\n", counts.nTransactions);
+    printf("  address book labels:       %u\n", counts.nNames);
+    printf("  settings:                  %u\n", counts.nSettings);
+    printf("  HD metadata records:       %u\n",
+           counts.nHDNext + counts.nHDSchema + counts.nHDCoinType +
+           counts.nHDReceiveNext + counts.nHDChangeNext);
+    printf("  database version records:  %u\n", counts.nVersion);
+    fflush(stdout);
+
+    if (counts.nMalformed > 0)
+        return 2;
+    return 0;
+}
+
 int CmdEncryptWallet(const std::string& strPassphrase)
 {
     AttachTerminal();
