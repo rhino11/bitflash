@@ -400,7 +400,12 @@ int CmdRecoveryAudit()
     int64 nImmatureTotal = audit.nRecoverableImmatureCredit + audit.nLegacyImmatureCredit;
 
     printf("Wallet recovery audit\n");
-    printf("  recovery phrase: %s\n", audit.fHaveSeed ? "present" : "not installed");
+    if (audit.fHaveSeed)
+        printf("  recovery phrase: present\n");
+    else if (audit.fSeedEncryptedLocked)
+        printf("  recovery phrase: encrypted, unlock wallet to audit\n");
+    else
+        printf("  recovery phrase: not installed\n");
     if (audit.fHaveSeed)
     {
         printf("  derivation schema: %s\n", HDKeySchemaName(audit.nSchema).c_str());
@@ -412,6 +417,15 @@ int CmdRecoveryAudit()
     if (!audit.fDeriveComplete)
         printf("  derivation warning: %s\n", audit.strDeriveError.c_str());
     printf("  total spendable balance:      %s BTF\n", FormatMoney(nTotal).c_str());
+    if (audit.fSeedEncryptedLocked)
+    {
+        printf("  recovery coverage:            unavailable while wallet is locked\n");
+        printf("  immature mining rewards:      %s BTF\n", FormatMoney(nImmatureTotal).c_str());
+        printf("\n");
+        printf("Unlock the wallet with /walletpassphrase or /walletpassphrase=@FILE to audit phrase coverage.\n");
+        fflush(stdout);
+        return 2;
+    }
     printf("  covered by recovery phrase:   %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nRecoverableCredit).c_str(), audit.nRecoverableTx);
     printf("  wallet.dat-only balance:      %s BTF (%d transaction(s))\n",

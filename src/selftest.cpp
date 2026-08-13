@@ -941,7 +941,8 @@ static string QuoteCommandArg(const string& str)
 
 static int RunBitflashChild(const string& strExe,
                             const vector<string>& vArgs,
-                            const string* pStdinFile = NULL)
+                            const string* pStdinFile = NULL,
+                            const string* pOutputFile = NULL)
 {
 #ifdef _WIN32
     vector<char*> argv;
@@ -954,8 +955,16 @@ static int RunBitflashChild(const string& strExe,
     int nOldErr = _dup(2);
     int nOldIn = _dup(0);
     int nNull = _open("NUL", _O_WRONLY);
+    int nOut = -1;
     int nIn = -1;
-    if (nNull >= 0)
+    if (pOutputFile)
+        nOut = _open(pOutputFile->c_str(), _O_WRONLY|_O_CREAT|_O_TRUNC|_O_BINARY, _S_IREAD|_S_IWRITE);
+    if (nOut >= 0)
+    {
+        _dup2(nOut, 1);
+        _dup2(nOut, 2);
+    }
+    else if (nNull >= 0)
     {
         _dup2(nNull, 1);
         _dup2(nNull, 2);
@@ -969,6 +978,8 @@ static int RunBitflashChild(const string& strExe,
     int nRet = _spawnv(_P_WAIT, strExe.c_str(), &argv[0]);
     if (nIn >= 0)
         _close(nIn);
+    if (nOut >= 0)
+        _close(nOut);
     if (nNull >= 0)
         _close(nNull);
     if (nOldIn >= 0)
@@ -993,7 +1004,10 @@ static int RunBitflashChild(const string& strExe,
         strCmd += " " + QuoteCommandArg(vArgs[i]);
     if (pStdinFile)
         strCmd += " < " + QuoteCommandArg(*pStdinFile);
-    strCmd += " > /dev/null 2>&1";
+    if (pOutputFile)
+        strCmd += " > " + QuoteCommandArg(*pOutputFile) + " 2>&1";
+    else
+        strCmd += " > /dev/null 2>&1";
     return system(strCmd.c_str());
 #endif
 }
@@ -1066,6 +1080,8 @@ static int RunWalletEncryptSelfTest()
         string strRightDump = tmp + "/right-pass-dump.txt";
         string strLiteralDump = tmp + "/literal-pass-dump.txt";
         string strStdinDump = tmp + "/stdin-pass-dump.txt";
+        string strLockedAudit = tmp + "/locked-recovery-audit.txt";
+        string strUnlockedAudit = tmp + "/unlocked-recovery-audit.txt";
         string strWrongPassFile = tmp + "/wrong-pass.txt";
         string strRightPassFile = tmp + "/right-pass.txt";
         nFail += Check(WriteTextFile(strWrongPassFile, "wrong-passphrase\n") &&
@@ -1080,6 +1096,17 @@ static int RunWalletEncryptSelfTest()
         int nWrongRet = RunBitflashChild(strExe, vWrongArgs);
         nFail += Check(nWrongRet != 0 && !FileExists(strWrongDump.c_str()),
                        "a restarted wallet rejects the wrong-passphrase") ? 0 : 1;
+
+        vector<string> vLockedAuditArgs;
+        vLockedAuditArgs.push_back("-datadir=" + tmp);
+        vLockedAuditArgs.push_back("-recoveryaudit");
+        vLockedAuditArgs.push_back("-nogui");
+        int nLockedAuditRet = RunBitflashChild(strExe, vLockedAuditArgs, NULL, &strLockedAudit);
+        nFail += Check(nLockedAuditRet == 2 &&
+                       FileContainsText(strLockedAudit, "recovery phrase: encrypted, unlock wallet to audit") &&
+                       FileContainsText(strLockedAudit, "recovery coverage:            unavailable while wallet is locked") &&
+                       FileContainsText(strLockedAudit, "Unlock the wallet with /walletpassphrase"),
+                       "a locked encrypted wallet reports that phrase coverage needs unlock") ? 0 : 1;
 
         vector<string> vLiteralArgs;
         vLiteralArgs.push_back("-datadir=" + tmp);
@@ -1100,6 +1127,17 @@ static int RunWalletEncryptSelfTest()
                        "a restarted wallet unlocks with the right passphrase") ? 0 : 1;
         nFail += Check(FileContainsText(strRightDump, HexStrLocal(vchDefaultPrivBytes)),
                        "the restarted wallet can decrypt and dump the original key") ? 0 : 1;
+
+        vector<string> vUnlockedAuditArgs;
+        vUnlockedAuditArgs.push_back("-datadir=" + tmp);
+        vUnlockedAuditArgs.push_back("-walletpassphrase=@" + strRightPassFile);
+        vUnlockedAuditArgs.push_back("-recoveryaudit");
+        vUnlockedAuditArgs.push_back("-nogui");
+        int nUnlockedAuditRet = RunBitflashChild(strExe, vUnlockedAuditArgs, NULL, &strUnlockedAudit);
+        nFail += Check(nUnlockedAuditRet == 0 &&
+                       FileContainsText(strUnlockedAudit, "recovery phrase: present") &&
+                       !FileContainsText(strUnlockedAudit, "recovery phrase: not installed"),
+                       "an unlocked encrypted wallet audits the installed recovery phrase") ? 0 : 1;
 
         vector<string> vStdinArgs;
         vStdinArgs.push_back("-datadir=" + tmp);

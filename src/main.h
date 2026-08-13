@@ -292,6 +292,7 @@ int64 GetBalance();
 struct WalletRecoveryAudit
 {
     bool fHaveSeed;
+    bool fSeedEncryptedLocked;
     bool fDeriveComplete;
     int nSchema;
     unsigned int nDerivedKnown;
@@ -311,6 +312,7 @@ struct WalletRecoveryAudit
     WalletRecoveryAudit()
     {
         fHaveSeed = false;
+        fSeedEncryptedLocked = false;
         fDeriveComplete = true;
         nSchema = HD_SCHEMA_NONE;
         nDerivedKnown = 0;

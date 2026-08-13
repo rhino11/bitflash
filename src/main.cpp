@@ -4355,6 +4355,9 @@ WalletRecoveryAudit GetWalletRecoveryAudit()
     CRITICAL_BLOCK(cs_keyPool)
     {
         audit.fHaveSeed = HaveHDSeed();
+        audit.fSeedEncryptedLocked = !audit.fHaveSeed &&
+                                     (!vchCryptedHDMaster.empty() ||
+                                      !vchCryptedHDChainCode.empty());
         audit.nSchema = nHDKeySchema;
         audit.nDerivedKnown = nHDNext;
         audit.nReceiveNext = nHDReceiveNext;
