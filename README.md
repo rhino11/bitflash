@@ -52,6 +52,8 @@ configuration — it connects automatically and starts syncing.
 **Linux:** make the `.AppImage` executable and run it.
 
 **Windows:** extract the `-windows.zip` and run `Bitflash.exe`.
+If you want managed Tor without a separate Tor install, use the
+`-windows-with-tor.zip` package and start Bitflash with `-managedtor`.
 
 Every release ships a `SHA256SUMS` covering the assets. Verifying takes a second
 and is worth doing:
@@ -451,6 +453,19 @@ Installs deps via apt, builds libsecp256k1 and RandomX, produces `Bitflash-*.App
 make windows
 ```
 Installs deps via pacman, produces `Bitflash-*-windows.zip`.
+
+To build the Windows package that also carries the Tor Expert Bundle:
+
+```bash
+make windows-tor
+```
+
+That produces `Bitflash-*-windows-with-tor.zip`. The release script downloads
+the Tor Expert Bundle from the official Tor archive, verifies its pinned SHA256,
+optionally verifies the Tor Project GPG signature when `gpg` is available, and
+places `tor/tor.exe` beside `Bitflash.exe` so `-managedtor` works without a
+separate Tor install. For release builds, use `TOR_VERIFY_GPG=required make
+windows-tor` to require the extra signature check.
 
 ---
 
