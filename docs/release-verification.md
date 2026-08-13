@@ -83,9 +83,11 @@ key in `verify-release.sh`.
 
 For Windows releases with managed Tor built in, run `make windows-tor`. It
 creates `Bitflash-*-windows-with-tor.zip` by downloading the Tor Expert Bundle,
-checking the pinned SHA256 in `scripts/package-windows-tor.sh`, and placing
-`tor/tor.exe` next to `Bitflash.exe`. Include that zip in `SHA256SUMS` like any
-other release asset.
+checking the pinned SHA256 in `scripts/package-windows-tor.sh`, optionally
+verifying the Tor Project `.asc` signature, and placing `tor/tor.exe` next to
+`Bitflash.exe`. For release builds, run `TOR_VERIFY_GPG=required make
+windows-tor` so the signature check is mandatory. Include that zip in
+`SHA256SUMS` like any other release asset.
 
 ## Why this matters
 

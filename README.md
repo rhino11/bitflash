@@ -462,8 +462,10 @@ make windows-tor
 
 That produces `Bitflash-*-windows-with-tor.zip`. The release script downloads
 the Tor Expert Bundle from the official Tor archive, verifies its pinned SHA256,
-and places `tor/tor.exe` beside `Bitflash.exe` so `-managedtor` works without a
-separate Tor install.
+optionally verifies the Tor Project GPG signature when `gpg` is available, and
+places `tor/tor.exe` beside `Bitflash.exe` so `-managedtor` works without a
+separate Tor install. For release builds, use `TOR_VERIFY_GPG=required make
+windows-tor` to require the extra signature check.
 
 ---
 

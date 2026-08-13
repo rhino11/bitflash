@@ -65,9 +65,12 @@ make windows-tor
 ```
 
 The packaging script verifies a pinned SHA256 for the downloaded Tor Expert
-Bundle before copying it into the release directory. The Tor binary is bundled;
-the runtime data directory, hidden-service key, and control cookie are still
-created under the user's Bitflash data directory.
+Bundle before copying it into the release directory. When `gpg` is available it
+also verifies the matching `.asc` signature against the pinned Tor Browser
+Developers signing-key fingerprint. Release builds should use
+`TOR_VERIFY_GPG=required make windows-tor` to make that second check mandatory.
+The Tor binary is bundled; the runtime data directory, hidden-service key, and
+control cookie are still created under the user's Bitflash data directory.
 
 To point at a specific Tor executable:
 
