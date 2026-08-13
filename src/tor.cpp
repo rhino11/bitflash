@@ -101,7 +101,10 @@ static bool EnsureDir(const std::string& path, std::string& errOut)
     if (stat(path.c_str(), &st) == 0)
     {
         if (S_ISDIR(st.st_mode))
+        {
+            chmod(path.c_str(), 0700);
             return true;
+        }
         errOut = strprintf("%s exists and is not a directory", path.c_str());
         return false;
     }
@@ -115,10 +118,11 @@ static bool EnsureDir(const std::string& path, std::string& errOut)
 static bool WriteTextFile(const std::string& path, const std::string& data,
                           std::string& errOut)
 {
-    FILE* f = fopen(path.c_str(), "wb");
+    std::string tmp = path + ".tmp";
+    FILE* f = fopen(tmp.c_str(), "wb");
     if (!f)
     {
-        errOut = strprintf("could not write %s", path.c_str());
+        errOut = strprintf("could not write %s", tmp.c_str());
         return false;
     }
     bool ok = fwrite(data.data(), 1, data.size(), f) == data.size();
@@ -126,9 +130,27 @@ static bool WriteTextFile(const std::string& path, const std::string& data,
         ok = false;
     if (!ok)
     {
-        errOut = strprintf("could not finish writing %s", path.c_str());
+        remove(tmp.c_str());
+        errOut = strprintf("could not finish writing %s", tmp.c_str());
         return false;
     }
+#ifdef _WIN32
+    if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
+    {
+        remove(tmp.c_str());
+        errOut = strprintf("could not install %s atomically (error %lu)",
+                           path.c_str(), (unsigned long)GetLastError());
+        return false;
+    }
+#else
+    if (rename(tmp.c_str(), path.c_str()) != 0)
+    {
+        remove(tmp.c_str());
+        errOut = strprintf("could not install %s atomically: %s",
+                           path.c_str(), strerror(errno));
+        return false;
+    }
+#endif
     return true;
 }
 
@@ -313,6 +335,100 @@ static bool StartTorProcess(const std::string& torPath, const std::string& torrc
 #endif
 }
 
+static bool ManagedTorProcessAlive(bool& fExited, int& nExitCode)
+{
+    fExited = false;
+    nExitCode = 0;
+#ifdef _WIN32
+    HANDLE hProcess = NULL;
+    CRITICAL_BLOCK(cs_managedTor)
+        hProcess = g_managedTorProcess.hProcess;
+    if (!hProcess)
+        return false;
+    DWORD code = 0;
+    if (!GetExitCodeProcess(hProcess, &code))
+        return false;
+    if (code != STILL_ACTIVE)
+    {
+        fExited = true;
+        nExitCode = (int)code;
+        return false;
+    }
+    return true;
+#else
+    pid_t pid = -1;
+    CRITICAL_BLOCK(cs_managedTor)
+        pid = g_managedTorPid;
+    if (pid <= 0)
+        return false;
+    int status = 0;
+    pid_t r = waitpid(pid, &status, WNOHANG);
+    if (r == 0)
+        return true;
+    if (r == pid)
+    {
+        fExited = true;
+        if (WIFEXITED(status))
+            nExitCode = WEXITSTATUS(status);
+        else if (WIFSIGNALED(status))
+            nExitCode = 128 + WTERMSIG(status);
+        CRITICAL_BLOCK(cs_managedTor)
+            if (g_managedTorPid == pid)
+                g_managedTorPid = -1;
+    }
+    return false;
+#endif
+}
+
+static bool ValidateManagedTorStartup(std::string& errOut)
+{
+    Sleep(500);
+    bool fExited = false;
+    int nExitCode = 0;
+    if (ManagedTorProcessAlive(fExited, nExitCode))
+        return true;
+    if (fExited)
+        errOut = strprintf("Tor exited during startup with code %d", nExitCode);
+    else
+        errOut = "Tor process is not running after startup";
+    return false;
+}
+
+static void MarkManagedTorDead(int nExitCode)
+{
+    BtfStopManagedTor();
+    CRITICAL_BLOCK(cs_managedTor)
+        g_managedTorStatus = strprintf("stopped unexpectedly, Tor exit code %d", nExitCode);
+}
+
+static void ThreadManagedTorWatchdog(void*)
+{
+    for (;;)
+    {
+        Sleep(5000);
+        CRITICAL_BLOCK(cs_managedTor)
+        {
+            if (!g_fManagedTor || g_fManagedTorStopping || fShutdown)
+                return;
+        }
+
+        bool fExited = false;
+        int nExitCode = 0;
+        if (!ManagedTorProcessAlive(fExited, nExitCode))
+        {
+            if (fExited)
+                MarkManagedTorDead(nExitCode);
+            else
+            {
+                BtfStopManagedTor();
+                CRITICAL_BLOCK(cs_managedTor)
+                    g_managedTorStatus = "stopped unexpectedly, Tor process handle is gone";
+            }
+            return;
+        }
+    }
+}
+
 static void ThreadManagedTorHostname(void*)
 {
     std::string hostnamePath;
@@ -350,12 +466,9 @@ static void ThreadManagedTorHostname(void*)
         Sleep(1000);
     }
 
+    BtfStopManagedTor();
     CRITICAL_BLOCK(cs_managedTor)
-    {
-        if (!g_fManagedTorStopping)
-            g_managedTorStatus = strprintf("running, SOCKS5 127.0.0.1:%u, waiting for hidden service hostname",
-                                           (unsigned)g_managedTorSocksPort);
-    }
+        g_managedTorStatus = "failed: Tor did not create a hidden service hostname within 90s";
 }
 
 bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
@@ -411,6 +524,13 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
         }
         return false;
     }
+    if (!ValidateManagedTorStartup(errOut))
+    {
+        BtfStopManagedTor();
+        CRITICAL_BLOCK(cs_managedTor)
+            g_managedTorStatus = strprintf("failed: %s", errOut.c_str());
+        return false;
+    }
 
     std::string proxyErr;
     if (!BtfEnableTorProxy(strprintf("127.0.0.1:%u", (unsigned)socksPort), proxyErr))
@@ -424,6 +544,12 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
     {
         BtfStopManagedTor();
         errOut = "could not start managed Tor hostname watcher";
+        return false;
+    }
+    if (_beginthread(ThreadManagedTorWatchdog, 0, NULL) == (uintptr_t)-1)
+    {
+        BtfStopManagedTor();
+        errOut = "could not start managed Tor watchdog";
         return false;
     }
 
