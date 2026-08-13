@@ -42,8 +42,8 @@ The docs index should expose these source files:
 Each release remains under its versioned directory:
 
 ```text
-https://releases.bitflash.network/v1.2.18/SHA256SUMS
-https://releases.bitflash.network/v1.2.18/SHA256SUMS.asc
+https://releases.bitflash.network/v1.2.19/SHA256SUMS
+https://releases.bitflash.network/v1.2.19/SHA256SUMS.asc
 ```
 
 The release root should also alias the latest files:

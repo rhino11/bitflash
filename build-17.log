@@ -1,0 +1,78 @@
+Lendo listas de pacotes...
+Construindo árvore de dependências...
+Lendo informação de estado...
+build-essential já é a versão mais nova (12.12).
+cmake já é a versão mais nova (3.31.6-2).
+git já é a versão mais nova (1:2.47.3-0+deb13u1).
+pkg-config já é a versão mais nova (1.8.1-4).
+autoconf já é a versão mais nova (2.72-3.1).
+libtool já é a versão mais nova (2.5.4-4).
+libssl-dev já é a versão mais nova (3.5.6-1~deb13u2).
+libdb5.3++-dev já é a versão mais nova (5.3.28+dfsg2-9).
+libsodium-dev já é a versão mais nova (1.0.18-1+deb13u1).
+nlohmann-json3-dev já é a versão mais nova (3.11.3-2.1).
+libboost-system-dev já é a versão mais nova (1.83.0.2+b2).
+libglfw3-dev já é a versão mais nova (3.4-3).
+libgl-dev já é a versão mais nova (1.7.0-1+b2).
+python3-pil já é a versão mais nova (11.1.0-5+deb13u4).
+clang já é a versão mais nova (1:19.0-63).
+0 pacotes atualizados, 0 pacotes novos instalados, 0 a serem removidos e 49 não atualizados.
+==> libsecp256k1 already installed
+==> RandomX already built
+make -C src -f Makefile -j1
+make[1]: Entrando no diretório '/root/rel16/src'
+
+make[1]: Nada a ser feito para 'all'. 
+make[1]: Saindo do diretório '/root/rel16/src'
+
+strip src/bitflash
+make -f Makefile appimage
+make[1]: Entrando no diretório '/root/rel16'
+
+==> building AppImage
+  bundled libsodium.so.23
+  bundled libdb_cxx-5.3.so
+  bundled libglfw.so.3
+Built: Bitflash-1.2.17-x86_64.AppImage
+make[1]: Saindo do diretório '/root/rel16'
+
+make -f Makefile linux-node
+make[1]: Entrando no diretório '/root/rel16'
+
+Lendo listas de pacotes...
+Construindo árvore de dependências...
+Lendo informação de estado...
+build-essential já é a versão mais nova (12.12).
+cmake já é a versão mais nova (3.31.6-2).
+git já é a versão mais nova (1:2.47.3-0+deb13u1).
+pkg-config já é a versão mais nova (1.8.1-4).
+autoconf já é a versão mais nova (2.72-3.1).
+libtool já é a versão mais nova (2.5.4-4).
+libssl-dev já é a versão mais nova (3.5.6-1~deb13u2).
+libdb5.3++-dev já é a versão mais nova (5.3.28+dfsg2-9).
+libsodium-dev já é a versão mais nova (1.0.18-1+deb13u1).
+nlohmann-json3-dev já é a versão mais nova (3.11.3-2.1).
+libboost-system-dev já é a versão mais nova (1.83.0.2+b2).
+libglfw3-dev já é a versão mais nova (3.4-3).
+libgl-dev já é a versão mais nova (1.7.0-1+b2).
+python3-pil já é a versão mais nova (11.1.0-5+deb13u4).
+clang já é a versão mais nova (1:19.0-63).
+0 pacotes atualizados, 0 pacotes novos instalados, 0 a serem removidos e 49 não atualizados.
+==> libsecp256k1 already installed
+==> RandomX already built
+make -C src -f Makefile bitflash-node -j1
+make[2]: Entrando no diretório '/root/rel16/src'
+
+make[2]: 'bitflash-node' está atualizado. 
+make[2]: Saindo do diretório '/root/rel16/src'
+
+strip src/bitflash-node
+cp src/bitflash-node bitflash-node-1.2.17-x86_64
+Built: bitflash-node-1.2.17-x86_64
+make[1]: Saindo do diretório '/root/rel16'
+
+==> building AppImage
+  bundled libsodium.so.23
+  bundled libdb_cxx-5.3.so
+  bundled libglfw.so.3
+Built: Bitflash-1.2.17-x86_64.AppImage

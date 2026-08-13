@@ -83,7 +83,7 @@ Public mirrors should make the latest checksum files available both under the
 versioned release directory and at the release root:
 
 ```text
-https://releases.bitflash.network/v1.2.18/SHA256SUMS
+https://releases.bitflash.network/v1.2.19/SHA256SUMS
 https://releases.bitflash.network/SHA256SUMS        # alias to latest
 ```
 
