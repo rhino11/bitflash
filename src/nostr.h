@@ -40,6 +40,13 @@ std::string BtfActiveRelay();
 // Record the relay this node just registered its service at (thread-safe).
 void BtfSetActiveRelay(const std::string& relay);
 
+// Optional Tor hidden-service endpoint for this node's normal P2P listener.
+// Set by /onionservice=HOST.onion:PORT. The endpoint is signed into this node's
+// .btf descriptor, so peers with -tor can dial it directly before falling back
+// to rendezvous relays.
+bool BtfSetLocalOnionEndpoint(const std::string& endpoint, std::string& errOut);
+std::string BtfLocalOnionEndpoint();
+
 // If set (via /announcerelay=host:port), this node announces that relay on
 // Nostr so other nodes discover it automatically -- no manual seed-list edit.
 extern std::string strBtfAnnounceRelay;
@@ -94,12 +101,15 @@ void* BtfSecpContext();
 // self-certified descriptor and return its meeting node ("host:port") and
 // x25519 public key for the end-to-end channel.
 bool BtfResolve(const std::string& btfAddr, std::string& meetingHostPort,
-                unsigned char enc_pub[32]);
+                unsigned char enc_pub[32],
+                std::string* onionHostPort = NULL);
 
 // Result of resolving one .btf address via BtfResolveMany.
 struct BtfResolvedPeer
 {
     std::string meetingHostPort;
+    std::string onionHostPort;
+    std::string descriptor;
     unsigned char enc_pub[32];
 };
 

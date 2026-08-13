@@ -18,11 +18,16 @@ A connection to a `.btf` service has three layers:
 1. **Discovery (Nostr).** The service publishes a signed descriptor as a Nostr
    event. A caller fetches it by the service public key and verifies the
    signature. The descriptor says which rendezvous relay the service is waiting
-   at and which encryption key to use.
+   at, which encryption key to use, and optionally which Tor hidden service can
+   be dialed directly.
 2. **Rendezvous (TCP).** Caller and service both connect out to the same relay
    and are paired by public key. Neither needs an inbound port or a public IP.
    After pairing the relay is a blind byte pipe.
-3. **Encrypted channel (X25519 + XChaCha20-Poly1305).** Over the paired pipe the
+3. **Direct onion fallback bypass.** If the descriptor carries a valid signed
+   `.onion:port` endpoint and the caller is running with Tor mode, the caller
+   tries that endpoint before using rendezvous. This removes the rendezvous
+   relay from the data path for peers that choose to run hidden services.
+4. **Encrypted channel (X25519 + XChaCha20-Poly1305).** Over the paired pipe the
    caller and service run an ephemeral to static handshake and then exchange
    authenticated frames. The relay sees only ciphertext.
 
@@ -107,6 +112,8 @@ The default rendezvous port is `8434`.
 The descriptor is a JSON object, signed with the identity key over a domain
 separated digest of its own fields.
 
+Legacy descriptor:
+
 ```json
 {
   "v": 2,
@@ -118,7 +125,22 @@ separated digest of its own fields.
 }
 ```
 
-The signed digest is:
+Onion-capable descriptor:
+
+```json
+{
+  "v": 3,
+  "pubkey": "<hex 32-byte x-only identity key>",
+  "enc": "<hex 32-byte X25519 public key>",
+  "meeting_node": "host:port",
+  "onion": "<56-char-v3-name>.onion:8433",
+  "created": <unix seconds>,
+  "sig": "<legacy v2 signature>",
+  "sig3": "<signature over the onion-capable digest>"
+}
+```
+
+The legacy signed digest is:
 
 ```
 digest = SHA256( ".btf-descriptor-v2"
@@ -128,17 +150,37 @@ digest = SHA256( ".btf-descriptor-v2"
                || created        (8 bytes, big endian) )
 ```
 
-The signature is a deterministic BIP340 Schnorr signature (no auxiliary
-randomness) over `digest` by the identity key.
+`sig` is kept on v3 descriptors so old nodes can still resolve and dial through
+the rendezvous relay. The onion-capable digest is:
+
+```
+digest3 = SHA256( ".btf-descriptor-v3-onion"
+                || pubkey[32]
+                || enc            (raw bytes of the string)
+                || meeting_node   (raw bytes of the string)
+                || onion          (raw bytes of the normalized string)
+                || created        (8 bytes, big endian) )
+```
+
+`sig` and `sig3` are deterministic BIP340 Schnorr signatures (no auxiliary
+randomness) over their respective digests by the identity key.
 
 **Verification** (untrusted input, must never throw): parse the JSON, require all
 fields with the right types, confirm `pubkey` equals the address being resolved,
 recompute the digest, and verify the Schnorr signature. Any failure rejects the
 descriptor.
 
+If `onion` is present, readers accept it only when it is a normalized v3 onion
+endpoint and `sig3` verifies. A bad or tampered onion field is ignored; the v2
+descriptor can still be used for rendezvous fallback if `sig` verifies.
+
 `created` lets a reader prefer the freshest descriptor when more than one is
-seen. A node only publishes a descriptor once it has actually registered at a
-`meeting_node`, so it never advertises a relay it cannot be reached at.
+seen. A node without a direct onion endpoint only publishes a descriptor once it
+has actually registered at a `meeting_node`, so it never advertises a relay it
+cannot be reached at. A node with a direct onion endpoint may publish before
+rendezvous registration using `meeting_node = "rendezvous-pending"`; Tor peers
+can still dial the signed onion endpoint, and rendezvous becomes fallback once
+registration succeeds.
 
 ## 6. Rendezvous transport
 
@@ -243,8 +285,9 @@ tunnel.
   not published anywhere.
 - **Forward secrecy.** The caller's per connection ephemeral key means a later
   compromise of the service encryption key does not decrypt past sessions.
-- **IP privacy.** Neither side needs a public IP or an inbound port. The observable
-  network fact is that each side has a TCP connection to a relay.
+- **IP privacy.** Neither side needs a public IP or an inbound port for
+  rendezvous. With a signed `.onion` endpoint, the reachable side exposes only a
+  Tor hidden service and the relay is not in the peer connection path.
 
 ## 10. Threat model and limitations
 
@@ -265,6 +308,9 @@ tunnel.
   unreachable, discovery stalls until one is reachable again. Relay TLS is
   verified, which closes a man in the middle path on discovery, but availability
   still rests on the relay set.
+- **Direct onion is not automatic Tor configuration.** Bitflash signs and
+  advertises a hidden-service endpoint, and Tor-mode peers can dial it. The Tor
+  daemon still owns hidden-service creation, private keys, rotation and uptime.
 
 ## 11. Wire reference
 
@@ -273,9 +319,9 @@ tunnel.
 | `.btf` Base32 alphabet | `abcdefghijklmnopqrstuvwxyz234567`, no padding |
 | Address payload | `pubkey[32] || checksum[2]`, 55 Base32 chars |
 | Address checksum | `SHA256(".btf-checksum-v1" || pubkey)[0..2]` |
-| Descriptor domain sep | `.btf-descriptor-v2` |
-| Descriptor version | `2` |
-| Descriptor signature | BIP340 Schnorr, deterministic (no aux rand) |
+| Descriptor domain sep | `.btf-descriptor-v2`; optional onion sep `.btf-descriptor-v3-onion` |
+| Descriptor version | `2`; `3` when a signed onion endpoint is present |
+| Descriptor signature | BIP340 Schnorr, deterministic (no aux rand), v3 keeps `sig` plus `sig3` |
 | Nostr descriptor event | kind `38501`, `d = btf-descriptor-2` |
 | Nostr relay event | kind `38502`, `d = btf-relay-2` |
 | Nostr pool event | kind `38503`, `d = btf-pool-2` |

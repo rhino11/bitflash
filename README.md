@@ -22,7 +22,7 @@ Bitflash keeps Satoshi's original consensus rules and replaces two things:
 
 **RandomX proof of work.** Memory-hard algorithm used by Monero. A laptop competes equally with a server. ASICs and GPUs have no advantage.
 
-**Anonymous addressing.** Every node has a `.btf` address derived from its public key, similar to a Tor `.onion`. Nodes reach each other through encrypted rendezvous tunnels, so no port forwarding is needed and a node behind CGNAT works normally.
+**Anonymous addressing.** Every node has a `.btf` address derived from its public key, similar to a Tor `.onion`. Nodes reach each other through encrypted rendezvous tunnels by default, and can advertise a signed direct `.onion` endpoint for Tor peers.
 
 No premine. No ICO. 50 BTF per block, halving on schedule, 21M cap, ~2 minute blocks.
 
@@ -30,14 +30,15 @@ No premine. No ICO. 50 BTF per block, halving on schedule, 21M cap, ~2 minute bl
 
 Worth being precise, because the difference matters if you are relying on it.
 
-**A peer you reach over `.btf` does not learn your IP.** All outbound connections go through a rendezvous tunnel; there is no IP-based peer dialling left in the node. The relay forwards encrypted bytes and cannot read or alter them.
+**A peer you reach over `.btf` does not learn your IP.** Outbound peer discovery uses rendezvous tunnels by default. If both sides use Tor and the peer advertises a signed `.onion` endpoint, the node connects directly to that hidden service instead. In both cases the peer does not see your clearnet IP.
 
-**The rendezvous relay does see your IP.** It has to — it is the thing your TCP connection terminates on. Relays are run by volunteers, so treat that as a party who knows you are on the network.
+**The rendezvous relay sees your IP unless you use Tor.** It has to — it is the thing your TCP connection terminates on. With `-tor`, the relay sees Tor instead. With a signed direct `.onion` peer endpoint, the relay is not on that connection path at all.
 
 **The node still listens on 8433.** Nothing dials by IP any more, but the listener is still there, so anyone who already knows your address and can reach that port may connect directly. If that matters to you, firewall it.
 
 This is unlinkability between peers, not anonymity against a network observer.
-For Tor routing, start the node with `-tor`; see [Tor mode](docs/tor.md).
+For Tor routing and direct onion peer endpoints, start the node with `-tor`;
+see [Tor mode](docs/tor.md).
 For a plain SOCKS5 proxy without Tor-specific defaults, use
 `-socks=HOST:PORT`.
 
@@ -336,8 +337,9 @@ Other options worth knowing:
 ```bash
 -datadir=PATH    # wallet and chain data elsewhere
 -port=N          # P2P listen port, default 8433
--socks=HOST:PORT # SOCKS5 for outbound Nostr and .btf rendezvous dials
+-socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
+-onionservice=HOST.onion:PORT # advertise this node's Tor hidden service
 -debug           # verbose log; without it debug.log is nearly silent
 -help            # full list
 ```
@@ -346,15 +348,19 @@ Other options worth knowing:
 needed — the data directory takes an exclusive lock, so a second node pointed at
 the same one will refuse to start.
 
-`-socks=127.0.0.1:9050` routes outbound Nostr discovery and `.btf` rendezvous
-dials through a local SOCKS5 proxy such as Tor. When it is set, the node skips
+`-socks=127.0.0.1:9050` routes outbound Nostr discovery, `.btf` rendezvous
+dials, and direct `.onion` peer dials through a local SOCKS5 proxy such as Tor.
+When it is set, the node skips
 plain HTTP external-IP probes instead of leaking a direct request outside the
 proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
 
 `-tor` is a privacy shorthand for the usual local Tor SOCKS5 listener at
-`127.0.0.1:9050`. It routes outbound Nostr discovery and `.btf` rendezvous
-dials through Tor, refuses direct `.onion` resolution, and keeps external-IP
-probes disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
+`127.0.0.1:9050`. It routes outbound Nostr discovery, `.btf` rendezvous dials,
+and signed direct `.onion` peer dials through Tor, and keeps external-IP probes
+disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else. To make your own
+node reachable without a rendezvous relay, expose port `8433` as a Tor hidden
+service and pass `-onionservice=HOST.onion:8433`; peers with `-tor` will try it
+before falling back to rendezvous.
 
 ### When something looks wrong
 

@@ -40,6 +40,8 @@ When Tor mode is enabled:
 
 - outbound Nostr relay dials use Tor;
 - outbound `.btf` rendezvous relay dials use Tor;
+- outbound direct peer dials prefer signed `.onion` endpoints when a peer
+  advertises one;
 - destination names are sent to Tor as SOCKS5 domain-name CONNECT requests, so
   the local DNS resolver does not see them;
 - direct `.onion` dials are refused unless a SOCKS5/Tor proxy is enabled;
@@ -98,7 +100,7 @@ bitflash -operator -tor \
   -announcerelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434
 ```
 
-## Full-node hidden service
+## Direct full-node hidden service
 
 The legacy P2P listener still binds to port `8433`. You can expose it through
 Tor manually:
@@ -108,6 +110,35 @@ HiddenServiceDir /var/lib/tor/bitflash-node/
 HiddenServicePort 8433 127.0.0.1:8433
 ```
 
-Current automatic peer discovery is `.btf`/rendezvous based, not onion-address
-gossip. Treat direct full-node onion access as an operator/admin tool unless a
-future release adds first-class onion peer advertisements.
+After restarting Tor, read the generated onion name:
+
+```bash
+sudo cat /var/lib/tor/bitflash-node/hostname
+```
+
+Then start Bitflash with Tor outbound enabled and advertise that hidden service:
+
+```bash
+bitflash -tor \
+  -onionservice=exampleexampleexampleexampleexampleexampleexampleexample.onion:8433
+```
+
+That onion endpoint is signed into this node's self-certifying `.btf`
+descriptor. New peers that resolve the descriptor and also run with `-tor` try
+the `.onion:8433` P2P connection first. If it fails, they fall back to the
+ordinary encrypted rendezvous path. Older nodes ignore the onion field and still
+use the rendezvous relay because the descriptor keeps the legacy signature too.
+
+If the node has `-onionservice` but has not registered at any rendezvous relay
+yet, it can still publish an onion-capable descriptor with
+`meeting_node = rendezvous-pending`. Tor-capable peers can dial the hidden
+service directly from that descriptor. Rendezvous becomes a fallback, not a
+precondition for being discoverable.
+
+This means rendezvous relays stop being the only way to reach a node that has
+published a hidden service. They remain useful bootstrap/fallback infrastructure,
+but an already-discovered onion-capable peer can be reached directly over Tor.
+
+The node does not create or rotate Tor hidden services itself. Tor owns the
+private key under `HiddenServiceDir`; back it up if you want the onion name to
+stay stable.

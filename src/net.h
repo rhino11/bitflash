@@ -28,7 +28,8 @@ enum
 bool GetMyExternalIP(unsigned int& ipRet);
 CNode* ConnectNodeBtf(const string& strBtfAddr);
 CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting,
-                              const unsigned char enc_pub[32]);
+                              const string& strOnion, const unsigned char enc_pub[32],
+                              const string& strDesc=string());
 void ThreadBtfAccept(void* parg);
 void ThreadBtfConnect(void* parg);
 extern string strBtfConnect;

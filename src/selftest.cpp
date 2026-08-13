@@ -6,6 +6,7 @@
 // and against a temporary data directory.
 
 #include "headers_core.h"
+#include "btfaddr.h"
 #include "bip32.h"
 #include "proxy.h"
 #include "selftest.h"
@@ -1507,6 +1508,14 @@ static int RunSocks5ProxySelfTest()
                    !BtfIsTorOnionHost("relay.example") &&
                    !BtfIsTorOnionHost(".onion"),
                    "detects .onion hosts without accepting lookalikes") ? 0 : 1;
+    std::string onion;
+    nFail += Check(btf::NormalizeOnionEndpoint("ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJKLMNOPQRSTUVWXYZABCD.onion.:8433", onion) &&
+                   onion == "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd.onion:8433",
+                   "normalizes v3 onion peer endpoint") ? 0 : 1;
+    nFail += Check(!btf::NormalizeOnionEndpoint("short.onion:8433", onion) &&
+                   !btf::NormalizeOnionEndpoint("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd.onion:0", onion) &&
+                   !btf::NormalizeOnionEndpoint("abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabc1.onion:8433", onion),
+                   "rejects malformed onion peer endpoints") ? 0 : 1;
 
     BtfClearSocks5Proxy();
     nFail += Check(!BtfSocks5ProxyEnabled(), "starts disabled after clear") ? 0 : 1;
