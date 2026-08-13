@@ -278,7 +278,7 @@ string GetDiagnosticsText()
         {
             if (pnode->fInbound)
                 nInbound++;
-            if (pnode->strBtfMeeting.compare(0, 6, "onion ") == 0)
+            if (pnode->strBtfMeeting.find(".onion:") != string::npos)
                 nDirectOnion++;
             else if (!pnode->strBtfMeeting.empty())
                 nRendezvous++;
