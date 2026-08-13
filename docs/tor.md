@@ -53,6 +53,22 @@ Without a value, Bitflash looks for Tor in this order:
 2. `tor.exe` or `tor` beside the Bitflash binary;
 3. `tor.exe` or `tor` on `PATH`.
 
+Windows releases can also be built as `Bitflash-*-windows-with-tor.zip`. That
+package includes the official Tor Expert Bundle under `tor/`, so the first path
+above exists immediately after extraction and `bitflash -managedtor` needs no
+separate Tor install.
+
+The bundled-Tor package is created by:
+
+```bash
+make windows-tor
+```
+
+The packaging script verifies a pinned SHA256 for the downloaded Tor Expert
+Bundle before copying it into the release directory. The Tor binary is bundled;
+the runtime data directory, hidden-service key, and control cookie are still
+created under the user's Bitflash data directory.
+
 To point at a specific Tor executable:
 
 ```bash

@@ -10,6 +10,7 @@ Usage: scripts/make-release-checksums.sh [--sign] [--local-user KEYID]
 
 Creates SHA256SUMS for release assets in the current directory:
   Bitflash-*-windows.zip
+  Bitflash-*-windows-with-tor.zip
   Bitflash-*-x86_64.AppImage
   bitflash-node-*-x86_64
 
@@ -44,6 +45,7 @@ fi
 assets=()
 for pattern in \
   "Bitflash-*-windows.zip" \
+  "Bitflash-*-windows-with-tor.zip" \
   "Bitflash-*-x86_64.AppImage" \
   "bitflash-node-*-x86_64"
 do

@@ -2,6 +2,7 @@
 #
 #   make linux    build Bitflash-*-x86_64.AppImage
 #   make windows  build Bitflash-*-windows.zip (from MSYS2 UCRT64)
+#   make windows-tor build Bitflash-*-windows-with-tor.zip
 #   make tests    build and run standalone unit tests
 #   make checksums create SHA256SUMS for release assets
 #   make verify-release TAG=v1.2.13
@@ -180,6 +181,9 @@ windows: deps-windows
 	@zip -r Bitflash-$(VERSION)-windows.zip Bitflash-$(VERSION)-windows/
 	@echo "Built: Bitflash-$(VERSION)-windows.zip"
 
+windows-tor: windows
+	./scripts/package-windows-tor.sh
+
 # ---- Clean ----------------------------------------------------------------
 
 clean:
@@ -206,6 +210,6 @@ sign-checksums:
 verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
-.PHONY: linux windows clean appimage \
+.PHONY: linux windows windows-tor clean appimage \
         tests fuzz-net-message-smoke fuzz-script-smoke checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx
