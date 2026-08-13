@@ -500,6 +500,21 @@ static std::string ResolveTorPath(const std::string& torPathOpt)
 #endif
 }
 
+bool BtfBundledTorPath(std::string& torPathOut)
+{
+    torPathOut.clear();
+    std::string exeDir = ExecutableDir();
+#ifdef _WIN32
+    std::string path = PathJoin(exeDir, "tor/tor.exe");
+#else
+    std::string path = PathJoin(exeDir, "tor/tor");
+#endif
+    if (!FileIsExecutableCandidate(path))
+        return false;
+    torPathOut = path;
+    return true;
+}
+
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,
                                         unsigned short socksPort,

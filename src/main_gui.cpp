@@ -143,6 +143,7 @@ static void PrintUsage()
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
+    printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
     printf("  /oniononly                 (do not fall back to rendezvous when a .btf onion dial fails)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
@@ -322,19 +323,30 @@ static void ParseStartupArguments(int argc, char* argv[])
     }
 
     bool fManagedTor = arg(argc, argv, "/managedtor") || arg(argc, argv, "-managedtor");
+    bool fNoManagedTor = arg(argc, argv, "/nomanagedtor") || arg(argc, argv, "-nomanagedtor");
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
     string socksProxy = argval2(argc, argv, "/socks", "-socks");
-    if (fManagedTor)
+    string bundledTorPath;
+    bool fAutoManagedTor = !fManagedTor && !fNoManagedTor && !fTorMode &&
+                            socksProxy.empty() && BtfBundledTorPath(bundledTorPath);
+    if (fManagedTor || fAutoManagedTor)
     {
-        if (fTorMode || !socksProxy.empty())
+        if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
 
-        string torPath = argval2(argc, argv, "/managedtor", "-managedtor");
+        string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
         string err;
         if (!BtfStartManagedTor(torPath, err))
-            fprintf(stderr, "Ignoring /managedtor=%s: %s\n", torPath.c_str(), err.c_str());
+        {
+            if (fAutoManagedTor)
+                fprintf(stderr, "Bundled Tor not enabled automatically: %s\n", err.c_str());
+            else
+                fprintf(stderr, "Ignoring /managedtor=%s: %s\n", torPath.c_str(), err.c_str());
+        }
         else
-            fprintf(stderr, "Managed Tor enabled: %s\n", BtfManagedTorStatus().c_str());
+            fprintf(stderr, "Managed Tor enabled%s: %s\n",
+                    fAutoManagedTor ? " automatically" : "",
+                    BtfManagedTorStatus().c_str());
     }
     else if (fTorMode)
     {
