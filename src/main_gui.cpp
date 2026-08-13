@@ -174,6 +174,8 @@ static void PrintUsage()
     printf("                              exits 2 when wallet.dat is still needed)\n");
     printf("  /walletstorageaudit        (count wallet.dat record types without\n");
     printf("                              printing wallet values, then exit)\n");
+    printf("  /walletstorageauditjson=FILE\n");
+    printf("                              (write the same audit as deterministic JSON)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -706,9 +708,13 @@ int main(int argc, char* argv[])
         return nRet;
     }
 
-    if (arg(argc,argv,"/walletstorageaudit") || arg(argc,argv,"-walletstorageaudit"))
+    string strWalletStorageAuditJson =
+        argval2(argc, argv, "/walletstorageauditjson", "-walletstorageauditjson");
+    if (arg(argc,argv,"/walletstorageaudit") ||
+        arg(argc,argv,"-walletstorageaudit") ||
+        !strWalletStorageAuditJson.empty())
     {
-        int nRet = CmdWalletStorageAudit();
+        int nRet = CmdWalletStorageAudit(strWalletStorageAuditJson);
         DBFlush(true);
         return nRet;
     }

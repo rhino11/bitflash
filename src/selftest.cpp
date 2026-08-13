@@ -1329,6 +1329,24 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strOriginalStorageAudit, "malformed records:         0"),
                        "the storage audit recognizes a plaintext phrase wallet") ? 0 : 1;
 
+        string strOriginalStorageAuditJson = tmp + "/original-storage-audit.json";
+        vector<string> vOriginalStorageAuditJsonArgs;
+        vOriginalStorageAuditJsonArgs.push_back("-datadir=" + strOriginal);
+        vOriginalStorageAuditJsonArgs.push_back("-nomanagedtor");
+        vOriginalStorageAuditJsonArgs.push_back("-nogui");
+        vOriginalStorageAuditJsonArgs.push_back("-walletstorageauditjson=" +
+                                                strOriginalStorageAuditJson);
+        int nOriginalStorageAuditJsonRet =
+            RunBitflashChild(strExe, vOriginalStorageAuditJsonArgs);
+        nFail += Check(nOriginalStorageAuditJsonRet == 0 &&
+                       FileContainsText(strOriginalStorageAuditJson,
+                                        "\"format\": \"bitflash-wallet-storage-audit-v1\"") &&
+                       FileContainsText(strOriginalStorageAuditJson,
+                                        "\"plain_hd_seed\": \"complete\"") &&
+                       FileContainsText(strOriginalStorageAuditJson,
+                                        "\"encrypted_hd_seed\": \"none\""),
+                       "the storage audit can write plaintext-wallet JSON") ? 0 : 1;
+
         string strPortableWallet = tmp + "/portable-wallet.dat";
         string strBackupOut = tmp + "/backupwallet.txt";
         vector<string> vBackupArgs;
@@ -1400,6 +1418,26 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strEncryptedStorageAudit, "wallet minimum version:    present") &&
                        FileContainsText(strEncryptedStorageAudit, "malformed records:         0"),
                        "the storage audit recognizes an encrypted wallet") ? 0 : 1;
+
+        string strEncryptedStorageAuditJson = tmp + "/encrypted-storage-audit.json";
+        vector<string> vEncryptedStorageAuditJsonArgs;
+        vEncryptedStorageAuditJsonArgs.push_back("-datadir=" + strOriginal);
+        vEncryptedStorageAuditJsonArgs.push_back("-nomanagedtor");
+        vEncryptedStorageAuditJsonArgs.push_back("-nogui");
+        vEncryptedStorageAuditJsonArgs.push_back("-walletstorageauditjson=" +
+                                                 strEncryptedStorageAuditJson);
+        int nEncryptedStorageAuditJsonRet =
+            RunBitflashChild(strExe, vEncryptedStorageAuditJsonArgs);
+        nFail += Check(nEncryptedStorageAuditJsonRet == 0 &&
+                       FileContainsText(strEncryptedStorageAuditJson,
+                                        "\"plain_private_keys\": 0") &&
+                       FileContainsText(strEncryptedStorageAuditJson,
+                                        "\"plain_hd_seed\": \"none\"") &&
+                       FileContainsText(strEncryptedStorageAuditJson,
+                                        "\"encrypted_hd_seed\": \"complete\"") &&
+                       FileContainsText(strEncryptedStorageAuditJson,
+                                        "\"wallet_minimum_version\": \"present\""),
+                       "the storage audit can write encrypted-wallet JSON") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

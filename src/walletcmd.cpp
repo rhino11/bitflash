@@ -605,7 +605,60 @@ static bool ReadWalletStorageCounts(WalletStorageAuditCounts& counts,
     return true;
 }
 
-int CmdWalletStorageAudit()
+static std::string WalletStorageAuditJson(const WalletStorageAuditCounts& counts)
+{
+    std::string strJson;
+    strJson += "{\n";
+    strJson += "  \"format\": \"bitflash-wallet-storage-audit-v1\",\n";
+    strJson += strprintf("  \"records_total\": %u,\n", counts.nTotal);
+    strJson += strprintf("  \"malformed_records\": %u,\n", counts.nMalformed);
+    strJson += strprintf("  \"unknown_records\": %u,\n", counts.nUnknown);
+    strJson += strprintf("  \"plain_private_keys\": %u,\n", counts.nPlainKeys);
+    strJson += strprintf("  \"encrypted_private_keys\": %u,\n", counts.nEncryptedKeys);
+    strJson += strprintf("  \"encryption_master_keys\": %u,\n", counts.nMasterKeys);
+    strJson += strprintf("  \"default_public_key\": \"%s\",\n",
+                          counts.nDefaultKey ? "present" : "none");
+    strJson += strprintf("  \"plain_hd_seed\": \"%s\",\n",
+                          HDSeedStorageState(counts.nPlainHDMaster,
+                                             counts.nPlainHDChainCode).c_str());
+    strJson += strprintf("  \"encrypted_hd_seed\": \"%s\",\n",
+                          HDSeedStorageState(counts.nCryptedHDMaster,
+                                             counts.nCryptedHDChainCode).c_str());
+    strJson += strprintf("  \"wallet_minimum_version\": \"%s\",\n",
+                          counts.nWalletMinVersion ? "present" : "none");
+    strJson += strprintf("  \"keypool_entries\": %u,\n", counts.nPool);
+    strJson += strprintf("  \"wallet_transactions\": %u,\n", counts.nTransactions);
+    strJson += strprintf("  \"address_book_labels\": %u,\n", counts.nNames);
+    strJson += strprintf("  \"settings\": %u,\n", counts.nSettings);
+    strJson += strprintf("  \"hd_metadata_records\": %u,\n",
+                          counts.nHDNext + counts.nHDSchema + counts.nHDCoinType +
+                          counts.nHDReceiveNext + counts.nHDChangeNext);
+    strJson += strprintf("  \"database_version_records\": %u\n", counts.nVersion);
+    strJson += "}\n";
+    return strJson;
+}
+
+static bool WriteAuditTextFile(const std::string& strPath,
+                               const std::string& strText,
+                               std::string& strError)
+{
+    FILE* pf = fopen(strPath.c_str(), "wb");
+    if (!pf)
+    {
+        strError = "cannot open output file";
+        return false;
+    }
+    size_t nWritten = fwrite(strText.data(), 1, strText.size(), pf);
+    bool fCloseOk = fclose(pf) == 0;
+    if (nWritten != strText.size() || !fCloseOk)
+    {
+        strError = "could not write the complete output file";
+        return false;
+    }
+    return true;
+}
+
+int CmdWalletStorageAudit(const std::string& strJsonOut)
 {
     AttachTerminal();
 
@@ -615,6 +668,22 @@ int CmdWalletStorageAudit()
     {
         fprintf(stderr, "Cannot audit wallet storage: %s\n", strError.c_str());
         return 1;
+    }
+
+    if (!strJsonOut.empty())
+    {
+        std::string strWriteError;
+        if (!WriteAuditTextFile(strJsonOut,
+                                WalletStorageAuditJson(counts),
+                                strWriteError))
+        {
+            fprintf(stderr, "Cannot write wallet storage audit JSON: %s\n",
+                    strWriteError.c_str());
+            return 1;
+        }
+        printf("Wallet storage audit written to %s\n", strJsonOut.c_str());
+        fflush(stdout);
+        return counts.nMalformed > 0 ? 2 : 0;
     }
 
     printf("Wallet storage audit\n");

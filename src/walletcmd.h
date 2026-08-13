@@ -64,7 +64,7 @@ int CmdRecoveryAudit();
 
 // Diagnostic: count wallet.dat record types without printing keys,
 // addresses, transaction ids, labels, or other wallet values.
-int CmdWalletStorageAudit();
+int CmdWalletStorageAudit(const std::string& strJsonOut = "");
 
 // Rewrite wallet.dat so private keys and the HD seed are encrypted with the
 // given passphrase. Returns 0 on success and exits without starting the node.
