@@ -1764,11 +1764,12 @@ void ThreadNostrSeed(void* parg)
     LogPrint("nostr", "Nostr: node pubkey = %s\n", key.PubKeyHex().c_str());
     LogPrint("nostr", "Nostr: node .btf address = %s\n", key.BtfAddress().c_str());
 
-    // The self-test below publishes a real descriptor, and PublishDescriptor now
-    // refuses to publish before ThreadBtfAccept has registered a rendezvous. Give
-    // registration a bounded head start so the test measures the publish/resolve
-    // chain instead of losing the race against it.
-    for (int i = 0; i < 60 && !fShutdown && BtfActiveRelay().empty(); i++)
+    // The self-test below publishes a real descriptor. Rendezvous-only nodes
+    // need ThreadBtfAccept to register first; Tor nodes can publish as soon as
+    // their signed onion endpoint exists, with rendezvous marked pending.
+    for (int i = 0; i < 60 && !fShutdown &&
+                    BtfActiveRelay().empty() &&
+                    BtfLocalOnionEndpoint().empty(); i++)
         Sleep(1000);
 
     // One-time self-test of the rendezvous: publish our descriptor to a relay,

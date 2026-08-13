@@ -13,6 +13,7 @@ static bool g_fTorProxy = false;
 static std::string g_socks5Host;
 static unsigned short g_socks5Port = 0;
 static const char* DEFAULT_TOR_SOCKS5_PROXY = "127.0.0.1:9050";
+static const int TOR_CONNECT_TIMEOUT_SECS = 120;
 
 static void SetSocketTimeout(SOCKET s, int nTimeoutSecs)
 {
@@ -297,10 +298,25 @@ static bool Socks5Connect(SOCKET s, const std::string& destHost,
 
     unsigned char hello[3] = { 0x05, 0x01, 0x00 }; // SOCKS5, one method, no auth
     if (!WriteN(s, hello, sizeof(hello)))
+    {
+        error("SOCKS5 hello write failed for %s:%u\n",
+              destHost.c_str(), (unsigned)destPort);
         return false;
+    }
     unsigned char choice[2] = { 0, 0 };
-    if (!ReadN(s, choice, sizeof(choice)) || choice[0] != 0x05 || choice[1] != 0x00)
+    if (!ReadN(s, choice, sizeof(choice)))
+    {
+        error("SOCKS5 method selection read failed for %s:%u\n",
+              destHost.c_str(), (unsigned)destPort);
         return false;
+    }
+    if (choice[0] != 0x05 || choice[1] != 0x00)
+    {
+        error("SOCKS5 proxy rejected no-auth method for %s:%u (version=0x%02x method=0x%02x)\n",
+              destHost.c_str(), (unsigned)destPort,
+              (unsigned)choice[0], (unsigned)choice[1]);
+        return false;
+    }
 
     std::vector<unsigned char> req;
     req.reserve(7 + destHost.size());
@@ -313,11 +329,25 @@ static bool Socks5Connect(SOCKET s, const std::string& destHost,
     req.push_back((unsigned char)(destPort >> 8));
     req.push_back((unsigned char)(destPort & 0xff));
     if (!WriteN(s, &req[0], (int)req.size()))
+    {
+        error("SOCKS5 CONNECT request write failed for %s:%u\n",
+              destHost.c_str(), (unsigned)destPort);
         return false;
+    }
 
     unsigned char rep[4] = {0,0,0,0};
-    if (!ReadN(s, rep, sizeof(rep)) || rep[0] != 0x05)
+    if (!ReadN(s, rep, sizeof(rep)))
+    {
+        error("SOCKS5 CONNECT reply read failed for %s:%u\n",
+              destHost.c_str(), (unsigned)destPort);
         return false;
+    }
+    if (rep[0] != 0x05)
+    {
+        error("SOCKS5 CONNECT reply has invalid version 0x%02x for %s:%u\n",
+              (unsigned)rep[0], destHost.c_str(), (unsigned)destPort);
+        return false;
+    }
     if (rep[1] != 0x00)
     {
         error("SOCKS5 CONNECT to %s:%u failed with reply 0x%02x\n",
@@ -335,10 +365,20 @@ static bool Socks5Connect(SOCKET s, const std::string& destHost,
         nAddr = len;
     }
     else
+    {
+        error("SOCKS5 CONNECT reply has invalid address type 0x%02x for %s:%u\n",
+              (unsigned)rep[3], destHost.c_str(), (unsigned)destPort);
         return false;
+    }
 
     std::vector<unsigned char> discard(nAddr + 2);
-    return ReadN(s, &discard[0], (int)discard.size());
+    if (!ReadN(s, &discard[0], (int)discard.size()))
+    {
+        error("SOCKS5 CONNECT bind address read failed for %s:%u\n",
+              destHost.c_str(), (unsigned)destPort);
+        return false;
+    }
+    return true;
 }
 
 SOCKET BtfConnectSocket(const std::string& destHost, unsigned short destPort,
@@ -347,9 +387,11 @@ SOCKET BtfConnectSocket(const std::string& destHost, unsigned short destPort,
     std::string proxyHost;
     unsigned short proxyPort = 0;
     bool fProxy = false;
+    bool fTorProxy = false;
     CRITICAL_BLOCK(cs_socks5)
     {
         fProxy = g_fSocks5Proxy;
+        fTorProxy = g_fTorProxy;
         proxyHost = g_socks5Host;
         proxyPort = g_socks5Port;
     }
@@ -364,6 +406,9 @@ SOCKET BtfConnectSocket(const std::string& destHost, unsigned short destPort,
         }
         return ConnectDirect(destHost, destPort, nSockSite, nTimeoutSecs);
     }
+
+    if (fTorProxy && nTimeoutSecs > 0 && nTimeoutSecs < TOR_CONNECT_TIMEOUT_SECS)
+        nTimeoutSecs = TOR_CONNECT_TIMEOUT_SECS;
 
     SOCKET s = ConnectDirect(proxyHost, proxyPort, nSockSite, nTimeoutSecs);
     if (s == INVALID_SOCKET)

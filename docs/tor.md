@@ -201,3 +201,31 @@ but an already-discovered onion-capable peer can be reached directly over Tor.
 
 Tor owns the private key under `HiddenServiceDir`; back it up if you want the
 onion name to stay stable.
+
+## Release smoke test
+
+After building a Windows binary with managed Tor support, run the two-node smoke
+test before cutting a release:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\smoke-managed-tor-onion.ps1 `
+  -Bitflash .\src\bitflash.exe `
+  -Tor C:\path\to\tor.exe
+```
+
+The script creates two temporary datadirs, starts node A with `-managedtor`,
+waits for it to publish its `.btf` identity and generated `.onion` endpoint,
+then starts node B with its own `-managedtor`, `-oniononly`, and
+`-connectbtf=<node-a>`. It passes only when node B logs that it connected to
+node A `via direct onion`; rendezvous fallback cannot satisfy the test.
+
+By default the script waits 120 seconds after node A's descriptor self-resolves
+before it starts node B. Tor can create the local `hostname` before the hidden
+service descriptor is visible enough for client circuits, and early dials often
+fail with SOCKS5 reply `0x01`. Override this with `-OnionWarmupSec N` when
+testing a slow or already-warmed Tor environment.
+
+This test still uses Nostr for descriptor discovery, because that is how nodes
+learn each other's signed `.btf` descriptors. It does not require a Bitflash
+rendezvous relay to carry the P2P connection: once the descriptor includes the
+signed onion endpoint, the actual node connection goes directly through Tor.
