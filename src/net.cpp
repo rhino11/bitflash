@@ -268,15 +268,21 @@ string GetDiagnosticsText()
     int64 nNow = GetTime();
     string str;
 
-    int nInbound = 0, nHeld = 0;
+    int nInbound = 0, nHeld = 0, nDirectOnion = 0, nRendezvous = 0;
     vector<CNode*> vCopy;
     CRITICAL_BLOCK(cs_vNodes)
     {
         vCopy = vNodes;
         nHeld = (int)vNodes.size();
         foreach(CNode* pnode, vNodes)
+        {
             if (pnode->fInbound)
                 nInbound++;
+            if (pnode->strBtfMeeting.find(".onion:") != string::npos)
+                nDirectOnion++;
+            else if (!pnode->strBtfMeeting.empty())
+                nRendezvous++;
+        }
     }
 
     int nMedian = GetPeerMedianHeight();
@@ -300,6 +306,22 @@ string GetDiagnosticsText()
                      nPeersWatched, nHeld,
                      nHeld > nPeersWatched ? "   <-- NOT ALL PEERS ARE BEING READ" : "");
     str += strprintf("  managed Tor       %s\n", BtfManagedTorStatus().c_str());
+
+    string strTorMode = "disabled";
+    if (BtfManagedTorEnabled())
+        strTorMode = "managed";
+    else if (BtfTorProxyEnabled())
+        strTorMode = "external";
+    else if (BtfSocks5ProxyEnabled())
+        strTorMode = "socks5";
+    string strOnion = BtfLocalOnionEndpoint();
+    str += strprintf("  Tor mode          %s%s\n",
+                     strTorMode.c_str(),
+                     fBtfOnionOnly ? " (onion-only)" : "");
+    str += strprintf("  onion endpoint    %s\n",
+                     strOnion.empty() ? "none" : strOnion.c_str());
+    str += strprintf("  .btf peers         %d direct onion, %d rendezvous\n",
+                     nDirectOnion, nRendezvous);
 
     if (nBlocksReceived > 0)
         str += strprintf("  blocks received   %lld  (%lld arrived without a parent, %.1f%%)\n",
