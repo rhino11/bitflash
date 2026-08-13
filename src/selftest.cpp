@@ -966,6 +966,50 @@ static bool CopyFileLocal(const string& strSrc, const string& strDst)
     return fOk;
 }
 
+static bool DirectoryHasFileWithPrefix(const string& strDir, const string& strPrefix)
+{
+#ifdef _WIN32
+    WIN32_FIND_DATAA findData;
+    string pattern = strDir + "\\*";
+    HANDLE hFind = FindFirstFileA(pattern.c_str(), &findData);
+    if (hFind == INVALID_HANDLE_VALUE)
+        return false;
+    bool fFound = false;
+    do
+    {
+        if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+        {
+            string name = findData.cFileName;
+            if (name.compare(0, strPrefix.size(), strPrefix) == 0)
+            {
+                fFound = true;
+                break;
+            }
+        }
+    }
+    while (FindNextFileA(hFind, &findData));
+    FindClose(hFind);
+    return fFound;
+#else
+    DIR* dir = opendir(strDir.c_str());
+    if (!dir)
+        return false;
+    bool fFound = false;
+    struct dirent* ent;
+    while ((ent = readdir(dir)) != NULL)
+    {
+        string name = ent->d_name;
+        if (name.compare(0, strPrefix.size(), strPrefix) == 0)
+        {
+            fFound = true;
+            break;
+        }
+    }
+    closedir(dir);
+    return fFound;
+#endif
+}
+
 static string QuoteCommandArg(const string& str)
 {
     string out = "\"";
@@ -1310,6 +1354,20 @@ static int RunWalletPortabilitySelfTest()
                        FileContainsText(strBackupAudit, "recovery phrase: present") &&
                        FileContainsText(strBackupAudit, "SLIP-0044 BITFLASH"),
                        "a /backupwallet copy opens in a new datadir") ? 0 : 1;
+
+        string strPassFile = tmp + "/encrypt-pass.txt";
+        string strEncryptOut = tmp + "/encryptwallet.txt";
+        nFail += Check(WriteTextFile(strPassFile, "portable-test-passphrase\n"),
+                       "an encryption passphrase file can be written") ? 0 : 1;
+        vector<string> vEncryptArgs;
+        vEncryptArgs.push_back("-datadir=" + strOriginal);
+        vEncryptArgs.push_back("-nomanagedtor");
+        vEncryptArgs.push_back("-nogui");
+        vEncryptArgs.push_back("-encryptwallet=@" + strPassFile);
+        int nEncryptRet = RunBitflashChild(strExe, vEncryptArgs, NULL, &strEncryptOut);
+        nFail += Check(nEncryptRet == 0 &&
+                       !DirectoryHasFileWithPrefix(strOriginal + "/database", "log."),
+                       "the encryptwallet command purges Berkeley DB environment logs") ? 0 : 1;
     }
     catch (const std::exception& e)
     {
