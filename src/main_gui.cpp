@@ -4,6 +4,7 @@
 #include "nostr.h"
 #include "proxy.h"
 #include "selftest.h"
+#include "tor.h"
 #include "walletcmd.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
@@ -113,7 +114,7 @@ static void PrintUsage()
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
     printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt,\n");
-    printf("            net-message, consensus-limits, pool-stratum, parse-money, or socks5-proxy\n");
+    printf("            net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -141,6 +142,7 @@ static void PrintUsage()
     printf("  /port=N                    (P2P listen port, default 8433)\n");
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
+    printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -284,6 +286,24 @@ static void ParseStartupArguments(int argc, char* argv[])
         vBtfMeetingRelays.push_back(rvRelay);
     }
 
+    // net.cpp has described nListenPort as "tunable via /port" since it was
+    // written, but nothing ever read the option, so the port was fixed at 8433
+    // and a second node could not start on a machine already running one. Parse
+    // it before Tor setup so a managed hidden service maps the real listener.
+    string strPort = argval2(argc, argv, "/port", "-port");
+    if (!strPort.empty())
+    {
+        int nPort = atoi(strPort.c_str());
+        if (nPort <= 0 || nPort > 65535)
+            fprintf(stderr, "Ignoring /port=%s: not a port number\n", strPort.c_str());
+        else
+        {
+            nListenPort = htons((unsigned short)nPort);
+            // Or we would announce a port we never bound.
+            addrLocalHost.port = nListenPort;
+        }
+    }
+
     string announceRelay = argval2(argc, argv, "/announcerelay", "-announcerelay");
     if (!announceRelay.empty())
         strBtfAnnounceRelay = announceRelay;
@@ -299,10 +319,23 @@ static void ParseStartupArguments(int argc, char* argv[])
                     BtfLocalOnionEndpoint().c_str());
     }
 
+    bool fManagedTor = arg(argc, argv, "/managedtor") || arg(argc, argv, "-managedtor");
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
-    if (fTorMode)
+    string socksProxy = argval2(argc, argv, "/socks", "-socks");
+    if (fManagedTor)
     {
-        string socksProxy = argval2(argc, argv, "/socks", "-socks");
+        if (fTorMode || !socksProxy.empty())
+            fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
+
+        string torPath = argval2(argc, argv, "/managedtor", "-managedtor");
+        string err;
+        if (!BtfStartManagedTor(torPath, err))
+            fprintf(stderr, "Ignoring /managedtor=%s: %s\n", torPath.c_str(), err.c_str());
+        else
+            fprintf(stderr, "Managed Tor enabled: %s\n", BtfManagedTorStatus().c_str());
+    }
+    else if (fTorMode)
+    {
         if (!socksProxy.empty())
             fprintf(stderr, "Warning: /tor takes precedence over /socks=%s\n",
                     socksProxy.c_str());
@@ -317,7 +350,6 @@ static void ParseStartupArguments(int argc, char* argv[])
     }
     else
     {
-        string socksProxy = argval2(argc, argv, "/socks", "-socks");
         if (!socksProxy.empty())
         {
             string err;
@@ -348,22 +380,6 @@ static void ParseStartupArguments(int argc, char* argv[])
         vBtfExtraSeeds.push_back(make_pair(val.substr(0, colon), val.substr(colon + 1)));
     }
 
-    // net.cpp has described nListenPort as "tunable via /port" since it was
-    // written, but nothing ever read the option, so the port was fixed at 8433
-    // and a second node could not start on a machine already running one.
-    string strPort = argval2(argc, argv, "/port", "-port");
-    if (!strPort.empty())
-    {
-        int nPort = atoi(strPort.c_str());
-        if (nPort <= 0 || nPort > 65535)
-            fprintf(stderr, "Ignoring /port=%s: not a port number\n", strPort.c_str());
-        else
-        {
-            nListenPort = htons((unsigned short)nPort);
-            // Or we would announce a port we never bound.
-            addrLocalHost.port = nListenPort;
-        }
-    }
 }
 
 // Report a startup failure somewhere the user will actually see it.
@@ -715,7 +731,12 @@ int main(int argc, char* argv[])
 
     ReacceptWalletTransactions();
 
-    if (!StartNode(strErrors)) { fprintf(stderr,"StartNode: %s\n",strErrors.c_str()); return 1; }
+    if (!StartNode(strErrors))
+    {
+        fprintf(stderr,"StartNode: %s\n",strErrors.c_str());
+        BtfStopManagedTor();
+        return 1;
+    }
 
     if (nMineMode == MINE_OPERATOR) {
         gPoolServerRunning = true;
@@ -748,6 +769,7 @@ int main(int argc, char* argv[])
         printf("Running headless. Ctrl-C to stop.\n");
         while (!fShutdown) Sleep(500);
         StopNode();
+        BtfStopManagedTor();
         // Checkpoints, releases wallet.dat from this directory's Berkeley DB
         // environment, and closes it. Declared since 2009 and never once
         // called here, which is why a wallet.dat copied elsewhere would not
@@ -767,6 +789,7 @@ int main(int argc, char* argv[])
     int ret = RunGUI(argc, argv);
     fShutdown = true;
     StopNode();
+    BtfStopManagedTor();
     DBFlush(true);
     return ret;
 #endif

@@ -36,6 +36,47 @@ If both `-tor` and `-socks` are present, Tor mode wins and the node prints a
 warning. That keeps a command line with `-tor` from silently becoming a custom
 proxy route.
 
+## Managed Tor mode
+
+`-managedtor` starts a Tor process for this node, writes a local `torrc`, creates
+a v3 hidden service for the normal Bitflash P2P listener, routes outbound
+discovery through that Tor instance, and signs the generated `.onion:8433`
+endpoint into the node's `.btf` descriptor.
+
+```bash
+bitflash -managedtor
+```
+
+Without a value, Bitflash looks for Tor in this order:
+
+1. `tor/tor.exe` or `tor/tor` beside the Bitflash binary;
+2. `tor.exe` or `tor` beside the Bitflash binary;
+3. `tor.exe` or `tor` on `PATH`.
+
+To point at a specific Tor executable:
+
+```bash
+bitflash -managedtor=/opt/tor/bin/tor
+bitflash -managedtor=C:\Tor Browser\Browser\TorBrowser\Tor\tor.exe
+```
+
+Managed Tor writes its state under the Bitflash data directory:
+
+```text
+managed-tor/
+  torrc
+  data/
+  onion-service/
+```
+
+The private key for the onion address lives in `managed-tor/onion-service/`.
+Back up that directory if you want the same onion address after moving the node.
+Delete it only if you intentionally want a fresh onion endpoint.
+
+`-managedtor` takes precedence over `-tor` and `-socks`, because it must choose
+the local SOCKS port it starts. Diagnostics report the current managed Tor
+state, including the SOCKS port and onion endpoint once Tor has generated it.
+
 When Tor mode is enabled:
 
 - outbound Nostr relay dials use Tor;
@@ -100,10 +141,10 @@ bitflash -operator -tor \
   -announcerelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434
 ```
 
-## Direct full-node hidden service
+## Manual direct full-node hidden service
 
-The legacy P2P listener still binds to port `8433`. You can expose it through
-Tor manually:
+Managed Tor is the preferred path for ordinary nodes. Operators can still expose
+the P2P listener through a separately managed Tor service:
 
 ```text
 HiddenServiceDir /var/lib/tor/bitflash-node/
@@ -139,6 +180,5 @@ This means rendezvous relays stop being the only way to reach a node that has
 published a hidden service. They remain useful bootstrap/fallback infrastructure,
 but an already-discovered onion-capable peer can be reached directly over Tor.
 
-The node does not create or rotate Tor hidden services itself. Tor owns the
-private key under `HiddenServiceDir`; back it up if you want the onion name to
-stay stable.
+Tor owns the private key under `HiddenServiceDir`; back it up if you want the
+onion name to stay stable.

@@ -11,6 +11,7 @@
 #include "proxy.h"
 #include "selftest.h"
 #include "sockcount.h"
+#include "tor.h"
 #include "walletcmd.h"
 
 extern int RunPoolStratumSelfTest();
@@ -1565,6 +1566,38 @@ static int RunSocks5ProxySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunManagedTorSelfTest()
+{
+    printf("managed-tor self-test\n");
+    int nFail = 0;
+
+    std::string torrc = BtfBuildManagedTorrcForTest("C:/Bitflash Managed Tor/data",
+                                                   "C:/Bitflash Managed Tor/onion-service",
+                                                   19050, 8433);
+    nFail += Check(torrc.find("DataDirectory \"C:/Bitflash Managed Tor/data\"") != std::string::npos,
+                   "quotes the Tor data directory") ? 0 : 1;
+    nFail += Check(torrc.find("SocksPort 127.0.0.1:19050") != std::string::npos,
+                   "binds SOCKS5 to localhost only") ? 0 : 1;
+    nFail += Check(torrc.find("IsolateSOCKSAuth") != std::string::npos &&
+                   torrc.find("IsolateClientAddr") != std::string::npos &&
+                   torrc.find("IsolateDestAddr") != std::string::npos &&
+                   torrc.find("IsolateDestPort") != std::string::npos,
+                   "enables strict Tor stream isolation") ? 0 : 1;
+    nFail += Check(torrc.find("HiddenServiceDir \"C:/Bitflash Managed Tor/onion-service\"") != std::string::npos,
+                   "writes a hidden service directory") ? 0 : 1;
+    nFail += Check(torrc.find("HiddenServiceVersion 3") != std::string::npos,
+                   "requests a v3 onion service") ? 0 : 1;
+    nFail += Check(torrc.find("HiddenServicePort 8433 127.0.0.1:8433") != std::string::npos,
+                   "maps the onion service to the Bitflash P2P listener") ? 0 : 1;
+    nFail += Check(BtfManagedTorStatus() == "disabled",
+                   "managed Tor starts disabled") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 int RunSelfTest(const std::string& name)
 {
     AttachTerminal();
@@ -1589,8 +1622,10 @@ int RunSelfTest(const std::string& name)
         return RunParseMoneySelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
+    if (name == "managed-tor")
+        return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
