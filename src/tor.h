@@ -13,6 +13,7 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut);
 void BtfStopManagedTor();
 bool BtfManagedTorEnabled();
 std::string BtfManagedTorStatus();
+bool BtfBundledTorPath(std::string& torPathOut);
 
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,

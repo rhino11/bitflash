@@ -52,6 +52,8 @@ Command-line options (in addition to the original ones)
   /managedtor[=PATH]
                  start Tor, create a v3 hidden service for this node, route outbound
                  discovery through it, and advertise the generated onion endpoint
+                 Windows release packages that include tor/tor.exe start this mode
+                 automatically; use /nomanagedtor to force the legacy relay path
   /solomine      mine without requiring a connected peer (local testing)
   /operator      operator mode (run pool server)
   /participant=ADDR
