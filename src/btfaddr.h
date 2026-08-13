@@ -52,15 +52,21 @@ struct Descriptor
     unsigned char pubkey[32];
     std::string   enc;          // service x25519 public key (hex) for the E2E channel
     std::string   meeting_node; // rendezvous node the service is registered at
+    std::string   onion;        // optional direct Tor hidden-service endpoint (host.onion:port)
     uint64_t      created;
 };
+
+// Normalize and validate a direct Tor hidden-service endpoint. Only v3 onion
+// names are accepted: 56 base32 chars plus ".onion", followed by ":PORT".
+bool NormalizeOnionEndpoint(const std::string& in, std::string& out);
 
 // Sign a descriptor. `ctx` is a secp256k1_context* (passed as void* to keep this
 // header free of secp headers); `seckey` is the 32-byte service secret key.
 // Returns the descriptor JSON as a string, or "" on failure.
 std::string SignDescriptor(void* ctx, const unsigned char seckey[32],
                            const std::string& enc, const std::string& meeting_node,
-                           uint64_t created);
+                           uint64_t created,
+                           const std::string& onion = std::string());
 
 // Verify a descriptor is validly signed by `expect_pubkey` (the key the resolved
 // `.btf` address encodes). Returns true and fills `out` on success.

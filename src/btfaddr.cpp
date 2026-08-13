@@ -19,6 +19,8 @@
 #include <cstring>
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
+#include <cstdlib>
 
 using json = nlohmann::json;
 
@@ -166,10 +168,47 @@ static bool HexDecode(const std::string& s, unsigned char* out, size_t n)
     return true;
 }
 
+bool NormalizeOnionEndpoint(const std::string& in, std::string& out)
+{
+    out.clear();
+    std::string s = ToLowerTrim(in);
+    size_t colon = s.rfind(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= s.size())
+        return false;
+
+    std::string host = s.substr(0, colon);
+    std::string port = s.substr(colon + 1);
+    while (!host.empty() && host.back() == '.') host.pop_back();
+    static const char* suffix = ".onion";
+    const size_t suffixLen = strlen(suffix);
+    if (host.size() != 56 + suffixLen)
+        return false;
+    if (host.compare(host.size() - suffixLen, suffixLen, suffix) != 0)
+        return false;
+    for (size_t i = 0; i < 56; i++)
+    {
+        char c = host[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= '2' && c <= '7')))
+            return false;
+    }
+    for (size_t i = 0; i < port.size(); i++)
+        if (!isdigit((unsigned char)port[i]))
+            return false;
+
+    errno = 0;
+    char* end = NULL;
+    long nPort = strtol(port.c_str(), &end, 10);
+    if (errno == ERANGE || end == NULL || *end != '\0' || nPort <= 0 || nPort > 65535)
+        return false;
+
+    out = host + ":" + port;
+    return true;
+}
+
 // Digest signed over the descriptor fields (domain-separated).
-static void DescriptorDigest(const unsigned char pubkey[32], const std::string& enc,
-                             const std::string& meeting_node, uint64_t created,
-                             unsigned char out[32])
+static void DescriptorDigestV2(const unsigned char pubkey[32], const std::string& enc,
+                               const std::string& meeting_node, uint64_t created,
+                               unsigned char out[32])
 {
     static const char* DS = ".btf-descriptor-v2";
     SHA256_CTX ctx;
@@ -184,9 +223,27 @@ static void DescriptorDigest(const unsigned char pubkey[32], const std::string& 
     SHA256_Final(out, &ctx);
 }
 
+static void DescriptorDigestV3(const unsigned char pubkey[32], const std::string& enc,
+                               const std::string& meeting_node, const std::string& onion,
+                               uint64_t created, unsigned char out[32])
+{
+    static const char* DS = ".btf-descriptor-v3-onion";
+    SHA256_CTX ctx;
+    SHA256_Init(&ctx);
+    SHA256_Update(&ctx, (const unsigned char*)DS, strlen(DS));
+    SHA256_Update(&ctx, pubkey, 32);
+    SHA256_Update(&ctx, (const unsigned char*)enc.data(), enc.size());
+    SHA256_Update(&ctx, (const unsigned char*)meeting_node.data(), meeting_node.size());
+    SHA256_Update(&ctx, (const unsigned char*)onion.data(), onion.size());
+    unsigned char be[8];
+    for (int i = 0; i < 8; i++) be[i] = (unsigned char)((created >> (8 * (7 - i))) & 0xff);
+    SHA256_Update(&ctx, be, 8);
+    SHA256_Final(out, &ctx);
+}
+
 std::string SignDescriptor(void* ctxv, const unsigned char seckey[32],
                            const std::string& enc, const std::string& meeting_node,
-                           uint64_t created)
+                           uint64_t created, const std::string& onion)
 {
     secp256k1_context* ctx = (secp256k1_context*)ctxv;
     secp256k1_keypair kp;
@@ -197,17 +254,28 @@ std::string SignDescriptor(void* ctxv, const unsigned char seckey[32],
     secp256k1_xonly_pubkey_serialize(ctx, pubkey, &xpub);
 
     unsigned char digest[32];
-    DescriptorDigest(pubkey, enc, meeting_node, created, digest);
+    DescriptorDigestV2(pubkey, enc, meeting_node, created, digest);
 
     unsigned char sig[64];
     // Deterministic signature (NULL aux_rand), matching Itzal's no-aux-rand signing.
     if (!secp256k1_schnorrsig_sign32(ctx, sig, digest, &kp, NULL)) return std::string();
 
     json v = json::object();
-    v["v"]            = 2;
+    v["v"]            = onion.empty() ? 2 : 3;
     v["pubkey"]       = HexEncode(pubkey, 32);
     v["enc"]          = enc;
     v["meeting_node"] = meeting_node;
+    if (!onion.empty())
+    {
+        std::string onionNorm;
+        if (!NormalizeOnionEndpoint(onion, onionNorm)) return std::string();
+        unsigned char digest3[32];
+        DescriptorDigestV3(pubkey, enc, meeting_node, onionNorm, created, digest3);
+        unsigned char sig3[64];
+        if (!secp256k1_schnorrsig_sign32(ctx, sig3, digest3, &kp, NULL)) return std::string();
+        v["onion"] = onionNorm;
+        v["sig3"]  = HexEncode(sig3, 64);
+    }
     v["created"]      = created;
     v["sig"]          = HexEncode(sig, 64);
     return v.dump();
@@ -242,15 +310,35 @@ bool VerifyDescriptor(void* ctxv, const std::string& jsonStr,
         if (!HexDecode(v["sig"].get<std::string>(), sig, 64)) return false;
 
         unsigned char digest[32];
-        DescriptorDigest(expect_pubkey, enc, meeting_node, created, digest);
+        DescriptorDigestV2(expect_pubkey, enc, meeting_node, created, digest);
 
         secp256k1_xonly_pubkey xpub;
         if (!secp256k1_xonly_pubkey_parse(ctx, &xpub, expect_pubkey)) return false;
         if (!secp256k1_schnorrsig_verify(ctx, sig, digest, 32, &xpub)) return false;
 
+        std::string onion;
+        if (v.contains("onion"))
+        {
+            if (v["onion"].is_string() && v.contains("sig3") && v["sig3"].is_string())
+            {
+                std::string onionNorm;
+                std::string onionRaw = v["onion"].get<std::string>();
+                if (NormalizeOnionEndpoint(onionRaw, onionNorm) && onionNorm == onionRaw)
+                {
+                    unsigned char sig3[64];
+                    unsigned char digest3[32];
+                    DescriptorDigestV3(expect_pubkey, enc, meeting_node, onionNorm, created, digest3);
+                    if (HexDecode(v["sig3"].get<std::string>(), sig3, 64) &&
+                        secp256k1_schnorrsig_verify(ctx, sig3, digest3, 32, &xpub))
+                        onion = onionNorm;
+                }
+            }
+        }
+
         memcpy(out.pubkey, expect_pubkey, 32);
         out.enc = enc;
         out.meeting_node = meeting_node;
+        out.onion = onion;
         out.created = created;
         return true;
     }

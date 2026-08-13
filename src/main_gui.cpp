@@ -1,6 +1,7 @@
 // Bitflash entry point -- starts node threads then runs GUI (or headless).
 
 #include "headers_core.h"
+#include "nostr.h"
 #include "proxy.h"
 #include "selftest.h"
 #include "walletcmd.h"
@@ -134,10 +135,11 @@ static void PrintUsage()
     printf("  /connectbtf=PEER_BTF_ADDRESS\n");
     printf("  /rvrelay=HOST:PORT\n");
     printf("  /announcerelay=HOST:PORT\n");
+    printf("  /onionservice=HOST.onion:PORT  (advertise this node's Tor hidden service)\n");
     printf("\n");
     printf("Network:\n");
     printf("  /port=N                    (P2P listen port, default 8433)\n");
-    printf("  /socks=HOST:PORT           (SOCKS5 proxy for outbound Nostr and .btf relay dials)\n");
+    printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
@@ -285,6 +287,17 @@ static void ParseStartupArguments(int argc, char* argv[])
     string announceRelay = argval2(argc, argv, "/announcerelay", "-announcerelay");
     if (!announceRelay.empty())
         strBtfAnnounceRelay = announceRelay;
+
+    string onionService = argval2(argc, argv, "/onionservice", "-onionservice");
+    if (!onionService.empty())
+    {
+        string err;
+        if (!BtfSetLocalOnionEndpoint(onionService, err))
+            fprintf(stderr, "Ignoring /onionservice=%s: %s\n", onionService.c_str(), err.c_str());
+        else
+            fprintf(stderr, "Direct onion peer endpoint advertised: %s\n",
+                    BtfLocalOnionEndpoint().c_str());
+    }
 
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
     if (fTorMode)

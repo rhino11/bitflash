@@ -112,6 +112,8 @@ vector<string> vBtfMeetingRelays = {
 };
 string strBtfActiveRelay;
 static CCriticalSection cs_activeRelay;
+static string strBtfOnionEndpoint;
+static CCriticalSection cs_onionEndpoint;
 
 // Only the rendezvous we actually registered at (BtfSetActiveRelay, called from
 // ThreadBtfAccept once registration succeeds). Empty until then, on purpose: it
@@ -131,6 +133,26 @@ void BtfSetActiveRelay(const string& relay)
 {
     CRITICAL_BLOCK(cs_activeRelay)
         strBtfActiveRelay = relay;
+}
+
+bool BtfSetLocalOnionEndpoint(const string& endpoint, string& errOut)
+{
+    string norm;
+    if (!btf::NormalizeOnionEndpoint(endpoint, norm))
+    {
+        errOut = "expected v3 onion endpoint HOST.onion:PORT";
+        return false;
+    }
+    CRITICAL_BLOCK(cs_onionEndpoint)
+        strBtfOnionEndpoint = norm;
+    return true;
+}
+
+string BtfLocalOnionEndpoint()
+{
+    CRITICAL_BLOCK(cs_onionEndpoint)
+        return strBtfOnionEndpoint;
+    return "";
 }
 
 // A relay this node advertises on Nostr for others to discover (/announcerelay).
@@ -370,10 +392,16 @@ std::string BtfLocalDescriptor()
     string meeting;
     CRITICAL_BLOCK(cs_activeRelay)
         meeting = strBtfActiveRelay;
+    string onion = BtfLocalOnionEndpoint();
     if (meeting.empty())
-        return "";
+    {
+        if (onion.empty())
+            return "";
+        meeting = "rendezvous-pending";
+    }
     return btf::SignDescriptor(g_nostrKey.ctx, g_nostrKey.seckey,
-                               g_nostrKey.EncPubHex(), meeting, (uint64_t)GetTime());
+                               g_nostrKey.EncPubHex(), meeting, (uint64_t)GetTime(),
+                               onion);
 }
 
 // The shared secp256k1 context, so net.cpp can verify descriptors that arrive
@@ -806,17 +834,21 @@ static void PublishDescriptor(CWebSocket& ws, CNostrKey& key)
     // meeting_node is the rendezvous relay this node's hidden service
     // (ThreadBtfAccept in net.cpp) is registered at -- where clients dial us.
     string meeting_node = BtfActiveRelay();
+    string onion = BtfLocalOnionEndpoint();
     if (meeting_node.empty())
     {
-        // Not registered anywhere yet. Publishing now would advertise a meeting
-        // node we can't be reached at, and peers would waste dials on it. The
-        // ThreadNostrSeed loop republishes on every pass, so skipping costs
-        // nothing but the delay until ThreadBtfAccept registers.
-        LogPrint("nostr", "Nostr: skipping descriptor publish, no rendezvous registered yet\n");
-        return;
+        if (onion.empty())
+        {
+            // Not registered anywhere yet, and no direct onion endpoint exists.
+            // Publishing now would advertise a meeting node we can't be reached at.
+            LogPrint("nostr", "Nostr: skipping descriptor publish, no rendezvous registered yet\n");
+            return;
+        }
+        meeting_node = "rendezvous-pending";
     }
     string desc = btf::SignDescriptor(key.ctx, key.seckey, key.EncPubHex(),
-                                      meeting_node, (uint64_t)GetTime());
+                                      meeting_node, (uint64_t)GetTime(),
+                                      onion);
     if (desc.empty())
         return;
     json tags = json::array({ json::array({ "d", BTF_DESC_DTAG }) });
@@ -1018,7 +1050,7 @@ static void HandlePoolAnnouncement(const json& ev)
 // Resolve a `.btf` address via a relay: fetch the descriptor published by that
 // address's key and verify it self-certifies under the decoded pubkey.
 static bool ResolveDescriptor(CWebSocket& ws, void* ctx, const string& btfAddr,
-                              btf::Descriptor& out)
+                              btf::Descriptor& out, string* rawOut = NULL)
 {
     unsigned char pk[32];
     if (!btf::ParseAddress(btfAddr, pk))
@@ -1045,7 +1077,11 @@ static bool ResolveDescriptor(CWebSocket& ws, void* ctx, const string& btfAddr,
             const json& ev = j[2];
             if (ev.contains("content") &&
                 btf::VerifyDescriptor(ctx, ev["content"].get<string>(), pk, out))
+            {
+                if (rawOut)
+                    *rawOut = ev["content"].get<string>();
                 return true;
+            }
         }
         else if (t == "EOSE")
             break;
@@ -1057,8 +1093,10 @@ static bool ResolveDescriptor(CWebSocket& ws, void* ctx, const string& btfAddr,
 // public discovery relays for the owner's self-certified descriptor. Used by
 // ConnectNodeBtf in net.cpp.
 bool BtfResolve(const std::string& btfAddr, std::string& meetingHostPort,
-                unsigned char enc_pub[32])
+                unsigned char enc_pub[32], std::string* onionHostPort)
 {
+    if (onionHostPort)
+        onionHostPort->clear();
     if (!EnsureNostrKey())
         return false;
     for (int i = 0; i < nNostrRelays && !fShutdown; i++)
@@ -1076,10 +1114,15 @@ bool BtfResolve(const std::string& btfAddr, std::string& meetingHostPort,
             }
             lease.fOk = true;
             if (d.meeting_node.empty() || d.meeting_node == "rendezvous-pending")
-                continue; // descriptor predates the owner's relay config
+            {
+                if (!onionHostPort || d.onion.empty())
+                    continue; // caller needs rendezvous, or descriptor has no direct path
+            }
             if (!HexDecode(d.enc, enc_pub, 32))
                 continue;
             meetingHostPort = d.meeting_node;
+            if (onionHostPort)
+                *onionHostPort = d.onion;
             return true;
         }
         CATCH_PRINT_EXCEPTION("BtfResolve")
@@ -1168,12 +1211,15 @@ bool BtfResolveMany(const std::vector<std::string>& btfAddrs,
                     btf::Descriptor d;
                     if (!btf::VerifyDescriptor(g_nostrKey.ctx, ev["content"].get<string>(), pk, d))
                         continue;
-                    if (d.meeting_node.empty() || d.meeting_node == "rendezvous-pending")
+                    if ((d.meeting_node.empty() || d.meeting_node == "rendezvous-pending") &&
+                        d.onion.empty())
                         continue;
                     BtfResolvedPeer rp;
                     if (!HexDecode(d.enc, rp.enc_pub, 32))
                         continue;
                     rp.meetingHostPort = d.meeting_node;
+                    rp.onionHostPort = d.onion;
+                    rp.descriptor = ev["content"].get<string>();
                     out[ai->second] = rp;
                     pending.erase(ai->second);
                 }
@@ -1650,11 +1696,13 @@ static void ConnectDiscoveredBtfPeers()
             DialCtx* ctx = (DialCtx*)arg;
             string addr = ctx->addr;
             string meeting = ctx->rp.meetingHostPort;
+            string onion = ctx->rp.onionHostPort;
+            string desc = ctx->rp.descriptor;
             unsigned char enc_pub[32];
             memcpy(enc_pub, ctx->rp.enc_pub, 32);
             delete ctx;
 
-            CNode* pnode = ConnectNodeBtfResolved(addr, meeting, enc_pub);
+            CNode* pnode = ConnectNodeBtfResolved(addr, meeting, onion, enc_pub, desc);
             CRITICAL_BLOCK(cs_btfPeerState)
             {
                 if (pnode)

@@ -17,6 +17,8 @@
 #include <poll.h>
 #endif
 #include <openssl/rand.h>
+#include <cerrno>
+#include <cstdlib>
 #include "btfaddr.h"
 #include "btftunnel.h"
 #include "proxy.h"
@@ -170,7 +172,7 @@ static const char* pszSockSite[SOCK_SITES] = {
     "external-ip probe", "listen socket", "inbound accept",
     "rendezvous dial", "rendezvous listen", "rendezvous accept",
     "loopback pair listener", "loopback pair app end", "loopback pair pump end",
-    "nostr relay", "stratum bridge"
+    "nostr relay", "direct onion peer", "stratum bridge"
 };
 
 static string SockAccountingText()
@@ -627,6 +629,7 @@ struct CachedBtfPeer
 {
     string btfAddr;
     string meeting;
+    string onion;
     string encHex;
     int64  lastSeen;
     // The peer's own signed descriptor, as it announced itself. Kept verbatim
@@ -685,6 +688,8 @@ void LoadCachedBtfPeers(vector<CachedBtfPeer>& out)
             CachedBtfPeer p;
             p.btfAddr  = o["btf"].get<string>();
             p.meeting  = o["meeting"].get<string>();
+            if (o.contains("onion") && o["onion"].is_string())
+                btf::NormalizeOnionEndpoint(o["onion"].get<string>(), p.onion);
             p.encHex   = o["enc"].get<string>();
             p.lastSeen = o.value("seen", (int64)0);
             if (o.contains("desc") && o["desc"].is_string())
@@ -708,7 +713,8 @@ static CCriticalSection cs_btfPeerCache;
 // learned about by exchange must not cost us the ability to pass it on.
 static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
                             const unsigned char enc_pub[32],
-                            const string& strDesc = string())
+                            const string& strDesc = string(),
+                            const string& strOnion = string())
 {
     CRITICAL_BLOCK(cs_btfPeerCache)
     {
@@ -716,11 +722,15 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
         LoadCachedBtfPeers(peers);
 
         string strKeepDesc = strDesc;
+        string strKeepOnion;
+        btf::NormalizeOnionEndpoint(strOnion, strKeepOnion);
         for (size_t i = 0; i < peers.size(); i++)
             if (peers[i].btfAddr == strBtfAddr)
             {
                 if (strKeepDesc.empty())
                     strKeepDesc = peers[i].desc;
+                if (strKeepOnion.empty())
+                    strKeepOnion = peers[i].onion;
                 peers.erase(peers.begin() + i);
                 break;
             }
@@ -728,6 +738,7 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
         CachedBtfPeer p;
         p.btfAddr  = strBtfAddr;
         p.meeting  = strMeeting;
+        p.onion    = strKeepOnion;
         p.encHex   = BytesToHex(enc_pub, 32);
         p.lastSeen = GetTime();
         p.desc     = strKeepDesc;
@@ -742,6 +753,8 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
             nlohmann::json o;
             o["btf"]     = q.btfAddr;
             o["meeting"] = q.meeting;
+            if (!q.onion.empty())
+                o["onion"] = q.onion;
             o["enc"]     = q.encHex;
             o["seen"]    = q.lastSeen;
             if (!q.desc.empty())
@@ -830,7 +843,7 @@ static int TryBtfSeeds()
         foreach(const string& strRelay, relays)
         {
             if (fShutdown) return nConnected;
-            if (ConnectNodeBtfResolved(s.first, strRelay, enc))
+            if (ConnectNodeBtfResolved(s.first, strRelay, "", enc))
             {
                 LogPrint("net", "btfseed: reached %s via %s\n",
                          s.first.c_str(), strRelay.c_str());
@@ -868,7 +881,7 @@ void ThreadReconnectCachedBtfPeers(void* parg)
         if (fShutdown) return;
         unsigned char enc[32];
         if (!HexToBytes(p.encHex, enc, 32)) continue;
-        if (ConnectNodeBtfResolved(p.btfAddr, p.meeting, enc))
+        if (ConnectNodeBtfResolved(p.btfAddr, p.meeting, p.onion, enc))
         {
             nConnected++;
             if (nConnected >= 8) break; // enough to bootstrap; the rest can wait
@@ -959,14 +972,37 @@ int BtfPexAccept(const vector<string>& vDesc)
         if (!HexToBytes(d.enc, enc, 32))
             continue;
 
-        RememberBtfPeer(strAddr, d.meeting_node, enc, strDesc);
+        RememberBtfPeer(strAddr, d.meeting_node, enc, strDesc, d.onion);
         nKept++;
     }
     return nKept;
 }
 
+static bool SplitHostPort(const string& strHostPort, string& strHost, unsigned short& nPort)
+{
+    size_t colon = strHostPort.rfind(':');
+    if (colon == string::npos || colon == 0 || colon + 1 >= strHostPort.size())
+        return false;
+    string port = strHostPort.substr(colon + 1);
+    for (size_t i = 0; i < port.size(); i++)
+        if (!isdigit((unsigned char)port[i]))
+            return false;
+
+    errno = 0;
+    char* end = NULL;
+    long n = strtol(port.c_str(), &end, 10);
+    if (errno == ERANGE || end == NULL || *end != '\0' || n <= 0 || n > 65535)
+        return false;
+
+    strHost = strHostPort.substr(0, colon);
+    nPort = (unsigned short)n;
+    return true;
+}
+
 static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char pk[32],
-                                  const string& strMeeting, const unsigned char enc_pub[32])
+                                  const string& strMeeting, const string& strOnion,
+                                  const unsigned char enc_pub[32],
+                                  const string& strDesc = string())
 {
     CAddress addr = BtfMarkerAddr(pk);
     CNode* pnode = FindNode(addr.ip);
@@ -976,16 +1012,42 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
         return pnode;
     }
 
-    BtfChurnNoteDialAttempt(strBtfAddr, strMeeting);
-    size_t colon = strMeeting.rfind(':');
-    if (colon == string::npos)
+    string strOnionNorm;
+    if (BtfSocks5ProxyEnabled() && btf::NormalizeOnionEndpoint(strOnion, strOnionNorm))
     {
-        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
-        return NULL;
+        string strOnionHost;
+        unsigned short nOnionPort = 0;
+        if (SplitHostPort(strOnionNorm, strOnionHost, nOnionPort))
+        {
+            BtfChurnNoteDialAttempt(strBtfAddr, strOnionNorm);
+            SOCKET hOnionSocket = BtfConnectSocket(strOnionHost, nOnionPort, SOCK_ONION_PEER, 20);
+            if (hOnionSocket != INVALID_SOCKET)
+            {
+                if (fDebug)
+                    LogPrint("net", "connected %s via direct onion %s\n",
+                             strBtfAddr.c_str(), strOnionNorm.c_str());
+                BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, true);
+                RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm);
+
+                pnode = new CNode(hOnionSocket, addr, false);
+                pnode->strBtfAddr = strBtfAddr;
+                pnode->strBtfMeeting = string("onion ") + strOnionNorm;
+                pnode->AddRef();
+                CRITICAL_BLOCK(cs_vNodes)
+                    vNodes.push_back(pnode);
+                return pnode;
+            }
+            if (fDebug)
+                LogPrint("net", "ConnectNodeBtf: direct onion to %s at %s failed, falling back to rendezvous\n",
+                         strBtfAddr.c_str(), strOnionNorm.c_str());
+            BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, false);
+        }
     }
-    string strHost = strMeeting.substr(0, colon);
-    int nPort = atoi(strMeeting.substr(colon + 1).c_str());
-    if (nPort <= 0 || nPort > 65535)
+
+    BtfChurnNoteDialAttempt(strBtfAddr, strMeeting);
+    string strHost;
+    unsigned short nPort = 0;
+    if (!SplitHostPort(strMeeting, strHost, nPort))
     {
         BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
         return NULL;
@@ -1005,7 +1067,7 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
     BtfChurnNoteDialResult(strBtfAddr, strMeeting, true);
 
     // This one answered -- worth trying first next time we start.
-    RememberBtfPeer(strBtfAddr, strMeeting, enc_pub);
+    RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm);
 
     // Add node
     pnode = new CNode(hSocket, addr, false);
@@ -1035,9 +1097,10 @@ CNode* ConnectNodeBtf(const string& strBtfAddr)
         LogPrint("net", "trying %s\n", strBtfAddr.c_str());
 
     string strMeeting;
+    string strOnion;
     unsigned char enc_pub[32];
     BtfChurnNoteResolveAttempt();
-    if (!BtfResolve(strBtfAddr, strMeeting, enc_pub))
+    if (!BtfResolve(strBtfAddr, strMeeting, enc_pub, &strOnion))
     {
         BtfChurnNoteResolveResult(false);
         if (fDebug)
@@ -1045,7 +1108,7 @@ CNode* ConnectNodeBtf(const string& strBtfAddr)
         return NULL;
     }
     BtfChurnNoteResolveResult(true);
-    return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, enc_pub);
+    return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, strOnion, enc_pub);
 }
 
 // Same as ConnectNodeBtf, but skips the Nostr resolve step because the caller
@@ -1054,7 +1117,8 @@ CNode* ConnectNodeBtf(const string& strBtfAddr)
 // address). Makes zero relay connections -- only talks to the peer's
 // rendezvous meeting node.
 CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting,
-                              const unsigned char enc_pub[32])
+                              const string& strOnion, const unsigned char enc_pub[32],
+                              const string& strDesc)
 {
     unsigned char pk[32];
     if (!btf::ParseAddress(strBtfAddr, pk))
@@ -1064,7 +1128,7 @@ CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting
     }
     if (BtfLocalAddress() == strBtfAddr)
         return NULL; // ourselves
-    return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, enc_pub);
+    return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, strOnion, enc_pub, strDesc);
 }
 
 // Anonymous inbound listener (this node's `.btf` hidden service). Registers at

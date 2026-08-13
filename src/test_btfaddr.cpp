@@ -86,6 +86,7 @@ int main()
     }
 
     const std::string ENC_HEX = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899";
+    const std::string ONION = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcd.onion:8433";
 
     // helper: fresh keypair -> (seckey, xonly pubkey)
     auto newKey = [&](unsigned char sk[32], unsigned char pk[32]) {
@@ -108,6 +109,17 @@ int main()
         CHECK(!btf::VerifyDescriptor(ctx, d, pk2, bad), "different key rejected");
     }
 
+    printf("descriptor_signs_optional_onion_endpoint\n");
+    {
+        unsigned char sk[32], pk[32]; newKey(sk, pk);
+        std::string d = btf::SignDescriptor(ctx, sk, ENC_HEX, "meeting-node-abc", 1000, ONION);
+        CHECK(!d.empty(), "sign produced onion descriptor");
+        btf::Descriptor got;
+        CHECK(btf::VerifyDescriptor(ctx, d, pk, got), "onion descriptor verifies");
+        CHECK(got.meeting_node == "meeting-node-abc" && got.enc == ENC_HEX &&
+              got.created == 1000 && got.onion == ONION, "onion fields match");
+    }
+
     printf("descriptor_rejects_tampering\n");
     {
         unsigned char sk[32], pk[32]; newKey(sk, pk);
@@ -117,6 +129,16 @@ int main()
         CHECK(!btf::VerifyDescriptor(ctx, j.dump(), pk, o), "tampered meeting_node rejected");
         json j2 = json::parse(d); j2["enc"] = "00000000000000000000000000000000000000000000000000000000deadbeef";
         CHECK(!btf::VerifyDescriptor(ctx, j2.dump(), pk, o), "tampered enc rejected");
+
+        std::string d3 = btf::SignDescriptor(ctx, sk, ENC_HEX, "node-1", 5, ONION);
+        json j3 = json::parse(d3);
+        j3["onion"] = "bcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcde.onion:8433";
+        CHECK(btf::VerifyDescriptor(ctx, j3.dump(), pk, o) && o.onion.empty(),
+              "tampered onion ignored rather than trusted");
+        json j4 = json::parse(d3);
+        j4["sig3"] = std::string(128, '0');
+        CHECK(btf::VerifyDescriptor(ctx, j4.dump(), pk, o) && o.onion.empty(),
+              "bad onion signature ignored rather than trusted");
     }
 
     printf("full_resolve_chain_from_address\n");
