@@ -65,6 +65,8 @@ deque<pair<int64, CInv> > vRelayExpiration;
 CCriticalSection cs_mapRelay;
 map<CInv, int64> mapAlreadyAskedFor;
 string strBtfConnect; // .btf peer to keep connected to (from /connectbtf)
+bool fBtfOnionOnly = false; // require direct onion transport for .btf peers
+static const int BTF_ONION_CONNECT_TIMEOUT_SECS = 120;
 
 int   nPeersWatched        = 0;
 int64 nBlocksReceived      = 0;
@@ -1022,7 +1024,8 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
         if (SplitHostPort(strOnionNorm, strOnionHost, nOnionPort))
         {
             BtfChurnNoteDialAttempt(strBtfAddr, strOnionNorm);
-            SOCKET hOnionSocket = BtfConnectSocket(strOnionHost, nOnionPort, SOCK_ONION_PEER, 20);
+            SOCKET hOnionSocket = BtfConnectSocket(strOnionHost, nOnionPort, SOCK_ONION_PEER,
+                                                   BTF_ONION_CONNECT_TIMEOUT_SECS);
             if (hOnionSocket != INVALID_SOCKET)
             {
                 if (fDebug)
@@ -1040,10 +1043,21 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
                 return pnode;
             }
             if (fDebug)
-                LogPrint("net", "ConnectNodeBtf: direct onion to %s at %s failed, falling back to rendezvous\n",
-                         strBtfAddr.c_str(), strOnionNorm.c_str());
+                LogPrint("net", "ConnectNodeBtf: direct onion to %s at %s failed%s\n",
+                         strBtfAddr.c_str(), strOnionNorm.c_str(),
+                         fBtfOnionOnly ? "" : ", falling back to rendezvous");
             BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, false);
+            if (fBtfOnionOnly)
+                return NULL;
         }
+    }
+
+    if (fBtfOnionOnly)
+    {
+        if (fDebug)
+            LogPrint("net", "ConnectNodeBtf: onion-only mode refused rendezvous fallback for %s\n",
+                     strBtfAddr.c_str());
+        return NULL;
     }
 
     BtfChurnNoteDialAttempt(strBtfAddr, strMeeting);
@@ -2012,6 +2026,11 @@ bool StartNode(string& strError)
     // IP address, and port for the socket that is being bound
     int nRetryLimit = 15;
     struct sockaddr_in sockaddr = addrLocalHost.GetSockAddr();
+    // Keep addrLocalHost as this node's advertised address, but listen on all
+    // local interfaces. Managed Tor forwards hidden-service traffic to
+    // 127.0.0.1:<port>, and binding only to the LAN address made that onion
+    // endpoint unreachable even though the P2P listener was running.
+    sockaddr.sin_addr.s_addr = INADDR_ANY;
     if (bind(hListenSocket, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) == SOCKET_ERROR)
     {
         int nErr = WSAGetLastError();

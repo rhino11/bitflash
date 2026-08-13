@@ -143,6 +143,7 @@ static void PrintUsage()
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
+    printf("  /oniononly                 (do not fall back to rendezvous when a .btf onion dial fails)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -278,6 +279,7 @@ static void ParseStartupArguments(int argc, char* argv[])
     string btfConnect = argval2(argc, argv, "/connectbtf", "-connectbtf");
     if (!btfConnect.empty())
         strBtfConnect = btfConnect;
+    fBtfOnionOnly = arg(argc, argv, "/oniononly") || arg(argc, argv, "-oniononly");
 
     string rvRelay = argval2(argc, argv, "/rvrelay", "-rvrelay");
     if (!rvRelay.empty())
@@ -360,6 +362,8 @@ static void ParseStartupArguments(int argc, char* argv[])
                         BtfSocks5ProxyName().c_str());
         }
     }
+    if (fBtfOnionOnly && !BtfSocks5ProxyEnabled())
+        fprintf(stderr, "Warning: /oniononly without /tor, /managedtor, or /socks cannot dial .onion peers\n");
 
     // /btfseed=ADDRESS:ENCHEX -- extra bootstrap peers, repeatable. Useful for
     // testing the seed path and for private networks that ship no compiled list.
