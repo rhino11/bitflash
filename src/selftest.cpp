@@ -1573,11 +1573,14 @@ static int RunManagedTorSelfTest()
 
     std::string torrc = BtfBuildManagedTorrcForTest("C:/Bitflash Managed Tor/data",
                                                    "C:/Bitflash Managed Tor/onion-service",
-                                                   19050, 8433);
+                                                   19050, 19051, 8433);
     nFail += Check(torrc.find("DataDirectory \"C:/Bitflash Managed Tor/data\"") != std::string::npos,
                    "quotes the Tor data directory") ? 0 : 1;
     nFail += Check(torrc.find("SocksPort 127.0.0.1:19050") != std::string::npos,
                    "binds SOCKS5 to localhost only") ? 0 : 1;
+    nFail += Check(torrc.find("ControlPort 127.0.0.1:19051") != std::string::npos &&
+                   torrc.find("CookieAuthentication 1") != std::string::npos,
+                   "binds an authenticated Tor control port to localhost only") ? 0 : 1;
     nFail += Check(torrc.find("IsolateSOCKSAuth") != std::string::npos &&
                    torrc.find("IsolateClientAddr") != std::string::npos &&
                    torrc.find("IsolateDestAddr") != std::string::npos &&

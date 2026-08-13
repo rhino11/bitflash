@@ -17,6 +17,7 @@ static CCriticalSection cs_managedTor;
 static bool g_fManagedTor = false;
 static bool g_fManagedTorStopping = false;
 static unsigned short g_managedTorSocksPort = 0;
+static unsigned short g_managedTorControlPort = 0;
 static unsigned short g_managedTorP2PPort = 0;
 static std::string g_managedTorPath;
 static std::string g_managedTorDataDir;
@@ -108,8 +109,16 @@ static bool EnsureDir(const std::string& path, std::string& errOut)
         errOut = strprintf("%s exists and is not a directory", path.c_str());
         return false;
     }
-    if (mkdir(path.c_str(), 0700) == 0 || errno == EEXIST)
+    if (mkdir(path.c_str(), 0700) == 0)
         return true;
+    if (errno == EEXIST)
+    {
+        if (stat(path.c_str(), &st) == 0 && S_ISDIR(st.st_mode))
+        {
+            chmod(path.c_str(), 0700);
+            return true;
+        }
+    }
     errOut = strprintf("could not create %s: %s", path.c_str(), strerror(errno));
     return false;
 #endif
@@ -152,6 +161,205 @@ static bool WriteTextFile(const std::string& path, const std::string& data,
     }
 #endif
     return true;
+}
+
+static bool ReadBinaryFile(const std::string& path, std::vector<unsigned char>& data,
+                           std::string& errOut)
+{
+    data.clear();
+    FILE* f = fopen(path.c_str(), "rb");
+    if (!f)
+    {
+        errOut = strprintf("could not read %s", path.c_str());
+        return false;
+    }
+    unsigned char buf[256];
+    for (;;)
+    {
+        size_t n = fread(buf, 1, sizeof(buf), f);
+        if (n > 0)
+            data.insert(data.end(), buf, buf + n);
+        if (n < sizeof(buf))
+        {
+            if (ferror(f))
+            {
+                fclose(f);
+                errOut = strprintf("could not finish reading %s", path.c_str());
+                return false;
+            }
+            break;
+        }
+        if (data.size() > 1024)
+        {
+            fclose(f);
+            errOut = strprintf("%s is unexpectedly large", path.c_str());
+            return false;
+        }
+    }
+    fclose(f);
+    if (data.empty())
+    {
+        errOut = strprintf("%s is empty", path.c_str());
+        return false;
+    }
+    return true;
+}
+
+static void SetSocketTimeouts(SOCKET s, int millis)
+{
+#ifdef _WIN32
+    DWORD timeout = millis;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, (const char*)&timeout, sizeof(timeout));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, (const char*)&timeout, sizeof(timeout));
+#else
+    struct timeval tv;
+    tv.tv_sec = millis / 1000;
+    tv.tv_usec = (millis % 1000) * 1000;
+    setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+    setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+}
+
+static bool SendAll(SOCKET s, const std::string& data)
+{
+    const char* p = data.data();
+    int left = (int)data.size();
+    while (left > 0)
+    {
+        int n = send(s, p, left, 0);
+        if (n <= 0)
+            return false;
+        p += n;
+        left -= n;
+    }
+    return true;
+}
+
+static bool RecvControlLine(SOCKET s, std::string& line)
+{
+    line.clear();
+    while (line.size() < 4096)
+    {
+        char ch = 0;
+        int n = recv(s, &ch, 1, 0);
+        if (n <= 0)
+            return false;
+        if (ch == '\n')
+            return true;
+        if (ch != '\r')
+            line += ch;
+    }
+    return false;
+}
+
+static SOCKET ConnectLoopback(unsigned short port, std::string& errOut)
+{
+#ifdef _WIN32
+    WSADATA wsadata;
+    int ret = WSAStartup(MAKEWORD(2,2), &wsadata);
+    if (ret != NO_ERROR)
+    {
+        errOut = strprintf("could not start Winsock for Tor control shutdown (WSAStartup returned %d)", ret);
+        return INVALID_SOCKET;
+    }
+#endif
+    SOCKET s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET)
+    {
+        errOut = "could not create Tor control socket";
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return INVALID_SOCKET;
+    }
+    SetSocketTimeouts(s, 3000);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = htons(port);
+    if (connect(s, (struct sockaddr*)&addr, sizeof(addr)) != 0)
+    {
+        closesocket(s);
+        errOut = strprintf("could not connect to Tor control port 127.0.0.1:%u", (unsigned)port);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return INVALID_SOCKET;
+    }
+    return s;
+}
+
+static void CloseLoopback(SOCKET s)
+{
+    if (s != INVALID_SOCKET)
+        closesocket(s);
+#ifdef _WIN32
+    WSACleanup();
+#endif
+}
+
+static bool ReadPositiveTorControlReply(SOCKET s, std::string& errOut)
+{
+    std::string line;
+    if (!RecvControlLine(s, line))
+    {
+        errOut = "Tor control port closed before replying";
+        return false;
+    }
+    if (line.size() >= 3 && line.substr(0, 3) == "250")
+        return true;
+    errOut = strprintf("Tor control command failed: %s", line.c_str());
+    return false;
+}
+
+static bool RequestManagedTorShutdown(std::string& errOut)
+{
+    std::string dataDir;
+    unsigned short controlPort = 0;
+    CRITICAL_BLOCK(cs_managedTor)
+    {
+        dataDir = g_managedTorDataDir;
+        controlPort = g_managedTorControlPort;
+    }
+    if (controlPort == 0 || dataDir.empty())
+    {
+        errOut = "Tor control port is not available";
+        return false;
+    }
+
+    std::vector<unsigned char> cookie;
+    if (!ReadBinaryFile(PathJoin(dataDir, "control_auth_cookie"), cookie, errOut))
+        return false;
+
+    SOCKET s = ConnectLoopback(controlPort, errOut);
+    if (s == INVALID_SOCKET)
+        return false;
+
+    bool ok = false;
+    std::string auth = "AUTHENTICATE " + HexStr(cookie.begin(), cookie.end(), false) + "\r\n";
+    if (!SendAll(s, auth) || !ReadPositiveTorControlReply(s, errOut))
+        goto done;
+
+    if (!SendAll(s, "SIGNAL SHUTDOWN\r\n"))
+    {
+        errOut = "could not send Tor shutdown signal";
+        goto done;
+    }
+
+    {
+        std::string reply;
+        if (RecvControlLine(s, reply) && !(reply.size() >= 3 && reply.substr(0, 3) == "250"))
+        {
+            errOut = strprintf("Tor rejected shutdown signal: %s", reply.c_str());
+            goto done;
+        }
+    }
+    ok = true;
+
+done:
+    CloseLoopback(s);
+    return ok;
 }
 
 static bool ReadOneLine(const std::string& path, std::string& out)
@@ -295,6 +503,7 @@ static std::string ResolveTorPath(const std::string& torPathOpt)
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,
                                         unsigned short socksPort,
+                                        unsigned short controlPort,
                                         unsigned short p2pPort)
 {
     std::string torData = NormalizeTorrcPath(dataDir);
@@ -304,6 +513,8 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     s += "DataDirectory " + QuoteTorrcPath(torData) + "\n";
     s += strprintf("SocksPort 127.0.0.1:%u IsolateSOCKSAuth IsolateClientAddr IsolateDestAddr IsolateDestPort\n",
                    (unsigned)socksPort);
+    s += strprintf("ControlPort 127.0.0.1:%u\n", (unsigned)controlPort);
+    s += "CookieAuthentication 1\n";
     s += "HiddenServiceDir " + QuoteTorrcPath(hsDir) + "\n";
     s += "HiddenServiceVersion 3\n";
     s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
@@ -503,9 +714,13 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
     unsigned short socksPort = 0;
     if (!PickLocalPort(socksPort, errOut))
         return false;
+    unsigned short controlPort = 0;
+    if (!PickLocalPort(controlPort, errOut))
+        return false;
 
     unsigned short p2pPort = ntohs(nListenPort);
-    std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort, p2pPort);
+    std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort,
+                                                   controlPort, p2pPort);
     if (!WriteTextFile(torrcPath, torrc, errOut))
         return false;
 
@@ -519,6 +734,7 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
             g_managedTorDataDir = dataDir;
             g_managedTorHiddenServiceDir = hsDir;
             g_managedTorSocksPort = socksPort;
+            g_managedTorControlPort = controlPort;
             g_managedTorP2PPort = p2pPort;
             g_managedTorOnion.clear();
             g_managedTorStatus = strprintf("starting %s, SOCKS5 127.0.0.1:%u",
@@ -582,8 +798,15 @@ void BtfStopManagedTor()
 #ifdef _WIN32
     if (g_managedTorProcess.hProcess)
     {
-        TerminateProcess(g_managedTorProcess.hProcess, 0);
-        WaitForSingleObject(g_managedTorProcess.hProcess, 5000);
+        std::string shutdownErr;
+        bool fGraceful = RequestManagedTorShutdown(shutdownErr);
+        DWORD waitResult = WaitForSingleObject(g_managedTorProcess.hProcess,
+                                               fGraceful ? 10000 : 1000);
+        if (waitResult != WAIT_OBJECT_0)
+        {
+            TerminateProcess(g_managedTorProcess.hProcess, 0);
+            WaitForSingleObject(g_managedTorProcess.hProcess, 5000);
+        }
         CloseHandle(g_managedTorProcess.hProcess);
         CloseHandle(g_managedTorProcess.hThread);
         memset(&g_managedTorProcess, 0, sizeof(g_managedTorProcess));
@@ -591,14 +814,25 @@ void BtfStopManagedTor()
 #else
     if (g_managedTorPid > 0)
     {
-        kill(g_managedTorPid, SIGTERM);
-        for (int i = 0; i < 50; i++)
+        std::string shutdownErr;
+        if (!RequestManagedTorShutdown(shutdownErr))
+            kill(g_managedTorPid, SIGTERM);
+        bool fExited = false;
+        for (int i = 0; i < 100; i++)
         {
             int status = 0;
             pid_t r = waitpid(g_managedTorPid, &status, WNOHANG);
             if (r == g_managedTorPid)
+            {
+                fExited = true;
                 break;
+            }
             Sleep(100);
+        }
+        if (!fExited)
+        {
+            kill(g_managedTorPid, SIGKILL);
+            waitpid(g_managedTorPid, NULL, 0);
         }
         g_managedTorPid = -1;
     }
@@ -607,6 +841,9 @@ void BtfStopManagedTor()
     {
         g_managedTorStatus = "stopped";
         g_managedTorOnion.clear();
+        g_managedTorSocksPort = 0;
+        g_managedTorControlPort = 0;
+        g_managedTorP2PPort = 0;
     }
 }
 

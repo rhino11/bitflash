@@ -17,6 +17,7 @@ std::string BtfManagedTorStatus();
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,
                                         unsigned short socksPort,
+                                        unsigned short controlPort,
                                         unsigned short p2pPort);
 
 #endif
