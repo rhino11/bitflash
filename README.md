@@ -339,6 +339,7 @@ Other options worth knowing:
 -port=N          # P2P listen port, default 8433
 -socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
+-managedtor[=PATH] # start Tor, create a hidden service, advertise its onion
 -onionservice=HOST.onion:PORT # advertise this node's Tor hidden service
 -debug           # verbose log; without it debug.log is nearly silent
 -help            # full list
@@ -357,10 +358,14 @@ proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
 `-tor` is a privacy shorthand for the usual local Tor SOCKS5 listener at
 `127.0.0.1:9050`. It routes outbound Nostr discovery, `.btf` rendezvous dials,
 and signed direct `.onion` peer dials through Tor, and keeps external-IP probes
-disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else. To make your own
-node reachable without a rendezvous relay, expose port `8433` as a Tor hidden
-service and pass `-onionservice=HOST.onion:8433`; peers with `-tor` will try it
-before falling back to rendezvous.
+disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
+
+`-managedtor[=PATH]` starts a Tor process for this node, writes a local `torrc`,
+creates a v3 hidden service for port `8433`, routes outbound discovery through
+that Tor instance, and signs the generated `.onion:8433` endpoint into the
+node's `.btf` descriptor. Without `PATH`, Bitflash looks for `tor/tor.exe`,
+`tor.exe`, or `tor` beside the binary and then on `PATH`. The hidden-service key
+is stored under the Bitflash data directory in `managed-tor/onion-service/`.
 
 ### When something looks wrong
 

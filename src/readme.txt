@@ -49,6 +49,9 @@ Command-line options (in addition to the original ones)
   /tor[=HOST:PORT]
                  Tor mode for outbound Nostr, .btf rendezvous, and direct onion peer dials;
                  defaults to the local Tor SOCKS5 proxy at 127.0.0.1:9050
+  /managedtor[=PATH]
+                 start Tor, create a v3 hidden service for this node, route outbound
+                 discovery through it, and advertise the generated onion endpoint
   /solomine      mine without requiring a connected peer (local testing)
   /operator      operator mode (run pool server)
   /participant=ADDR

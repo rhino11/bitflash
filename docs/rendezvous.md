@@ -308,9 +308,11 @@ tunnel.
   unreachable, discovery stalls until one is reachable again. Relay TLS is
   verified, which closes a man in the middle path on discovery, but availability
   still rests on the relay set.
-- **Direct onion is not automatic Tor configuration.** Bitflash signs and
-  advertises a hidden-service endpoint, and Tor-mode peers can dial it. The Tor
-  daemon still owns hidden-service creation, private keys, rotation and uptime.
+- **Direct onion needs Tor.** With `-managedtor`, Bitflash starts a Tor process,
+  writes a local hidden-service config, and advertises the generated onion
+  endpoint. With `-onionservice`, an operator can still run Tor manually and
+  provide the endpoint. In both cases Tor owns the hidden-service private key and
+  uptime.
 
 ## 11. Wire reference
 

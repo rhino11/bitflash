@@ -22,6 +22,7 @@
 #include "btfaddr.h"
 #include "btftunnel.h"
 #include "proxy.h"
+#include "tor.h"
 
 void ThreadReconnectCachedBtfPeers(void* parg);
 void ThreadMessageHandler2(void* parg);
@@ -296,6 +297,7 @@ string GetDiagnosticsText()
     str += strprintf("  peers watched     %d of %d held by poll%s\n",
                      nPeersWatched, nHeld,
                      nHeld > nPeersWatched ? "   <-- NOT ALL PEERS ARE BEING READ" : "");
+    str += strprintf("  managed Tor       %s\n", BtfManagedTorStatus().c_str());
 
     if (nBlocksReceived > 0)
         str += strprintf("  blocks received   %lld  (%lld arrived without a parent, %.1f%%)\n",
