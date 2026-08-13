@@ -34,6 +34,7 @@ extern int RunPoolStratumSelfTest();
 #undef printf
 
 #include <mutex>
+#include <cerrno>
 #include <stdexcept>
 #include <thread>
 
@@ -925,6 +926,46 @@ static bool WriteTextFile(const string& strPath, const string& strText)
     return fOk;
 }
 
+static bool MakeDirLocal(const string& strPath)
+{
+#ifdef _WIN32
+    return CreateDirectoryA(strPath.c_str(), NULL) || GetLastError() == ERROR_ALREADY_EXISTS;
+#else
+    return mkdir(strPath.c_str(), 0700) == 0 || errno == EEXIST;
+#endif
+}
+
+static bool CopyFileLocal(const string& strSrc, const string& strDst)
+{
+    FILE* in = fopen(strSrc.c_str(), "rb");
+    if (!in)
+        return false;
+    FILE* out = fopen(strDst.c_str(), "wb");
+    if (!out)
+    {
+        fclose(in);
+        return false;
+    }
+
+    bool fOk = true;
+    char buf[65536];
+    size_t n = 0;
+    while ((n = fread(buf, 1, sizeof(buf), in)) > 0)
+    {
+        if (fwrite(buf, 1, n, out) != n)
+        {
+            fOk = false;
+            break;
+        }
+    }
+    if (ferror(in))
+        fOk = false;
+    if (fclose(out) != 0)
+        fOk = false;
+    fclose(in);
+    return fOk;
+}
+
 static string QuoteCommandArg(const string& str)
 {
     string out = "\"";
@@ -1162,6 +1203,125 @@ static int RunWalletEncryptSelfTest()
     if (!fWalletEnvClosed)
         DBFlush(true);
     SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+static int RunWalletPortabilitySelfTest()
+{
+    fflush(stdout);
+    printf("wallet-portability self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd))
+    {
+        printf("  FAIL could not read current directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    printf("  temp root: %s\n", tmp.c_str());
+
+    try
+    {
+#ifdef _WIN32
+        string strExe = cwd + "\\bitflash.exe";
+#else
+        string strExe = cwd + "/bitflash-node";
+#endif
+        string strOriginal = tmp + "/original";
+        string strRawCopy = tmp + "/raw-copy";
+        string strBackupCopy = tmp + "/backup-copy";
+        nFail += Check(MakeDirLocal(strOriginal) &&
+                       MakeDirLocal(strRawCopy) &&
+                       MakeDirLocal(strBackupCopy),
+                       "temporary wallet directories can be created") ? 0 : 1;
+
+        string strCreateOut = tmp + "/create.txt";
+        vector<string> vCreateArgs;
+        vCreateArgs.push_back("-datadir=" + strOriginal);
+        vCreateArgs.push_back("-nomanagedtor");
+        vCreateArgs.push_back("-nogui");
+        vCreateArgs.push_back("-newphrase");
+        int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
+        nFail += Check(nCreateRet == 0 &&
+                       FileContainsText(strCreateOut, "Write these twelve words down"),
+                       "a phrase wallet can be created in a fresh datadir") ? 0 : 1;
+
+        string strOriginalAudit = tmp + "/original-audit.txt";
+        vector<string> vOriginalAuditArgs;
+        vOriginalAuditArgs.push_back("-datadir=" + strOriginal);
+        vOriginalAuditArgs.push_back("-nomanagedtor");
+        vOriginalAuditArgs.push_back("-nogui");
+        vOriginalAuditArgs.push_back("-recoveryaudit");
+        int nOriginalAuditRet = RunBitflashChild(strExe, vOriginalAuditArgs, NULL, &strOriginalAudit);
+        nFail += Check(nOriginalAuditRet == 0 &&
+                       FileContainsText(strOriginalAudit, "recovery phrase: present") &&
+                       FileContainsText(strOriginalAudit, "SLIP-0044 BITFLASH"),
+                       "the original wallet reports its recovery phrase") ? 0 : 1;
+
+        string strPortableWallet = tmp + "/portable-wallet.dat";
+        string strBackupOut = tmp + "/backupwallet.txt";
+        vector<string> vBackupArgs;
+        vBackupArgs.push_back("-datadir=" + strOriginal);
+        vBackupArgs.push_back("-nomanagedtor");
+        vBackupArgs.push_back("-nogui");
+        vBackupArgs.push_back("-backupwallet=" + strPortableWallet);
+        int nBackupRet = RunBitflashChild(strExe, vBackupArgs, NULL, &strBackupOut);
+        nFail += Check(nBackupRet == 0 && FileExists(strPortableWallet.c_str()),
+                       "/backupwallet writes a portable wallet.dat") ? 0 : 1;
+
+        nFail += Check(CopyFileLocal(strOriginal + "/wallet.dat",
+                                     strRawCopy + "/wallet.dat"),
+                       "a raw wallet.dat can be copied without database logs") ? 0 : 1;
+        string strRawAudit = tmp + "/raw-copy-audit.txt";
+        vector<string> vRawAuditArgs;
+        vRawAuditArgs.push_back("-datadir=" + strRawCopy);
+        vRawAuditArgs.push_back("-nomanagedtor");
+        vRawAuditArgs.push_back("-nogui");
+        vRawAuditArgs.push_back("-recoveryaudit");
+        int nRawAuditRet = RunBitflashChild(strExe, vRawAuditArgs, NULL, &strRawAudit);
+        nFail += Check(nRawAuditRet == 0 &&
+                       FileContainsText(strRawAudit, "recovery phrase: present") &&
+                       !FileContainsText(strRawAudit, "Cannot open wallet.dat"),
+                       "a raw wallet.dat copy opens in a new datadir") ? 0 : 1;
+
+        nFail += Check(CopyFileLocal(strPortableWallet,
+                                     strBackupCopy + "/wallet.dat"),
+                       "the portable backup can be installed as wallet.dat") ? 0 : 1;
+        string strBackupAudit = tmp + "/backup-copy-audit.txt";
+        vector<string> vBackupAuditArgs;
+        vBackupAuditArgs.push_back("-datadir=" + strBackupCopy);
+        vBackupAuditArgs.push_back("-nomanagedtor");
+        vBackupAuditArgs.push_back("-nogui");
+        vBackupAuditArgs.push_back("-recoveryaudit");
+        int nBackupAuditRet = RunBitflashChild(strExe, vBackupAuditArgs, NULL, &strBackupAudit);
+        nFail += Check(nBackupAuditRet == 0 &&
+                       FileContainsText(strBackupAudit, "recovery phrase: present") &&
+                       FileContainsText(strBackupAudit, "SLIP-0044 BITFLASH"),
+                       "a /backupwallet copy opens in a new datadir") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
     RemoveTree(tmp);
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");
@@ -1653,6 +1813,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
         return RunWalletEncryptSelfTest();
+    if (name == "wallet-portability")
+        return RunWalletPortabilitySelfTest();
     if (name == "net-message")
         return RunNetMessageSelfTest();
     if (name == "consensus-limits")
@@ -1667,6 +1829,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }

@@ -114,7 +114,8 @@ static void PrintUsage()
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
     printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt,\n");
-    printf("            net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, or managed-tor\n");
+    printf("            wallet-portability, net-message, consensus-limits, pool-stratum,\n");
+    printf("            parse-money, socks5-proxy, or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
