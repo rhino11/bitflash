@@ -553,51 +553,38 @@ static void CountWalletStorageType(const std::string& strType,
 static bool ReadWalletStorageCounts(WalletStorageAuditCounts& counts,
                                     std::string& strError)
 {
-    class CWalletAuditDB : public CWalletDB
+    class CWalletStorageCountVisitor : public CWalletRecordVisitor
     {
     public:
-        CWalletAuditDB() : CWalletDB("r") { }
-        using CDB::GetCursor;
-        using CDB::ReadAtCursor;
+        WalletStorageAuditCounts& counts;
+
+        explicit CWalletStorageCountVisitor(WalletStorageAuditCounts& countsIn)
+            : counts(countsIn) { }
+
+        bool VisitWalletRecord(const CDataStream& ssKeyIn,
+                               const CDataStream& ssValue,
+                               std::string& strErrorRet)
+        {
+            (void)ssValue;
+            (void)strErrorRet;
+            counts.nTotal++;
+            try
+            {
+                CDataStream ssKey = ssKeyIn;
+                std::string strType;
+                ssKey >> strType;
+                CountWalletStorageType(strType, counts);
+            }
+            catch (...)
+            {
+                counts.nMalformed++;
+            }
+            return true;
+        }
     };
 
-    CWalletAuditDB walletdb;
-    Dbc* pcursor = walletdb.GetCursor();
-    if (!pcursor)
-    {
-        strError = "cannot open wallet.dat cursor";
-        return false;
-    }
-
-    for (;;)
-    {
-        CDataStream ssKey(SER_DISK);
-        CDataStream ssValue(SER_DISK);
-        int ret = walletdb.ReadAtCursor(pcursor, ssKey, ssValue);
-        if (ret == DB_NOTFOUND)
-            break;
-        if (ret != 0)
-        {
-            pcursor->close();
-            strError = strprintf("Berkeley DB cursor read failed (%d)", ret);
-            return false;
-        }
-
-        counts.nTotal++;
-        try
-        {
-            std::string strType;
-            ssKey >> strType;
-            CountWalletStorageType(strType, counts);
-        }
-        catch (...)
-        {
-            counts.nMalformed++;
-        }
-    }
-
-    pcursor->close();
-    return true;
+    CWalletStorageCountVisitor visitor(counts);
+    return ScanWalletRecords(visitor, strError);
 }
 
 static std::string WalletStorageAuditJson(const WalletStorageAuditCounts& counts)
