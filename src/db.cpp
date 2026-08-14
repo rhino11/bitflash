@@ -52,8 +52,33 @@ static bool fDbEnvInit = false;
 // Why LoadWallet() refused, in words meant for the person who has to act on it.
 // Empty unless the reason is one we can name.
 string strWalletLoadError;
-DbEnv dbenv(0u);
+static DbEnv* pdbenv = NULL;
+static FILE* pdbErrFile = NULL;
 static map<string, int> mapFileUseCount;
+
+DbEnv& GetDbEnv()
+{
+    if (!pdbenv)
+        pdbenv = new DbEnv(0u);
+    return *pdbenv;
+}
+
+static void CloseDbEnv()
+{
+    if (pdbenv)
+    {
+        try { pdbenv->close(0); }
+        catch (...) { }
+        delete pdbenv;
+        pdbenv = NULL;
+    }
+    if (pdbErrFile)
+    {
+        fclose(pdbErrFile);
+        pdbErrFile = NULL;
+    }
+    fDbEnvInit = false;
+}
 
 class CDBInit
 {
@@ -64,11 +89,7 @@ public:
     ~CDBInit()
     {
         if (fDbEnvInit)
-        {
-            try { dbenv.close(0); }
-            catch (...) { }
-            fDbEnvInit = false;
-        }
+            CloseDbEnv();
     }
 }
 instance_of_cdbinit;
@@ -104,24 +125,30 @@ CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
 
             printf("dbenv.open strAppDir=%s\n", strAppDir.c_str());
 
-            dbenv.set_lg_dir(strLogDir.c_str());
-            dbenv.set_lg_max(10000000);
-            dbenv.set_lk_max_locks(10000);
-            dbenv.set_lk_max_objects(10000);
-            dbenv.set_errfile(fopen("db.log", "a")); /// debug
-            ///dbenv.log_set_config(DB_LOG_AUTO_REMOVE, 1); /// causes corruption
-            ret = dbenv.open(strAppDir.c_str(),
-                             DB_CREATE     |
-                             DB_INIT_LOCK  |
-                             DB_INIT_LOG   |
-                             DB_INIT_MPOOL |
-                             DB_INIT_TXN   |
-                             DB_THREAD     |
-                             DB_PRIVATE    |
-                             DB_RECOVER,
-                             0);
+            DbEnv& env = GetDbEnv();
+            env.set_lg_dir(strLogDir.c_str());
+            env.set_lg_max(10000000);
+            env.set_lk_max_locks(10000);
+            env.set_lk_max_objects(10000);
+            pdbErrFile = fopen("db.log", "a"); /// debug
+            if (pdbErrFile)
+                env.set_errfile(pdbErrFile);
+            ///env.log_set_config(DB_LOG_AUTO_REMOVE, 1); /// causes corruption
+            ret = env.open(strAppDir.c_str(),
+                           DB_CREATE     |
+                           DB_INIT_LOCK  |
+                           DB_INIT_LOG   |
+                           DB_INIT_MPOOL |
+                           DB_INIT_TXN   |
+                           DB_THREAD     |
+                           DB_PRIVATE    |
+                           DB_RECOVER,
+                           0);
             if (ret > 0)
+            {
+                CloseDbEnv();
                 throw runtime_error(strprintf("CDB() : error %d opening database environment\n", ret));
+            }
             fDbEnvInit = true;
 
             // A Berkeley DB file records, in every page header, a log sequence
@@ -151,7 +178,7 @@ CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
                         continue;
                     try
                     {
-                        if (dbenv.lsn_reset(pszName, 0) == 0)
+                        if (env.lsn_reset(pszName, 0) == 0)
                             printf("CDB() : adopted %s from another environment "
                                    "(log sequence numbers reset)\n", pszName);
                     }
@@ -164,7 +191,7 @@ CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
         ++mapFileUseCount[strFile];
     }
 
-    pdb = new Db(&dbenv, 0);
+    pdb = new Db(&GetDbEnv(), 0);
 
     ret = pdb->open(NULL,      // Txn pointer
                     pszFile,   // Filename
@@ -199,7 +226,8 @@ void CDB::Close()
     try { pdb->close(0); } catch (...) { }
     delete pdb;
     pdb = NULL;
-    try { dbenv.txn_checkpoint(0, 0, 0); } catch (...) { }
+    if (fDbEnvInit)
+        try { GetDbEnv().txn_checkpoint(0, 0, 0); } catch (...) { }
 
     CRITICAL_BLOCK(cs_db)
         --mapFileUseCount[strFile];
@@ -279,7 +307,8 @@ void DBFlush(bool fShutdown)
         // takes the process down before the wallet has been put down cleanly,
         // which is the difference between a portable wallet.dat and one welded
         // to this directory -- the lsn_reset just below is what frees it.
-        try { dbenv.txn_checkpoint(0, 0, 0); }
+        DbEnv& env = GetDbEnv();
+        try { env.txn_checkpoint(0, 0, 0); }
         catch (const std::exception& e)
         { printf("DBFlush() : checkpoint failed: %s\n", e.what()); }
 
@@ -290,7 +319,7 @@ void DBFlush(bool fShutdown)
             int nRefCount = (*mi).second;
             if (nRefCount == 0)
             {
-                try { dbenv.lsn_reset(strFile.c_str(), 0); }
+                try { env.lsn_reset(strFile.c_str(), 0); }
                 catch (const std::exception& e)
                 { printf("DBFlush() : lsn_reset(%s) failed: %s\n", strFile.c_str(), e.what()); }
                 mapFileUseCount.erase(mi++);
@@ -310,9 +339,8 @@ void DBFlush(bool fShutdown)
             // Found while making wallet encryption clean up after itself:
             // calling DBFlush(true) a second time crashed here every time.
             if (mapFileUseCount.empty())
-                try { dbenv.log_archive(NULL, DB_ARCH_REMOVE); } catch (...) { }
-            try { dbenv.close(0); } catch (...) { }
-            fDbEnvInit = false;
+                try { env.log_archive(NULL, DB_ARCH_REMOVE); } catch (...) { }
+            CloseDbEnv();
         }
     }
 }
@@ -1042,7 +1070,8 @@ bool BackupWallet(const string& strDest)
         // Committing first, so the copy is not missing the newest records.
         // Both calls can throw, and a failed backup must not take the node
         // down with it.
-        try { dbenv.txn_checkpoint(0, 0, 0); }
+        DbEnv& env = GetDbEnv();
+        try { env.txn_checkpoint(0, 0, 0); }
         catch (const std::exception& e)
         { return error("BackupWallet() : checkpoint failed: %s\n", e.what()); }
 
@@ -1077,7 +1106,7 @@ bool BackupWallet(const string& strDest)
             }
 
             // Without this the copy is welded to this node's database/ dir.
-            int ret = dbenv.lsn_reset(strTemp.c_str(), 0);
+            int ret = env.lsn_reset(strTemp.c_str(), 0);
             if (ret != 0)
                 printf("BackupWallet() : warning -- lsn_reset returned %d; the copy "
                        "may only open beside this node's database/ directory\n", ret);

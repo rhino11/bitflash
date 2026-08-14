@@ -48,7 +48,7 @@ public:
 };
 
 
-extern DbEnv dbenv;
+extern DbEnv& GetDbEnv();
 extern void DBFlush(bool fShutdown);
 // Close the environment and delete its logs. Only the encryption command calls
 // this: the logs hold the plaintext records the old wallet wrote.
@@ -237,7 +237,7 @@ public:
         if (!pdb)
             return false;
         DbTxn* ptxn = NULL;
-        int ret = dbenv.txn_begin(GetTxn(), &ptxn, 0);
+        int ret = GetDbEnv().txn_begin(GetTxn(), &ptxn, 0);
         if (!ptxn || ret != 0)
             return false;
         vTxn.push_back(ptxn);
