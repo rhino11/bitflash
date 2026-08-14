@@ -114,7 +114,8 @@ static void PrintUsage()
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
     printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity,\n");
-    printf("            db-env-reopen, wallet-crypto, wallet-encrypt, wallet-portability,\n");
+    printf("            db-env-reopen, wallet-sqlite, wallet-crypto, wallet-encrypt,\n");
+    printf("            wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
     printf("            parse-money, socks5-proxy, or managed-tor\n");

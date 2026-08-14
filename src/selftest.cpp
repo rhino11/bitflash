@@ -13,6 +13,7 @@
 #include "sockcount.h"
 #include "tor.h"
 #include "walletcmd.h"
+#include "wallet_sqlite.h"
 
 extern int RunPoolStratumSelfTest();
 
@@ -60,6 +61,11 @@ static std::string HexStrLocal(const std::vector<unsigned char>& v)
         out.push_back(hex[c & 0x0f]);
     }
     return out;
+}
+
+static vector<unsigned char> DataStreamBytes(const CDataStream& ss)
+{
+    return vector<unsigned char>(ss.begin(), ss.end());
 }
 
 static bool MakeTempDir(std::string& out)
@@ -1023,6 +1029,104 @@ static int RunDbEnvReopenSelfTest()
 
     DBFlush(true);
     strSetDataDir = strOldDataDir;
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+static int RunWalletSQLiteSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-sqlite self-test\n");
+
+    std::string tmp;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+
+    int nFail = 0;
+    string strPath = tmp + "/wallet.sqlite";
+    string strError;
+
+    try
+    {
+        CDataStream ssKeySetting(SER_DISK);
+        ssKeySetting << make_pair(string("setting"), string("sqlite-roundtrip"));
+        CDataStream ssValueSetting(SER_DISK);
+        ssValueSetting << (int64)424242;
+
+        vector<unsigned char> vchPubKey;
+        vchPubKey.push_back(0x04);
+        for (int i = 0; i < 64; i++)
+            vchPubKey.push_back((unsigned char)i);
+        CDataStream ssKeyDefault(SER_DISK);
+        ssKeyDefault << string("defaultkey");
+        CDataStream ssValueDefault(SER_DISK);
+        ssValueDefault << vchPubKey;
+
+        {
+            CWalletDBSQLite db;
+            nFail += Check(db.Open(strPath, strError),
+                           "SQLite wallet opens and creates schema") ? 0 : 1;
+            nFail += Check(db.BeginTransaction(strError),
+                           "SQLite wallet begins a write transaction") ? 0 : 1;
+            nFail += Check(db.WriteRecord(DataStreamBytes(ssKeySetting),
+                                          DataStreamBytes(ssValueSetting),
+                                          strError),
+                           "SQLite wallet writes a serialized setting record") ? 0 : 1;
+            nFail += Check(db.WriteRecord(DataStreamBytes(ssKeyDefault),
+                                          DataStreamBytes(ssValueDefault),
+                                          strError),
+                           "SQLite wallet writes a serialized defaultkey record") ? 0 : 1;
+            nFail += Check(db.CommitTransaction(strError),
+                           "SQLite wallet commits a write transaction") ? 0 : 1;
+            int nCount = 0;
+            nFail += Check(db.CountRecords(nCount, strError) && nCount == 2,
+                           "SQLite wallet counts raw records") ? 0 : 1;
+        }
+
+        {
+            CWalletDBSQLite db;
+            nFail += Check(db.Open(strPath, strError),
+                           "SQLite wallet reopens") ? 0 : 1;
+            vector<unsigned char> vchRead;
+            nFail += Check(db.ReadRecord(DataStreamBytes(ssKeySetting),
+                                         vchRead,
+                                         strError),
+                           "SQLite wallet reads a serialized setting record") ? 0 : 1;
+            int64 nReadValue = 0;
+            CDataStream ssRead(vchRead, SER_DISK);
+            ssRead >> nReadValue;
+            nFail += Check(!ssRead.fail() && nReadValue == 424242,
+                           "SQLite wallet preserves serialized values byte-for-byte") ? 0 : 1;
+
+            vchRead.clear();
+            nFail += Check(db.ReadRecord(DataStreamBytes(ssKeyDefault),
+                                         vchRead,
+                                         strError),
+                           "SQLite wallet reads a serialized defaultkey record") ? 0 : 1;
+            vector<unsigned char> vchReadPubKey;
+            CDataStream ssReadDefault(vchRead, SER_DISK);
+            ssReadDefault >> vchReadPubKey;
+            nFail += Check(!ssReadDefault.fail() && vchReadPubKey == vchPubKey,
+                           "SQLite wallet preserves public key blobs") ? 0 : 1;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
     RemoveTree(tmp);
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");
@@ -2289,6 +2393,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletStorageSanitySelfTest();
     if (name == "db-env-reopen")
         return RunDbEnvReopenSelfTest();
+    if (name == "wallet-sqlite")
+        return RunWalletSQLiteSelfTest();
     if (name == "wallet-crypto")
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
@@ -2309,6 +2415,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
