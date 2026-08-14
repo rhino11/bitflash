@@ -573,6 +573,11 @@ static bool ReadWalletStorageCounts(WalletStorageAuditCounts& counts,
                 CDataStream ssKey = ssKeyIn;
                 std::string strType;
                 ssKey >> strType;
+                if (ssKey.fail())
+                {
+                    counts.nMalformed++;
+                    return true;
+                }
                 CountWalletStorageType(strType, counts);
             }
             catch (...)
