@@ -97,6 +97,16 @@ bool CWalletDBSQLite::RollbackTransaction(string& strError)
     return Exec("ROLLBACK;", strError);
 }
 
+bool CWalletDBSQLite::Checkpoint(string& strError)
+{
+    if (!pdb)
+    {
+        strError = "SQLite wallet is not open";
+        return false;
+    }
+    return Exec("PRAGMA wal_checkpoint(TRUNCATE);", strError);
+}
+
 bool CWalletDBSQLite::Exec(const char* pszSql, string& strError)
 {
     char* pszErr = NULL;

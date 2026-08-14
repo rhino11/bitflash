@@ -114,8 +114,8 @@ static void PrintUsage()
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
     printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity,\n");
-    printf("            db-env-reopen, wallet-sqlite, wallet-crypto, wallet-encrypt,\n");
-    printf("            wallet-portability,\n");
+    printf("            db-env-reopen, wallet-sqlite, wallet-sqlite-migration,\n");
+    printf("            wallet-crypto, wallet-encrypt, wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
     printf("            parse-money, socks5-proxy, or managed-tor\n");
@@ -181,6 +181,8 @@ static void PrintUsage()
     printf("                              (write the same audit as deterministic JSON)\n");
     printf("  /walletstoragecheck        (fail closed on inconsistent or unsafe\n");
     printf("                              wallet.dat storage state)\n");
+    printf("  /walletsqliteexport=FILE   (copy raw wallet.dat records into an\n");
+    printf("                              experimental SQLite store, then exit)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -525,6 +527,15 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/walletstoragecheck") || arg(argc,argv,"-walletstoragecheck"))
     {
         int nRet = CmdWalletStorageCheck();
+        DBFlush(true);
+        return nRet;
+    }
+
+    string strWalletSQLiteExport =
+        argval2(argc, argv, "/walletsqliteexport", "-walletsqliteexport");
+    if (!strWalletSQLiteExport.empty())
+    {
+        int nRet = CmdWalletSQLiteExport(strWalletSQLiteExport);
         DBFlush(true);
         return nRet;
     }

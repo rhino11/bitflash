@@ -70,6 +70,11 @@ int CmdWalletStorageAudit(const std::string& strJsonOut = "");
 // or migration-unsafe mix of storage records.
 int CmdWalletStorageCheck();
 
+// Diagnostic/migration staging: copy every raw wallet.dat record into an
+// experimental SQLite key/value store, preserving serialized bytes. This does
+// not change which backend the runtime wallet opens.
+int CmdWalletSQLiteExport(const std::string& strDest);
+
 // Rewrite wallet.dat so private keys and the HD seed are encrypted with the
 // given passphrase. Returns 0 on success and exits without starting the node.
 int CmdEncryptWallet(const std::string& strPassphrase);

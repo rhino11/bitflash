@@ -189,6 +189,7 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=wallet-hd
 	./bitflash-node -selftest=wallet-format
 	./bitflash-node -selftest=wallet-sqlite
+	./bitflash-node -selftest=wallet-sqlite-migration
 	./bitflash-node -selftest=wallet-crypto
 	./bitflash-node -selftest=wallet-encrypt
 	./bitflash-node -selftest=net-message
