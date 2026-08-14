@@ -783,8 +783,40 @@ public:
     }
 };
 
+static const char* SELFTEST_MUTATE_WALLET_MARKER =
+    ".bitflash-selftest-wallet-mutate-ok";
+static const char* SELFTEST_MUTATE_WALLET_MARKER_TEXT =
+    "bitflash destructive wallet storage self-test\n";
+
+static string SelfTestMutationMarkerPath()
+{
+    return GetAppDir() + "/" + SELFTEST_MUTATE_WALLET_MARKER;
+}
+
+static bool WriteSelfTestMutationMarker(const string& strDir)
+{
+    string strPath = strDir + "/" + SELFTEST_MUTATE_WALLET_MARKER;
+    FILE* pf = fopen(strPath.c_str(), "wb");
+    if (!pf)
+        return false;
+    bool fOk = fwrite(SELFTEST_MUTATE_WALLET_MARKER_TEXT, 1,
+                      strlen(SELFTEST_MUTATE_WALLET_MARKER_TEXT), pf) ==
+               strlen(SELFTEST_MUTATE_WALLET_MARKER_TEXT);
+    if (fclose(pf) != 0)
+        fOk = false;
+    return fOk;
+}
+
 int RunSelfTestMutateWallet(const std::string& name)
 {
+    if (!FileContainsText(SelfTestMutationMarkerPath(),
+                          SELFTEST_MUTATE_WALLET_MARKER_TEXT))
+    {
+        fprintf(stderr, "Refusing destructive wallet storage mutation outside "
+                        "a marked self-test datadir.\n");
+        return 1;
+    }
+
     bool fOk = false;
     try
     {
@@ -878,6 +910,23 @@ static int RunWalletStorageSanitySelfTest()
             nFail += Check(nCreateRet == 0 &&
                            FileContainsText(strCreateOut, "Write these twelve words down"),
                            "scenario phrase wallet can be created") ? 0 : 1;
+
+            if (i == 0)
+            {
+                string strBlockedOut = tmp + "/" + scenarios[i].pszName + "-blocked-mutate.txt";
+                vector<string> vBlockedArgs;
+                vBlockedArgs.push_back("-datadir=" + strScenarioDir);
+                vBlockedArgs.push_back("-nomanagedtor");
+                vBlockedArgs.push_back("-nogui");
+                vBlockedArgs.push_back("-selftestmutatewallet=" + string(scenarios[i].pszName));
+                int nBlockedRet = RunBitflashChild(strExe, vBlockedArgs, NULL, &strBlockedOut);
+                nFail += Check(nBlockedRet != 0 &&
+                               FileContainsText(strBlockedOut, "Refusing destructive wallet storage mutation"),
+                               "wallet mutation helper is blocked without marker") ? 0 : 1;
+            }
+
+            nFail += Check(WriteSelfTestMutationMarker(strScenarioDir),
+                           "scenario mutation marker can be written") ? 0 : 1;
 
             string strMutateOut = tmp + "/" + scenarios[i].pszName + "-mutate.txt";
             vector<string> vMutateArgs;
