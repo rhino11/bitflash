@@ -798,6 +798,19 @@ static vector<unsigned char> DataStreamBytesLocal(const CDataStream& ss)
 
 namespace {
 
+static void RemoveSQLiteExportFiles(const string& strPath)
+{
+    remove(strPath.c_str());
+    remove((strPath + "-wal").c_str());
+    remove((strPath + "-shm").c_str());
+}
+
+static void RemoveFailedRestoreWallet(const string& strWalletPath)
+{
+    DBFlush(true);
+    remove(strWalletPath.c_str());
+}
+
 class CWalletSQLiteExportVisitor : public CWalletRecordVisitor
 {
 public:
@@ -912,11 +925,14 @@ int CmdWalletSQLiteExport(const std::string& strDest)
     CWalletDBSQLite db;
     if (!db.Open(strDest, strError))
     {
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
         return 1;
     }
     if (!db.BeginTransaction(strError))
     {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot begin SQLite wallet export: %s\n", strError.c_str());
         return 1;
     }
@@ -927,16 +943,22 @@ int CmdWalletSQLiteExport(const std::string& strDest)
     {
         string strRollbackError;
         db.RollbackTransaction(strRollbackError);
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot export wallet.dat to SQLite: %s\n", strError.c_str());
         return 1;
     }
     if (!db.CommitTransaction(strError))
     {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot commit SQLite wallet export: %s\n", strError.c_str());
         return 1;
     }
     if (!db.Checkpoint(strError))
     {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot checkpoint SQLite wallet export: %s\n", strError.c_str());
         return 1;
     }
@@ -944,12 +966,16 @@ int CmdWalletSQLiteExport(const std::string& strDest)
     int nCount = 0;
     if (!db.CountRecords(nCount, strError))
     {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "Cannot verify SQLite wallet export count: %s\n",
                 strError.c_str());
         return 1;
     }
     if (nCount != nCopied)
     {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
         fprintf(stderr, "SQLite wallet export count mismatch: copied %d, stored %d\n",
                 nCopied, nCount);
         return 1;
@@ -1097,6 +1123,8 @@ int CmdWalletSQLiteRestore(const std::string& strPath)
     if (!sqlite.ScanRecords(visitor, strError))
     {
         bdb.TxnAbort();
+        bdb.Close();
+        RemoveFailedRestoreWallet(strWalletPath);
         fprintf(stderr, "Cannot restore SQLite wallet export: %s\n",
                 strError.c_str());
         return 1;
@@ -1104,12 +1132,16 @@ int CmdWalletSQLiteRestore(const std::string& strPath)
     if (nCopied != nSQLiteRecords)
     {
         bdb.TxnAbort();
+        bdb.Close();
+        RemoveFailedRestoreWallet(strWalletPath);
         fprintf(stderr, "SQLite wallet restore copied %d records, expected %d.\n",
                 nCopied, nSQLiteRecords);
         return 2;
     }
     if (!bdb.TxnCommit())
     {
+        bdb.Close();
+        RemoveFailedRestoreWallet(strWalletPath);
         fprintf(stderr, "Cannot commit Berkeley DB restore transaction.\n");
         return 1;
     }

@@ -115,7 +115,8 @@ streams without introducing a SQLite runtime wallet loader yet.
 SQLite export and prints only record counts and mismatch counts.
 `-walletsqliterestore=FILE` rebuilds `wallet.dat` from a SQLite export only in
 an empty data directory, then the verifier can prove the restored BDB file still
-matches the export byte-for-byte.
+matches the export byte-for-byte. Failed exports remove the incomplete SQLite
+file and failed restores remove the incomplete `wallet.dat`.
 
 ## `blkindex.dat`
 
