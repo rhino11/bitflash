@@ -108,7 +108,9 @@ BDB-to-SQLite migration or runtime backend flag exists.
 `wallet.dat` record through `ScanWalletRecords()` and writes those same key and
 value bytes into the SQLite table inside one transaction. It refuses to
 overwrite an existing export and still does not change the runtime wallet
-backend.
+backend. `CWalletDBSQLite::ScanRecords()` can stream those exported records back
+through the same visitor shape, so tests can compare BDB and SQLite record
+streams without introducing a SQLite runtime wallet loader yet.
 
 ## `blkindex.dat`
 

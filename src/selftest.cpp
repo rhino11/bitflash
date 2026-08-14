@@ -1259,6 +1259,12 @@ static int RunWalletSQLiteMigrationSelfTest()
         }
         nFail += Check(fAllMatch,
                        "SQLite export preserves every wallet.dat key/value byte-for-byte") ? 0 : 1;
+
+        std::map<vector<unsigned char>, vector<unsigned char> > mapSQLite;
+        CWalletRecordMapVisitor sqliteVisitor(mapSQLite);
+        nFail += Check(db.ScanRecords(sqliteVisitor, strError) &&
+                       mapSQLite == mapBDB,
+                       "SQLite wallet scanner streams every exported record byte-for-byte") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

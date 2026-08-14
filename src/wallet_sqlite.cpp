@@ -231,6 +231,60 @@ bool CWalletDBSQLite::ReadRecord(const vector<unsigned char>& vchKey,
     return false;
 }
 
+bool CWalletDBSQLite::ScanRecords(CWalletRecordVisitor& visitor,
+                                  string& strError)
+{
+    if (!pdb)
+    {
+        strError = "SQLite wallet is not open";
+        return false;
+    }
+
+    sqlite3_stmt* stmt = NULL;
+    const char* pszSql = "SELECT key, value FROM wallet_records ORDER BY rowid;";
+    int ret = sqlite3_prepare_v2(pdb, pszSql, -1, &stmt, NULL);
+    if (ret != SQLITE_OK)
+    {
+        SetSQLiteError(pdb, "cannot prepare SQLite wallet scan", strError);
+        return false;
+    }
+
+    while ((ret = sqlite3_step(stmt)) == SQLITE_ROW)
+    {
+        const unsigned char* pchKey =
+            (const unsigned char*)sqlite3_column_blob(stmt, 0);
+        int nKeyBytes = sqlite3_column_bytes(stmt, 0);
+        const unsigned char* pchValue =
+            (const unsigned char*)sqlite3_column_blob(stmt, 1);
+        int nValueBytes = sqlite3_column_bytes(stmt, 1);
+
+        vector<unsigned char> vchKey;
+        vector<unsigned char> vchValue;
+        if (nKeyBytes > 0 && pchKey)
+            vchKey.assign(pchKey, pchKey + nKeyBytes);
+        if (nValueBytes > 0 && pchValue)
+            vchValue.assign(pchValue, pchValue + nValueBytes);
+
+        CDataStream ssKey(vchKey, SER_DISK);
+        CDataStream ssValue(vchValue, SER_DISK);
+        if (!visitor.VisitWalletRecord(ssKey, ssValue, strError))
+        {
+            sqlite3_finalize(stmt);
+            return false;
+        }
+    }
+
+    if (ret != SQLITE_DONE)
+    {
+        SetSQLiteError(pdb, "cannot scan SQLite wallet records", strError);
+        sqlite3_finalize(stmt);
+        return false;
+    }
+
+    sqlite3_finalize(stmt);
+    return true;
+}
+
 bool CWalletDBSQLite::CountRecords(int& nRecordsRet, string& strError)
 {
     nRecordsRet = 0;
