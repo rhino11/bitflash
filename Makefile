@@ -43,10 +43,11 @@ deps-apt:
 	@if command -v apt-get >/dev/null 2>&1; then \
 	  $(SUDO) apt-get install -y build-essential cmake git pkg-config autoconf \
 	    libtool libssl-dev libdb5.3++-dev libsodium-dev nlohmann-json3-dev \
-	    libboost-system-dev libglfw3-dev libgl-dev python3-pil clang; \
+	    libboost-system-dev libglfw3-dev libgl-dev libsqlite3-dev \
+	    python3-pil clang; \
 	else \
 	  echo "Not an apt system — install: g++ cmake git autoconf libtool"; \
-	  echo "  libssl libdb++ libsodium nlohmann-json boost glfw3 opengl python3-pil"; \
+	  echo "  libssl libdb++ libsodium nlohmann-json boost glfw3 opengl sqlite3 python3-pil"; \
 	fi
 
 deps-secp256k1:
@@ -113,7 +114,7 @@ img = ico.convert('RGBA'); \
 img.save('/tmp/bitflash.AppDir/bitflash.png'); \
 import shutil; shutil.copy('/tmp/bitflash.AppDir/bitflash.png', \
 '/tmp/bitflash.AppDir/usr/share/icons/hicolor/256x256/apps/bitflash.png')"
-	@for lib in libsodium.so.23 libdb_cxx-5.3.so libglfw.so.3; do \
+	@for lib in libsodium.so.23 libdb_cxx-5.3.so libsqlite3.so.0 libglfw.so.3; do \
 	  path=$$(ldconfig -p | grep " $$lib " | awk '{print $$NF}' | head -1); \
 	  [ -z "$$path" ] && path=$$(find /usr/lib /lib -name "$$lib" 2>/dev/null | head -1); \
 	  [ -n "$$path" ] && cp -L "$$path" /tmp/bitflash.AppDir/usr/lib/ && echo "  bundled $$lib" || echo "  missing $$lib"; \
@@ -131,6 +132,7 @@ deps-windows:
 	  mingw-w64-ucrt-x86_64-glfw \
 	  mingw-w64-ucrt-x86_64-openssl \
 	  mingw-w64-ucrt-x86_64-db \
+	  mingw-w64-ucrt-x86_64-sqlite3 \
 	  mingw-w64-ucrt-x86_64-libsodium \
 	  mingw-w64-ucrt-x86_64-nlohmann-json \
 	  mingw-w64-ucrt-x86_64-boost \

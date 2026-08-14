@@ -24,7 +24,7 @@ CXXFLAGS = -std=gnu++14 -O2 $(WARNFLAGS) -fpermissive -pthread \
 
 LIBS = -L$(DEPS)/lib -lsecp256k1 \
        -L$(RANDOMX)/build -lrandomx \
-       -lsodium -lssl -lcrypto -ldb_cxx -lpthread \
+       -lsodium -lssl -lcrypto -ldb_cxx -lsqlite3 -lpthread \
        -LC:/msys64/ucrt64/lib \
        -lglfw3 -lopengl32 -lgdi32 \
        -lkernel32 -luser32 -lcomdlg32 -lwinspool -lwinmm \
@@ -37,7 +37,8 @@ IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
 NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/btfrv.o obj/btftunnel.o obj/rpc.o \
-            obj/selftest.o obj/bip32.o obj/walletcmd.o obj/proxy.o obj/tor.o
+            obj/selftest.o obj/bip32.o obj/walletcmd.o obj/wallet_sqlite.o \
+            obj/proxy.o obj/tor.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o obj/bitflash_res.o
 
@@ -51,7 +52,7 @@ GUI_OBJS = obj/gui.o obj/main_gui.o obj/bitflash_res.o
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
           randomx_pow.h btfaddr.h btfchan.h btfrv.h btftunnel.h market.h \
-          selftest.h walletcmd.h sockcount.h proxy.h tor.h compat.h font_roboto.h
+          selftest.h walletcmd.h wallet_sqlite.h sockcount.h proxy.h tor.h compat.h font_roboto.h
 
 all: bitflash.exe
 
@@ -107,6 +108,7 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=wallet-keypool
 	./bitflash.exe -selftest=wallet-hd
 	./bitflash.exe -selftest=wallet-format
+	./bitflash.exe -selftest=wallet-sqlite
 	./bitflash.exe -selftest=wallet-crypto
 	./bitflash.exe -selftest=wallet-encrypt
 	./bitflash.exe -selftest=net-message

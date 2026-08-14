@@ -85,6 +85,25 @@ A future wallet backend must keep these properties:
    - recovery phrase encrypted and locked, requiring unlock before coverage can
      be audited.
 
+## Experimental SQLite Wallet Store
+
+The SQLite wallet path starts as a byte-preserving record store, not as a new
+wallet format:
+
+```sql
+CREATE TABLE wallet_records (
+  key BLOB PRIMARY KEY NOT NULL,
+  value BLOB NOT NULL
+);
+PRAGMA user_version=1;
+```
+
+Keys and values are the same serialized `CDataStream` bytes used by `wallet.dat`.
+The first implementation is exercised only by `-selftest=wallet-sqlite`; the
+runtime wallet still opens Berkeley DB. The purpose is to prove schema creation,
+raw record write/read, close/reopen behavior, and value preservation before any
+BDB-to-SQLite migration or runtime backend flag exists.
+
 ## `blkindex.dat`
 
 `blkindex.dat` is accessed through `CTxDB`.
