@@ -524,6 +524,17 @@ public:
     bool LoadWallet(vector<unsigned char>& vchDefaultKeyRet);
 };
 
+class CWalletRecordVisitor
+{
+public:
+    virtual ~CWalletRecordVisitor() { }
+    virtual bool VisitWalletRecord(const CDataStream& ssKey,
+                                   const CDataStream& ssValue,
+                                   string& strErrorRet) = 0;
+};
+
+bool ScanWalletRecords(CWalletRecordVisitor& visitor, string& strErrorRet);
+
 bool LoadWallet();
 
 // Writes a wallet.dat that opens on its own, anywhere -- see the definition in

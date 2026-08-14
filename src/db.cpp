@@ -932,6 +932,45 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
     return true;
 }
 
+bool ScanWalletRecords(CWalletRecordVisitor& visitor, string& strErrorRet)
+{
+    class CWalletScanDB : public CWalletDB
+    {
+    public:
+        CWalletScanDB() : CWalletDB("r") { }
+        using CDB::GetCursor;
+        using CDB::ReadAtCursor;
+    };
+
+    strErrorRet.clear();
+    CWalletScanDB dbWallet;
+    Dbc* pcursor = dbWallet.GetCursor();
+    if (!pcursor)
+    {
+        strErrorRet = "could not open a wallet cursor";
+        return false;
+    }
+    CAutoCursor cursorGuard(pcursor);
+
+    loop
+    {
+        CDataStream ssKey(SER_DISK);
+        CDataStream ssValue(SER_DISK);
+        int ret = dbWallet.ReadAtCursor(pcursor, ssKey, ssValue);
+        if (ret == DB_NOTFOUND)
+            break;
+        if (ret != 0)
+        {
+            strErrorRet = strprintf("could not read wallet record: Berkeley DB error %d", ret);
+            return false;
+        }
+        if (!visitor.VisitWalletRecord(ssKey, ssValue, strErrorRet))
+            return false;
+    }
+
+    return true;
+}
+
 bool LoadWallet()
 {
     vector<unsigned char> vchDefaultKey;
