@@ -476,33 +476,28 @@ int CmdRecoveryAudit()
 
 struct WalletStorageAuditCounts
 {
-    unsigned int nTotal;
-    unsigned int nMalformed;
-    unsigned int nUnknown;
-    unsigned int nVersion;
-    unsigned int nNames;
-    unsigned int nTransactions;
-    unsigned int nPlainKeys;
-    unsigned int nEncryptedKeys;
-    unsigned int nMasterKeys;
-    unsigned int nDefaultKey;
-    unsigned int nPlainHDMaster;
-    unsigned int nPlainHDChainCode;
-    unsigned int nCryptedHDMaster;
-    unsigned int nCryptedHDChainCode;
-    unsigned int nWalletMinVersion;
-    unsigned int nPool;
-    unsigned int nSettings;
-    unsigned int nHDNext;
-    unsigned int nHDSchema;
-    unsigned int nHDCoinType;
-    unsigned int nHDReceiveNext;
-    unsigned int nHDChangeNext;
-
-    WalletStorageAuditCounts()
-    {
-        memset(this, 0, sizeof(*this));
-    }
+    unsigned int nTotal = 0;
+    unsigned int nMalformed = 0;
+    unsigned int nUnknown = 0;
+    unsigned int nVersion = 0;
+    unsigned int nNames = 0;
+    unsigned int nTransactions = 0;
+    unsigned int nPlainKeys = 0;
+    unsigned int nEncryptedKeys = 0;
+    unsigned int nMasterKeys = 0;
+    unsigned int nDefaultKey = 0;
+    unsigned int nPlainHDMaster = 0;
+    unsigned int nPlainHDChainCode = 0;
+    unsigned int nCryptedHDMaster = 0;
+    unsigned int nCryptedHDChainCode = 0;
+    unsigned int nWalletMinVersion = 0;
+    unsigned int nPool = 0;
+    unsigned int nSettings = 0;
+    unsigned int nHDNext = 0;
+    unsigned int nHDSchema = 0;
+    unsigned int nHDCoinType = 0;
+    unsigned int nHDReceiveNext = 0;
+    unsigned int nHDChangeNext = 0;
 };
 
 static std::string HDSeedStorageState(unsigned int nMaster, unsigned int nChain)
