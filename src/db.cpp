@@ -1354,69 +1354,67 @@ public:
     {
         return Write(make_pair(string("pool"), nIndex), vchPubKey);
     }
+};
 
-    bool CopyPublicRecordsTo(CWalletRewriteDB& dbTo, int& nCopiedRet, string& strErrorRet)
+static bool IsWalletEncryptionPrivateRecord(const string& strType)
+{
+    return strType == "key" ||
+           strType == "pool" ||
+           strType == "hdmaster" ||
+           strType == "hdchaincode" ||
+           strType == "mkey" ||
+           strType == "ckey" ||
+           strType == "cryptedhdmaster" ||
+           strType == "cryptedhdchaincode" ||
+           strType == "walletminversion";
+}
+
+class CWalletPublicRecordCopyVisitor : public CWalletRecordVisitor
+{
+public:
+    CWalletRewriteDB& dbTo;
+    int& nCopied;
+
+    CWalletPublicRecordCopyVisitor(CWalletRewriteDB& dbToIn, int& nCopiedIn)
+        : dbTo(dbToIn), nCopied(nCopiedIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
     {
-        nCopiedRet = 0;
-        Dbc* pcursor = GetCursor();
-        if (!pcursor)
+        string strType;
+        try
         {
-            strErrorRet = "could not open a wallet cursor";
+            CDataStream ssType = ssKey;
+            ssType >> strType;
+        }
+        catch (...)
+        {
+            strErrorRet = "wallet.dat has a record whose key type cannot be read";
             return false;
         }
 
-        unsigned int fFlags = DB_NEXT;
-        loop
+        if (IsWalletEncryptionPrivateRecord(strType))
+            return true;
+
+        if (!dbTo.WriteRaw(ssKey, ssValue))
         {
-            CDataStream ssKey;
-            CDataStream ssValue;
-            int ret = ReadAtCursor(pcursor, ssKey, ssValue, fFlags);
-            if (ret == DB_NOTFOUND)
-                break;
-            if (ret != 0)
-            {
-                pcursor->close();
-                strErrorRet = strprintf("could not read wallet record: Berkeley DB error %d", ret);
-                return false;
-            }
-
-            string strType;
-            try
-            {
-                CDataStream ssType = ssKey;
-                ssType >> strType;
-            }
-            catch (...)
-            {
-                pcursor->close();
-                strErrorRet = "wallet.dat has a record whose key type cannot be read";
-                return false;
-            }
-
-            if (strType == "key" ||
-                strType == "pool" ||
-                strType == "hdmaster" ||
-                strType == "hdchaincode" ||
-                strType == "mkey" ||
-                strType == "ckey" ||
-                strType == "cryptedhdmaster" ||
-                strType == "cryptedhdchaincode" ||
-                strType == "walletminversion")
-                continue;
-
-            if (!dbTo.WriteRaw(ssKey, ssValue))
-            {
-                pcursor->close();
-                strErrorRet = strprintf("could not copy wallet record '%s'", strType.c_str());
-                return false;
-            }
-            nCopiedRet++;
+            strErrorRet = strprintf("could not copy wallet record '%s'", strType.c_str());
+            return false;
         }
-
-        pcursor->close();
+        nCopied++;
         return true;
     }
 };
+
+static bool CopyPublicWalletRecordsTo(CWalletRewriteDB& dbTo,
+                                      int& nCopiedRet,
+                                      string& strErrorRet)
+{
+    nCopiedRet = 0;
+    CWalletPublicRecordCopyVisitor visitor(dbTo, nCopiedRet);
+    return ScanWalletRecords(visitor, strErrorRet);
+}
 
 static string WalletEncryptBackupPath()
 {
@@ -1594,9 +1592,8 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
 
     int nCopied = 0;
     {
-        CWalletRewriteDB dbSource("wallet.dat", "r");
         CWalletRewriteDB dbTarget(strTempFile.c_str(), "c+");
-        if (!dbSource.CopyPublicRecordsTo(dbTarget, nCopied, strErrorRet))
+        if (!CopyPublicWalletRecordsTo(dbTarget, nCopied, strErrorRet))
         {
             remove(strTempPath.c_str());
             return false;

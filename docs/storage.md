@@ -43,7 +43,9 @@ level schema migration is intentionally introduced.
 `wallet.dat` is accessed through `CWalletDB`.
 Read-only tooling should go through `ScanWalletRecords()` instead of opening a
 Berkeley DB cursor directly. That keeps migration checks, audits, and future
-backends behind one record-stream boundary.
+backends behind one record-stream boundary. Wallet rewrite code should also use
+that boundary when it needs to copy existing records into a newly written
+wallet file.
 
 | Key shape | Value | Secret? | Meaning |
 |---|---|---:|---|
