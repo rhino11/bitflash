@@ -120,6 +120,10 @@ file and failed restores remove the incomplete `wallet.dat`.
 `-walletsqliteloadcheck=FILE` parses a SQLite export using the same record
 types the wallet loader understands, so a migration can prove the export is not
 just byte-preserving but loader-compatible before runtime activation.
+`-walletsqlite=FILE` is the first runtime staging flag: it loads a SQLite export
+through the startup wallet path, initializes the in-memory wallet state, reports
+success, and exits before network, mining, GUI, or wallet mutation begins. It is
+deliberately read-only until the write path is routed to SQLite as well.
 
 ## `blkindex.dat`
 

@@ -15,6 +15,7 @@ public:
     ~CWalletDBSQLite();
 
     bool Open(const string& strPath, string& strError);
+    bool OpenReadOnly(const string& strPath, string& strError);
     void Close();
 
     bool BeginTransaction(string& strError);

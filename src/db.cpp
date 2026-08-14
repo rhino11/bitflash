@@ -3,6 +3,7 @@
 // file license.txt or http://www.opensource.org/licenses/mit-license.php.
 
 #include "headers.h"
+#include "wallet_sqlite.h"
 
 
 
@@ -650,6 +651,289 @@ bool CReviewDB::WriteReviews(uint256 hash, const vector<CReview>& vReviews)
 // CWalletDB
 //
 
+class CSQLiteWalletRuntimeLoadVisitor : public CWalletRecordVisitor
+{
+public:
+    bool fHaveStoredMineMode;
+    bool fHaveStoredHDCoinType;
+    string strLastType;
+
+    CSQLiteWalletRuntimeLoadVisitor() :
+        fHaveStoredMineMode(false),
+        fHaveStoredHDCoinType(false)
+    {
+    }
+
+    bool VisitWalletRecord(const CDataStream& ssKeyIn,
+                           const CDataStream& ssValueIn,
+                           string& strErrorRet)
+    {
+        CDataStream ssKey = ssKeyIn;
+        CDataStream ssValue = ssValueIn;
+        string strType;
+        ssKey >> strType;
+        strLastType = strType;
+
+        if (strType == "name")
+        {
+            string strAddress;
+            ssKey >> strAddress;
+            ssValue >> mapAddressBook[strAddress];
+        }
+        else if (strType == "tx")
+        {
+            uint256 hash;
+            ssKey >> hash;
+            CWalletTx& wtx = mapWallet[hash];
+            ssValue >> wtx;
+
+            if (wtx.GetHash() != hash)
+                printf("Error in SQLite wallet export, hash mismatch\n");
+        }
+        else if (strType == "key")
+        {
+            vector<unsigned char> vchPubKey;
+            ssKey >> vchPubKey;
+            CPrivKey vchPrivKey;
+            ssValue >> vchPrivKey;
+
+            mapKeys[vchPubKey] = vchPrivKey;
+            mapPubKeys[Hash160(vchPubKey)] = vchPubKey;
+        }
+        else if (strType == "mkey")
+        {
+            unsigned int nID = 0;
+            ssKey >> nID;
+            CWalletMasterKey kMasterKey;
+            ssValue >> kMasterKey;
+            mapMasterKeys[nID] = kMasterKey;
+            nWalletMasterKeyMaxID = max(nWalletMasterKeyMaxID, nID);
+            fWalletEncrypted = true;
+            fWalletLocked = true;
+        }
+        else if (strType == "ckey")
+        {
+            vector<unsigned char> vchPubKey;
+            ssKey >> vchPubKey;
+            vector<unsigned char> vchCryptedSecret;
+            ssValue >> vchCryptedSecret;
+            if (!AddCryptedKey(vchPubKey, vchCryptedSecret))
+            {
+                strErrorRet = "SQLite wallet export has an unreadable encrypted key record";
+                return false;
+            }
+        }
+        else if (strType == "defaultkey")
+        {
+            ssValue >> vchDefaultKey;
+        }
+        else if (strType == "hdmaster")
+        {
+            ssValue >> vchHDMaster;
+        }
+        else if (strType == "hdchaincode")
+        {
+            ssValue >> vchHDChainCode;
+        }
+        else if (strType == "hdnext")
+        {
+            ssValue >> nHDNext;
+        }
+        else if (strType == "hdschema")
+        {
+            ssValue >> nHDKeySchema;
+        }
+        else if (strType == "hdcointype")
+        {
+            ssValue >> nHDCoinType;
+            fHaveStoredHDCoinType = true;
+        }
+        else if (strType == "hdreceivenext")
+        {
+            ssValue >> nHDReceiveNext;
+        }
+        else if (strType == "hdchangenext")
+        {
+            ssValue >> nHDChangeNext;
+        }
+        else if (strType == "cryptedhdmaster")
+        {
+            ssValue >> vchCryptedHDMaster;
+            fWalletEncrypted = true;
+            fWalletLocked = true;
+        }
+        else if (strType == "cryptedhdchaincode")
+        {
+            ssValue >> vchCryptedHDChainCode;
+            fWalletEncrypted = true;
+            fWalletLocked = true;
+        }
+        else if (strType == "walletminversion")
+        {
+            int nMinVersion = 0;
+            ssValue >> nMinVersion;
+            if (nMinVersion > WALLET_FORMAT_SUPPORTED)
+            {
+                strWalletLoadError = strprintf(
+                    "This SQLite wallet export was written by a newer version of "
+                    "Bitflash (wallet format %d; this build understands %d). "
+                    "Upgrade Bitflash before opening it.",
+                    nMinVersion, WALLET_FORMAT_SUPPORTED);
+                strErrorRet = strWalletLoadError;
+                return false;
+            }
+        }
+        else if (strType == "pool")
+        {
+            int64 nIndex;
+            ssKey >> nIndex;
+            vector<unsigned char> vchPubKey;
+            ssValue >> vchPubKey;
+            mapKeyPool[nIndex] = vchPubKey;
+        }
+        else if (strType == "setting")
+        {
+            string strKey;
+            ssKey >> strKey;
+            if (strKey == "nTransactionFee")    ssValue >> nTransactionFee;
+            if (strKey == "addrIncoming")       ssValue >> addrIncoming;
+
+            if (!fMineModeFromCommandLine)
+            {
+                if (strKey == "nMineMode")          { ssValue >> nMineMode; fHaveStoredMineMode = true; }
+                if (strKey == "fGenerateBitcoins")  ssValue >> fGenerateBitcoins;
+                if (strKey == "strParticipantPool") ssValue >> strParticipantPool;
+            }
+        }
+
+        if (ssKey.fail())
+        {
+            strErrorRet = strprintf("malformed SQLite wallet record key while handling '%s'",
+                                    strLastType.c_str());
+            return false;
+        }
+        if (ssValue.fail())
+        {
+            strErrorRet = strprintf("malformed SQLite wallet record value while handling '%s'",
+                                    strLastType.c_str());
+            return false;
+        }
+        return true;
+    }
+
+    vector<unsigned char> vchDefaultKey;
+};
+
+static bool FinishLoadedWallet(const vector<unsigned char>& vchDefaultKey,
+                               bool fMayCreateDefaultKey)
+{
+    if (!vchDefaultKey.empty() && mapPubKeys.count(Hash160(vchDefaultKey)))
+    {
+        keyUser.SetPubKey(vchDefaultKey);
+        if (mapKeys.count(vchDefaultKey))
+            keyUser.SetPrivKey(mapKeys[vchDefaultKey]);
+    }
+    else if (IsWalletEncrypted())
+    {
+        printf("LoadWallet: encrypted wallet has no usable default public key. "
+               "The file was left untouched.\n");
+        return false;
+    }
+    else
+    {
+        if (!fMayCreateDefaultKey)
+        {
+            strWalletLoadError =
+                "SQLite wallet export has no usable default public key";
+            printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+            return false;
+        }
+
+        keyUser.MakeNewKey();
+        if (!AddKey(keyUser))
+            return false;
+        if (!SetAddressBookName(PubKeyToAddress(keyUser.GetPubKey()), "Your Address"))
+            return false;
+        CWalletDB().WriteDefaultKey(keyUser.GetPubKey());
+    }
+
+    return true;
+}
+
+static bool ReconcileLoadedWalletMetadata(bool fHaveStoredMineMode,
+                                          bool fHaveStoredHDCoinType)
+{
+    // An encrypted wallet has a seed; it just has not been decrypted yet.
+    //
+    // The reset in the else branch was written when "no seed in memory after
+    // loading" could only mean "this wallet has no seed". With encryption that
+    // is no longer true, and taking the else branch here wiped the schema and
+    // the derivation counters that had just been read correctly out of the
+    // file. Unlocking later restores the seed but nothing restores those, so a
+    // BIP44 wallet came back deriving legacy addresses -- different addresses
+    // from the ones its own recovery phrase produces, while the audit reported
+    // the phrase as covering nothing.
+    if (HaveHDSeed() || !vchCryptedHDMaster.empty())
+    {
+        if (nHDKeySchema == HD_SCHEMA_NONE)
+        {
+            nHDKeySchema = HD_SCHEMA_LEGACY;
+            printf("LoadWallet: deterministic seed has no schema metadata; "
+                   "treating it as legacy m/index'\n");
+        }
+        else if (nHDKeySchema != HD_SCHEMA_LEGACY &&
+                 nHDKeySchema != HD_SCHEMA_BIP44)
+        {
+            printf("LoadWallet: deterministic wallet schema %d (%s) is not "
+                   "supported by this build\n",
+                   nHDKeySchema, HDKeySchemaName(nHDKeySchema).c_str());
+            return false;
+        }
+        if (!fHaveStoredHDCoinType)
+        {
+            nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
+            printf("LoadWallet: deterministic seed has no BIP44 coin type metadata; "
+                   "using Bitflash coin type %u\n", nHDCoinType);
+        }
+    }
+    else
+    {
+        nHDKeySchema = HD_SCHEMA_NONE;
+        nHDNext = 0;
+        nHDReceiveNext = 0;
+        nHDChangeNext = 0;
+        nHDCoinType = HD_BIP44_COIN_TYPE_BITFLASH;
+    }
+
+    // fGenerateBitcoins and nMineMode only mean anything together, and a
+    // wallet.dat can easily hold one without the other: Bitcoin 0.1.0 already
+    // wrote fGenerateBitcoins when mining was toggled, years before this fork
+    // had a mode at all. Restoring that lone flag put a node into the one state
+    // the miner cannot act on -- generate on, mode relay -- so every miner
+    // thread started and returned at the relay guard, and the machine sat there
+    // looking like it was mining while hashing nothing. That happened to a
+    // 32-core node on the first 1.2.11 start.
+    //
+    // So the flag is only believed when the mode it belongs to was stored with
+    // it, and the pair is made coherent either way.
+    if (!fMineModeFromCommandLine)
+    {
+        if (!fHaveStoredMineMode)
+        {
+            if (fGenerateBitcoins)
+                printf("LoadWallet: ignoring a stored fGenerateBitcoins with no mining mode "
+                       "beside it -- it predates this setting and cannot be read on its own\n");
+            fGenerateBitcoins = 0;
+        }
+        else
+        {
+            fGenerateBitcoins = (nMineMode != MINE_RELAY) ? 1 : 0;
+        }
+    }
+
+    return true;
+}
+
 bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
 {
     // Whether wallet.dat actually carried a mining mode, as opposed to just the
@@ -1005,31 +1289,74 @@ bool LoadWallet()
     if (!CWalletDB("cr").LoadWallet(vchDefaultKey))
         return false;
 
-    if (!vchDefaultKey.empty() && mapPubKeys.count(Hash160(vchDefaultKey)))
+    return FinishLoadedWallet(vchDefaultKey, true);
+}
+
+bool LoadWalletFromSQLite(const string& strPath)
+{
+    strWalletLoadError.clear();
+
+    if (!FileExists(strPath.c_str()))
     {
-        // Set keyUser
-        keyUser.SetPubKey(vchDefaultKey);
-        if (mapKeys.count(vchDefaultKey))
-            keyUser.SetPrivKey(mapKeys[vchDefaultKey]);
-    }
-    else if (IsWalletEncrypted())
-    {
-        printf("LoadWallet: encrypted wallet has no usable default public key. "
-               "The file was left untouched.\n");
+        strWalletLoadError = strprintf("SQLite wallet export does not exist: %s",
+                                       strPath.c_str());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
         return false;
     }
-    else
+
+    CWalletDBSQLite sqlite;
+    string strError;
+    if (!sqlite.OpenReadOnly(strPath, strError))
     {
-        // Create new keyUser and set as default key
-        keyUser.MakeNewKey();
-        if (!AddKey(keyUser))
-            return false;
-        if (!SetAddressBookName(PubKeyToAddress(keyUser.GetPubKey()), "Your Address"))
-            return false;
-        CWalletDB().WriteDefaultKey(keyUser.GetPubKey());
+        strWalletLoadError = strError;
+        printf("LoadWallet: cannot open SQLite wallet export: %s\n",
+               strError.c_str());
+        return false;
     }
 
-    return true;
+    CSQLiteWalletRuntimeLoadVisitor visitor;
+    try
+    {
+        CRITICAL_BLOCK(cs_mapKeys)
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            if (!sqlite.ScanRecords(visitor, strError))
+            {
+                if (strWalletLoadError.empty())
+                    strWalletLoadError = strError;
+                printf("LoadWallet: SQLite wallet export could not be read. "
+                       "Failed while handling a '%s' record: %s\n",
+                       visitor.strLastType.c_str(), strError.c_str());
+                return false;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        strWalletLoadError = strprintf(
+            "SQLite wallet export could not be read while handling a '%s' record: %s",
+            visitor.strLastType.c_str(), e.what());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+    catch (...)
+    {
+        strWalletLoadError = strprintf(
+            "SQLite wallet export could not be read while handling a '%s' record",
+            visitor.strLastType.c_str());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
+    if (!ReconcileLoadedWalletMetadata(visitor.fHaveStoredMineMode,
+                                       visitor.fHaveStoredHDCoinType))
+    {
+        if (strWalletLoadError.empty())
+            strWalletLoadError = "SQLite wallet metadata is not supported by this build";
+        return false;
+    }
+
+    return FinishLoadedWallet(visitor.vchDefaultKey, false);
 }
 
 
