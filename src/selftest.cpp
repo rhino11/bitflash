@@ -1391,6 +1391,13 @@ static int RunWalletPortabilitySelfTest()
         nFail += Check(nBackupRet == 0 && FileExists(strPortableWallet.c_str()),
                        "/backupwallet writes a portable wallet.dat") ? 0 : 1;
 
+        string strBackupOut2 = tmp + "/backupwallet-overwrite.txt";
+        int nBackupRet2 = RunBitflashChild(strExe, vBackupArgs, NULL, &strBackupOut2);
+        nFail += Check(nBackupRet2 == 0 && FileExists(strPortableWallet.c_str()) &&
+                       !DirectoryHasFileWithPrefix(tmp, "portable-wallet.dat.tmp.") &&
+                       !DirectoryHasFileWithPrefix(tmp, "portable-wallet.dat.old."),
+                       "/backupwallet replaces an existing backup without leaving temp files") ? 0 : 1;
+
         nFail += Check(CopyFileLocal(strOriginal + "/wallet.dat",
                                      strRawCopy + "/wallet.dat"),
                        "a raw wallet.dat can be copied without database logs") ? 0 : 1;
