@@ -844,6 +844,52 @@ public:
     }
 };
 
+class CWalletRawRestoreDB : public CWalletDB
+{
+public:
+    CWalletRawRestoreDB(const char* pszMode="cr+", bool fTxn=true)
+        : CWalletDB(pszMode, fTxn) { }
+
+    bool WriteRaw(CDataStream ssKey, CDataStream ssValue)
+    {
+        if (!pdb || ssKey.empty())
+            return false;
+
+        Dbt datKey((void*)&ssKey[0], ssKey.size());
+        Dbt datValue(ssValue.empty() ? NULL : (void*)&ssValue[0],
+                     ssValue.size());
+        int ret = pdb->put(GetTxn(), &datKey, &datValue, 0);
+
+        memset(datKey.get_data(), 0, datKey.get_size());
+        if (datValue.get_data())
+            memset(datValue.get_data(), 0, datValue.get_size());
+        return ret == 0;
+    }
+};
+
+class CWalletSQLiteRestoreVisitor : public CWalletRecordVisitor
+{
+public:
+    CWalletRawRestoreDB& db;
+    int& nCopied;
+
+    CWalletSQLiteRestoreVisitor(CWalletRawRestoreDB& dbIn, int& nCopiedIn)
+        : db(dbIn), nCopied(nCopiedIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
+    {
+        if (!db.WriteRaw(ssKey, ssValue))
+        {
+            strErrorRet = "could not write raw wallet record";
+            return false;
+        }
+        nCopied++;
+        return true;
+    }
+};
+
 } // namespace
 
 int CmdWalletSQLiteExport(const std::string& strDest)
@@ -992,6 +1038,86 @@ int CmdWalletSQLiteVerify(const std::string& strPath)
     printf("  verification:              failed\n");
     fflush(stdout);
     return 2;
+}
+
+int CmdWalletSQLiteRestore(const std::string& strPath)
+{
+    AttachTerminal();
+
+    if (strPath.empty())
+    {
+        fprintf(stderr, "Missing SQLite wallet export path.\n");
+        return 1;
+    }
+    if (!FileExists(strPath.c_str()))
+    {
+        fprintf(stderr, "SQLite wallet export does not exist: %s\n",
+                strPath.c_str());
+        return 1;
+    }
+
+    string strWalletPath = GetAppDir() + "/wallet.dat";
+    if (FileExists(strWalletPath.c_str()))
+    {
+        fprintf(stderr, "Refusing to overwrite existing wallet.dat: %s\n",
+                strWalletPath.c_str());
+        return 1;
+    }
+
+    string strError;
+    CWalletDBSQLite sqlite;
+    if (!sqlite.Open(strPath, strError))
+    {
+        fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+
+    int nSQLiteRecords = 0;
+    if (!sqlite.CountRecords(nSQLiteRecords, strError))
+    {
+        fprintf(stderr, "Cannot count SQLite wallet export records: %s\n",
+                strError.c_str());
+        return 1;
+    }
+    if (nSQLiteRecords <= 0)
+    {
+        fprintf(stderr, "SQLite wallet export contains no records.\n");
+        return 2;
+    }
+
+    CWalletRawRestoreDB bdb("cr+", true);
+    if (!bdb.TxnBegin())
+    {
+        fprintf(stderr, "Cannot begin Berkeley DB restore transaction.\n");
+        return 1;
+    }
+
+    int nCopied = 0;
+    CWalletSQLiteRestoreVisitor visitor(bdb, nCopied);
+    if (!sqlite.ScanRecords(visitor, strError))
+    {
+        bdb.TxnAbort();
+        fprintf(stderr, "Cannot restore SQLite wallet export: %s\n",
+                strError.c_str());
+        return 1;
+    }
+    if (nCopied != nSQLiteRecords)
+    {
+        bdb.TxnAbort();
+        fprintf(stderr, "SQLite wallet restore copied %d records, expected %d.\n",
+                nCopied, nSQLiteRecords);
+        return 2;
+    }
+    if (!bdb.TxnCommit())
+    {
+        fprintf(stderr, "Cannot commit Berkeley DB restore transaction.\n");
+        return 1;
+    }
+
+    printf("SQLite wallet export restored to wallet.dat\n");
+    printf("  records restored:          %d\n", nCopied);
+    fflush(stdout);
+    return 0;
 }
 
 int CmdEncryptWallet(const std::string& strPassphrase)
