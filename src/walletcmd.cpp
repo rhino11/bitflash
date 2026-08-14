@@ -400,7 +400,12 @@ int CmdRecoveryAudit()
     int64 nImmatureTotal = audit.nRecoverableImmatureCredit + audit.nLegacyImmatureCredit;
 
     printf("Wallet recovery audit\n");
-    printf("  recovery phrase: %s\n", audit.fHaveSeed ? "present" : "not installed");
+    if (audit.fHaveSeed)
+        printf("  recovery phrase: present\n");
+    else if (audit.fSeedEncryptedLocked)
+        printf("  recovery phrase: encrypted, unlock wallet to audit\n");
+    else
+        printf("  recovery phrase: not installed\n");
     if (audit.fHaveSeed)
     {
         printf("  derivation schema: %s\n", HDKeySchemaName(audit.nSchema).c_str());
@@ -412,6 +417,15 @@ int CmdRecoveryAudit()
     if (!audit.fDeriveComplete)
         printf("  derivation warning: %s\n", audit.strDeriveError.c_str());
     printf("  total spendable balance:      %s BTF\n", FormatMoney(nTotal).c_str());
+    if (audit.fSeedEncryptedLocked)
+    {
+        printf("  recovery coverage:            unavailable while wallet is locked\n");
+        printf("  immature mining rewards:      %s BTF\n", FormatMoney(nImmatureTotal).c_str());
+        printf("\n");
+        printf("Unlock the wallet with /walletpassphrase or /walletpassphrase=@FILE to audit phrase coverage.\n");
+        fflush(stdout);
+        return 2;
+    }
     printf("  covered by recovery phrase:   %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nRecoverableCredit).c_str(), audit.nRecoverableTx);
     printf("  wallet.dat-only balance:      %s BTF (%d transaction(s))\n",
@@ -453,6 +467,253 @@ int CmdRecoveryAudit()
     else
         printf("No wallet balance found yet.\n");
     fflush(stdout);
+    return 0;
+}
+
+struct WalletStorageAuditCounts
+{
+    unsigned int nTotal;
+    unsigned int nMalformed;
+    unsigned int nUnknown;
+    unsigned int nVersion;
+    unsigned int nNames;
+    unsigned int nTransactions;
+    unsigned int nPlainKeys;
+    unsigned int nEncryptedKeys;
+    unsigned int nMasterKeys;
+    unsigned int nDefaultKey;
+    unsigned int nPlainHDMaster;
+    unsigned int nPlainHDChainCode;
+    unsigned int nCryptedHDMaster;
+    unsigned int nCryptedHDChainCode;
+    unsigned int nWalletMinVersion;
+    unsigned int nPool;
+    unsigned int nSettings;
+    unsigned int nHDNext;
+    unsigned int nHDSchema;
+    unsigned int nHDCoinType;
+    unsigned int nHDReceiveNext;
+    unsigned int nHDChangeNext;
+
+    WalletStorageAuditCounts()
+    {
+        memset(this, 0, sizeof(*this));
+    }
+};
+
+static std::string HDSeedStorageState(unsigned int nMaster, unsigned int nChain)
+{
+    if (nMaster == 0 && nChain == 0)
+        return "none";
+    if (nMaster > 0 && nChain > 0)
+        return "complete";
+    return "incomplete";
+}
+
+static void CountWalletStorageType(const std::string& strType,
+                                   WalletStorageAuditCounts& c)
+{
+    if (strType == "version")
+        c.nVersion++;
+    else if (strType == "name")
+        c.nNames++;
+    else if (strType == "tx")
+        c.nTransactions++;
+    else if (strType == "key")
+        c.nPlainKeys++;
+    else if (strType == "ckey")
+        c.nEncryptedKeys++;
+    else if (strType == "mkey")
+        c.nMasterKeys++;
+    else if (strType == "defaultkey")
+        c.nDefaultKey++;
+    else if (strType == "hdmaster")
+        c.nPlainHDMaster++;
+    else if (strType == "hdchaincode")
+        c.nPlainHDChainCode++;
+    else if (strType == "cryptedhdmaster")
+        c.nCryptedHDMaster++;
+    else if (strType == "cryptedhdchaincode")
+        c.nCryptedHDChainCode++;
+    else if (strType == "walletminversion")
+        c.nWalletMinVersion++;
+    else if (strType == "pool")
+        c.nPool++;
+    else if (strType == "setting")
+        c.nSettings++;
+    else if (strType == "hdnext")
+        c.nHDNext++;
+    else if (strType == "hdschema")
+        c.nHDSchema++;
+    else if (strType == "hdcointype")
+        c.nHDCoinType++;
+    else if (strType == "hdreceivenext")
+        c.nHDReceiveNext++;
+    else if (strType == "hdchangenext")
+        c.nHDChangeNext++;
+    else
+        c.nUnknown++;
+}
+
+static bool ReadWalletStorageCounts(WalletStorageAuditCounts& counts,
+                                    std::string& strError)
+{
+    class CWalletAuditDB : public CWalletDB
+    {
+    public:
+        CWalletAuditDB() : CWalletDB("r") { }
+        using CDB::GetCursor;
+        using CDB::ReadAtCursor;
+    };
+
+    CWalletAuditDB walletdb;
+    Dbc* pcursor = walletdb.GetCursor();
+    if (!pcursor)
+    {
+        strError = "cannot open wallet.dat cursor";
+        return false;
+    }
+
+    for (;;)
+    {
+        CDataStream ssKey(SER_DISK);
+        CDataStream ssValue(SER_DISK);
+        int ret = walletdb.ReadAtCursor(pcursor, ssKey, ssValue);
+        if (ret == DB_NOTFOUND)
+            break;
+        if (ret != 0)
+        {
+            pcursor->close();
+            strError = strprintf("Berkeley DB cursor read failed (%d)", ret);
+            return false;
+        }
+
+        counts.nTotal++;
+        try
+        {
+            std::string strType;
+            ssKey >> strType;
+            CountWalletStorageType(strType, counts);
+        }
+        catch (...)
+        {
+            counts.nMalformed++;
+        }
+    }
+
+    pcursor->close();
+    return true;
+}
+
+static std::string WalletStorageAuditJson(const WalletStorageAuditCounts& counts)
+{
+    std::string strJson;
+    strJson += "{\n";
+    strJson += "  \"format\": \"bitflash-wallet-storage-audit-v1\",\n";
+    strJson += strprintf("  \"records_total\": %u,\n", counts.nTotal);
+    strJson += strprintf("  \"malformed_records\": %u,\n", counts.nMalformed);
+    strJson += strprintf("  \"unknown_records\": %u,\n", counts.nUnknown);
+    strJson += strprintf("  \"plain_private_keys\": %u,\n", counts.nPlainKeys);
+    strJson += strprintf("  \"encrypted_private_keys\": %u,\n", counts.nEncryptedKeys);
+    strJson += strprintf("  \"encryption_master_keys\": %u,\n", counts.nMasterKeys);
+    strJson += strprintf("  \"default_public_key\": \"%s\",\n",
+                          counts.nDefaultKey ? "present" : "none");
+    strJson += strprintf("  \"plain_hd_seed\": \"%s\",\n",
+                          HDSeedStorageState(counts.nPlainHDMaster,
+                                             counts.nPlainHDChainCode).c_str());
+    strJson += strprintf("  \"encrypted_hd_seed\": \"%s\",\n",
+                          HDSeedStorageState(counts.nCryptedHDMaster,
+                                             counts.nCryptedHDChainCode).c_str());
+    strJson += strprintf("  \"wallet_minimum_version\": \"%s\",\n",
+                          counts.nWalletMinVersion ? "present" : "none");
+    strJson += strprintf("  \"keypool_entries\": %u,\n", counts.nPool);
+    strJson += strprintf("  \"wallet_transactions\": %u,\n", counts.nTransactions);
+    strJson += strprintf("  \"address_book_labels\": %u,\n", counts.nNames);
+    strJson += strprintf("  \"settings\": %u,\n", counts.nSettings);
+    strJson += strprintf("  \"hd_metadata_records\": %u,\n",
+                          counts.nHDNext + counts.nHDSchema + counts.nHDCoinType +
+                          counts.nHDReceiveNext + counts.nHDChangeNext);
+    strJson += strprintf("  \"database_version_records\": %u\n", counts.nVersion);
+    strJson += "}\n";
+    return strJson;
+}
+
+static bool WriteAuditTextFile(const std::string& strPath,
+                               const std::string& strText,
+                               std::string& strError)
+{
+    FILE* pf = fopen(strPath.c_str(), "wb");
+    if (!pf)
+    {
+        strError = "cannot open output file";
+        return false;
+    }
+    size_t nWritten = fwrite(strText.data(), 1, strText.size(), pf);
+    bool fCloseOk = fclose(pf) == 0;
+    if (nWritten != strText.size() || !fCloseOk)
+    {
+        strError = "could not write the complete output file";
+        return false;
+    }
+    return true;
+}
+
+int CmdWalletStorageAudit(const std::string& strJsonOut)
+{
+    AttachTerminal();
+
+    WalletStorageAuditCounts counts;
+    std::string strError;
+    if (!ReadWalletStorageCounts(counts, strError))
+    {
+        fprintf(stderr, "Cannot audit wallet storage: %s\n", strError.c_str());
+        return 1;
+    }
+
+    if (!strJsonOut.empty())
+    {
+        std::string strWriteError;
+        if (!WriteAuditTextFile(strJsonOut,
+                                WalletStorageAuditJson(counts),
+                                strWriteError))
+        {
+            fprintf(stderr, "Cannot write wallet storage audit JSON: %s\n",
+                    strWriteError.c_str());
+            return 1;
+        }
+        printf("Wallet storage audit written to %s\n", strJsonOut.c_str());
+        fflush(stdout);
+        return counts.nMalformed > 0 ? 2 : 0;
+    }
+
+    printf("Wallet storage audit\n");
+    printf("  records total:             %u\n", counts.nTotal);
+    printf("  malformed records:         %u\n", counts.nMalformed);
+    printf("  unknown records:           %u\n", counts.nUnknown);
+    printf("  plain private keys:        %u\n", counts.nPlainKeys);
+    printf("  encrypted private keys:    %u\n", counts.nEncryptedKeys);
+    printf("  encryption master keys:    %u\n", counts.nMasterKeys);
+    printf("  default public key:        %s\n", counts.nDefaultKey ? "present" : "none");
+    printf("  plain HD seed:             %s\n",
+           HDSeedStorageState(counts.nPlainHDMaster,
+                              counts.nPlainHDChainCode).c_str());
+    printf("  encrypted HD seed:         %s\n",
+           HDSeedStorageState(counts.nCryptedHDMaster,
+                              counts.nCryptedHDChainCode).c_str());
+    printf("  wallet minimum version:    %s\n",
+           counts.nWalletMinVersion ? "present" : "none");
+    printf("  keypool entries:           %u\n", counts.nPool);
+    printf("  wallet transactions:       %u\n", counts.nTransactions);
+    printf("  address book labels:       %u\n", counts.nNames);
+    printf("  settings:                  %u\n", counts.nSettings);
+    printf("  HD metadata records:       %u\n",
+           counts.nHDNext + counts.nHDSchema + counts.nHDCoinType +
+           counts.nHDReceiveNext + counts.nHDChangeNext);
+    printf("  database version records:  %u\n", counts.nVersion);
+    fflush(stdout);
+
+    if (counts.nMalformed > 0)
+        return 2;
     return 0;
 }
 

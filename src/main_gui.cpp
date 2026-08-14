@@ -114,7 +114,8 @@ static void PrintUsage()
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
     printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt,\n");
-    printf("            net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, or managed-tor\n");
+    printf("            wallet-portability, net-message, consensus-limits, pool-stratum,\n");
+    printf("            parse-money, socks5-proxy, or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -171,6 +172,10 @@ static void PrintUsage()
     printf("  /recoveryaudit             (show how much spendable balance is\n");
     printf("                              covered by the recovery phrase;\n");
     printf("                              exits 2 when wallet.dat is still needed)\n");
+    printf("  /walletstorageaudit        (count wallet.dat record types without\n");
+    printf("                              printing wallet values, then exit)\n");
+    printf("  /walletstorageauditjson=FILE\n");
+    printf("                              (write the same audit as deterministic JSON)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -699,6 +704,17 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/recoveryaudit") || arg(argc,argv,"-recoveryaudit"))
     {
         int nRet = CmdRecoveryAudit();
+        DBFlush(true);
+        return nRet;
+    }
+
+    string strWalletStorageAuditJson =
+        argval2(argc, argv, "/walletstorageauditjson", "-walletstorageauditjson");
+    if (arg(argc,argv,"/walletstorageaudit") ||
+        arg(argc,argv,"-walletstorageaudit") ||
+        !strWalletStorageAuditJson.empty())
+    {
+        int nRet = CmdWalletStorageAudit(strWalletStorageAuditJson);
         DBFlush(true);
         return nRet;
     }
