@@ -109,6 +109,7 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=wallet-hd
 	./bitflash.exe -selftest=wallet-format
 	./bitflash.exe -selftest=wallet-sqlite
+	./bitflash.exe -selftest=wallet-sqlite-migration
 	./bitflash.exe -selftest=wallet-crypto
 	./bitflash.exe -selftest=wallet-encrypt
 	./bitflash.exe -selftest=net-message

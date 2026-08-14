@@ -12,6 +12,7 @@
 #include "headers_core.h"
 #include "bip32.h"
 #include "walletcmd.h"
+#include "wallet_sqlite.h"
 
 #undef printf
 
@@ -787,6 +788,102 @@ int CmdWalletStorageAudit(const std::string& strJsonOut)
 
     if (counts.nMalformed > 0)
         return 2;
+    return 0;
+}
+
+static vector<unsigned char> DataStreamBytesLocal(const CDataStream& ss)
+{
+    return vector<unsigned char>(ss.begin(), ss.end());
+}
+
+class CWalletSQLiteExportVisitor : public CWalletRecordVisitor
+{
+public:
+    CWalletDBSQLite& db;
+    int& nCopied;
+
+    CWalletSQLiteExportVisitor(CWalletDBSQLite& dbIn, int& nCopiedIn)
+        : db(dbIn), nCopied(nCopiedIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
+    {
+        if (!db.WriteRecord(DataStreamBytesLocal(ssKey),
+                            DataStreamBytesLocal(ssValue),
+                            strErrorRet))
+            return false;
+        nCopied++;
+        return true;
+    }
+};
+
+int CmdWalletSQLiteExport(const std::string& strDest)
+{
+    AttachTerminal();
+
+    if (strDest.empty())
+    {
+        fprintf(stderr, "Missing SQLite wallet export path.\n");
+        return 1;
+    }
+    if (FileExists(strDest.c_str()))
+    {
+        fprintf(stderr, "Refusing to overwrite existing SQLite wallet export: %s\n",
+                strDest.c_str());
+        return 1;
+    }
+
+    string strError;
+    CWalletDBSQLite db;
+    if (!db.Open(strDest, strError))
+    {
+        fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+    if (!db.BeginTransaction(strError))
+    {
+        fprintf(stderr, "Cannot begin SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+
+    int nCopied = 0;
+    CWalletSQLiteExportVisitor visitor(db, nCopied);
+    if (!ScanWalletRecords(visitor, strError))
+    {
+        string strRollbackError;
+        db.RollbackTransaction(strRollbackError);
+        fprintf(stderr, "Cannot export wallet.dat to SQLite: %s\n", strError.c_str());
+        return 1;
+    }
+    if (!db.CommitTransaction(strError))
+    {
+        fprintf(stderr, "Cannot commit SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+    if (!db.Checkpoint(strError))
+    {
+        fprintf(stderr, "Cannot checkpoint SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+
+    int nCount = 0;
+    if (!db.CountRecords(nCount, strError))
+    {
+        fprintf(stderr, "Cannot verify SQLite wallet export count: %s\n",
+                strError.c_str());
+        return 1;
+    }
+    if (nCount != nCopied)
+    {
+        fprintf(stderr, "SQLite wallet export count mismatch: copied %d, stored %d\n",
+                nCopied, nCount);
+        return 1;
+    }
+
+    printf("SQLite wallet export written to %s\n", strDest.c_str());
+    printf("  records copied:            %d\n", nCopied);
+    fflush(stdout);
     return 0;
 }
 

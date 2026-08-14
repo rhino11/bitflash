@@ -1134,6 +1134,150 @@ static int RunWalletSQLiteSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+class CWalletRecordMapVisitor : public CWalletRecordVisitor
+{
+public:
+    std::map<vector<unsigned char>, vector<unsigned char> >& mapRecords;
+
+    explicit CWalletRecordMapVisitor(
+        std::map<vector<unsigned char>, vector<unsigned char> >& mapRecordsIn)
+        : mapRecords(mapRecordsIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
+    {
+        vector<unsigned char> vchKey = DataStreamBytes(ssKey);
+        if (mapRecords.count(vchKey))
+        {
+            strErrorRet = "duplicate serialized wallet key";
+            return false;
+        }
+        mapRecords[vchKey] = DataStreamBytes(ssValue);
+        return true;
+    }
+};
+
+static int RunWalletSQLiteMigrationSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-sqlite-migration self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd))
+    {
+        printf("  FAIL could not read current directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    printf("  temp root: %s\n", tmp.c_str());
+
+    try
+    {
+#ifdef _WIN32
+        string strExe = cwd + "\\bitflash.exe";
+#else
+        string strExe = cwd + "/bitflash-node";
+#endif
+        string strWalletDir = tmp + "/wallet";
+        nFail += Check(MakeDirLocal(strWalletDir),
+                       "temporary wallet directory can be created") ? 0 : 1;
+
+        string strCreateOut = tmp + "/create.txt";
+        vector<string> vCreateArgs;
+        vCreateArgs.push_back("-datadir=" + strWalletDir);
+        vCreateArgs.push_back("-nomanagedtor");
+        vCreateArgs.push_back("-nogui");
+        vCreateArgs.push_back("-newphrase");
+        int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
+        nFail += Check(nCreateRet == 0 &&
+                       FileContainsText(strCreateOut, "Write these twelve words down"),
+                       "a phrase wallet can be created for SQLite export") ? 0 : 1;
+
+        string strSQLite = tmp + "/wallet.sqlite";
+        string strExportOut = tmp + "/sqlite-export.txt";
+        vector<string> vExportArgs;
+        vExportArgs.push_back("-datadir=" + strWalletDir);
+        vExportArgs.push_back("-nomanagedtor");
+        vExportArgs.push_back("-nogui");
+        vExportArgs.push_back("-walletsqliteexport=" + strSQLite);
+        int nExportRet = RunBitflashChild(strExe, vExportArgs, NULL, &strExportOut);
+        nFail += Check(nExportRet == 0 &&
+                       FileExists(strSQLite.c_str()) &&
+                       FileContainsText(strExportOut, "SQLite wallet export written"),
+                       "wallet.dat can be exported to SQLite") ? 0 : 1;
+
+        string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
+        int nOverwriteRet =
+            RunBitflashChild(strExe, vExportArgs, NULL, &strOverwriteOut);
+        nFail += Check(nOverwriteRet != 0 &&
+                       FileContainsText(strOverwriteOut,
+                                        "Refusing to overwrite existing SQLite wallet export"),
+                       "SQLite wallet export refuses to overwrite") ? 0 : 1;
+        remove((strSQLite + "-wal").c_str());
+        remove((strSQLite + "-shm").c_str());
+
+        std::map<vector<unsigned char>, vector<unsigned char> > mapBDB;
+        string strOldDataDir = strSetDataDir;
+        string strScanError;
+        strSetDataDir = strWalletDir;
+        CWalletRecordMapVisitor visitor(mapBDB);
+        bool fScanOk = ScanWalletRecords(visitor, strScanError);
+        DBFlush(true);
+        strSetDataDir = strOldDataDir;
+        nFail += Check(fScanOk && !mapBDB.empty(),
+                       "wallet.dat records can be scanned for comparison") ? 0 : 1;
+
+        CWalletDBSQLite db;
+        string strError;
+        nFail += Check(db.Open(strSQLite, strError),
+                       "exported SQLite wallet opens") ? 0 : 1;
+        int nSQLiteRecords = 0;
+        nFail += Check(db.CountRecords(nSQLiteRecords, strError) &&
+                       nSQLiteRecords == (int)mapBDB.size(),
+                       "SQLite export has the same record count as wallet.dat") ? 0 : 1;
+
+        bool fAllMatch = true;
+        for (std::map<vector<unsigned char>, vector<unsigned char> >::const_iterator it =
+                 mapBDB.begin(); it != mapBDB.end(); ++it)
+        {
+            vector<unsigned char> vchSQLiteValue;
+            if (!db.ReadRecord(it->first, vchSQLiteValue, strError) ||
+                vchSQLiteValue != it->second)
+            {
+                fAllMatch = false;
+                break;
+            }
+        }
+        nFail += Check(fAllMatch,
+                       "SQLite export preserves every wallet.dat key/value byte-for-byte") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static void ClearWalletRuntimeForTest()
 {
     CRITICAL_BLOCK(cs_mapKeys)
@@ -2395,6 +2539,8 @@ int RunSelfTest(const std::string& name)
         return RunDbEnvReopenSelfTest();
     if (name == "wallet-sqlite")
         return RunWalletSQLiteSelfTest();
+    if (name == "wallet-sqlite-migration")
+        return RunWalletSQLiteMigrationSelfTest();
     if (name == "wallet-crypto")
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
@@ -2415,6 +2561,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }

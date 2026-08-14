@@ -18,6 +18,7 @@ public:
     bool BeginTransaction(string& strError);
     bool CommitTransaction(string& strError);
     bool RollbackTransaction(string& strError);
+    bool Checkpoint(string& strError);
 
     bool WriteRecord(const vector<unsigned char>& vchKey,
                      const vector<unsigned char>& vchValue,

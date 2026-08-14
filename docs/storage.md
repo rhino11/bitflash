@@ -104,6 +104,12 @@ runtime wallet still opens Berkeley DB. The purpose is to prove schema creation,
 raw record write/read, close/reopen behavior, and value preservation before any
 BDB-to-SQLite migration or runtime backend flag exists.
 
+`-walletsqliteexport=FILE` is the next staging tool. It streams every raw
+`wallet.dat` record through `ScanWalletRecords()` and writes those same key and
+value bytes into the SQLite table inside one transaction. It refuses to
+overwrite an existing export and still does not change the runtime wallet
+backend.
+
 ## `blkindex.dat`
 
 `blkindex.dat` is accessed through `CTxDB`.
