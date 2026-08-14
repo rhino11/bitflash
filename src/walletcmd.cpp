@@ -13,10 +13,6 @@
 #include "bip32.h"
 #include "walletcmd.h"
 
-#ifndef _WIN32
-#include <dirent.h>
-#endif
-
 #undef printf
 
 // How far ahead to look for used addresses when restoring.
@@ -657,51 +653,6 @@ static bool WriteAuditTextFile(const std::string& strPath,
     return true;
 }
 
-static bool DirectoryHasFileWithPrefixLocal(const std::string& strDir,
-                                            const std::string& strPrefix)
-{
-#ifdef _WIN32
-    std::string pattern = strDir + "/*";
-    WIN32_FIND_DATAA findData;
-    HANDLE hFind = FindFirstFileA(pattern.c_str(), &findData);
-    if (hFind == INVALID_HANDLE_VALUE)
-        return false;
-    bool fFound = false;
-    do
-    {
-        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0)
-        {
-            std::string name = findData.cFileName;
-            if (name.compare(0, strPrefix.size(), strPrefix) == 0)
-            {
-                fFound = true;
-                break;
-            }
-        }
-    }
-    while (FindNextFileA(hFind, &findData));
-    FindClose(hFind);
-    return fFound;
-#else
-    DIR* dir = opendir(strDir.c_str());
-    if (!dir)
-        return false;
-    bool fFound = false;
-    struct dirent* ent;
-    while ((ent = readdir(dir)) != NULL)
-    {
-        std::string name = ent->d_name;
-        if (name.compare(0, strPrefix.size(), strPrefix) == 0)
-        {
-            fFound = true;
-            break;
-        }
-    }
-    closedir(dir);
-    return fFound;
-#endif
-}
-
 static void AddWalletStorageFailure(std::vector<std::string>& vFailures,
                                     const std::string& strFailure)
 {
@@ -742,8 +693,6 @@ static void BuildWalletStorageSanityFailures(const WalletStorageAuditCounts& cou
             AddWalletStorageFailure(vFailures, "encrypted wallet has no encryption master key record");
         if (counts.nWalletMinVersion == 0)
             AddWalletStorageFailure(vFailures, "encrypted wallet has no minimum-version record");
-        if (DirectoryHasFileWithPrefixLocal(GetAppDir() + "/database", "log."))
-            AddWalletStorageFailure(vFailures, "Berkeley DB log files are still present for an encrypted wallet");
     }
 }
 
