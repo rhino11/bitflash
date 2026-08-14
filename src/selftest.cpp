@@ -1134,6 +1134,13 @@ static int RunWalletEncryptSelfTest()
         TopUpKeyPool();
 
         vector<unsigned char> vchDefaultPubKey = keyUser.GetPubKey();
+        CKey publicLabelKey;
+        publicLabelKey.MakeNewKey();
+        string strPublicLabelAddress = PubKeyToAddress(publicLabelKey.GetPubKey());
+        nFail += Check(CWalletDB().WriteName(strPublicLabelAddress, "rewrite-public-name") &&
+                       CWalletDB().WriteSetting("rewrite-public-setting", (int64)424242),
+                       "public wallet records can be written before encryption") ? 0 : 1;
+
         CPrivKey vchDefaultPrivKey;
         nFail += Check(GetWalletPrivKey(vchDefaultPubKey, vchDefaultPrivKey, strError),
                        "the default private key is readable before encryption") ? 0 : 1;
@@ -1161,6 +1168,7 @@ static int RunWalletEncryptSelfTest()
 #else
         string strExe = cwd + "/bitflash-node";
 #endif
+        string strStorageAudit = tmp + "/encrypted-storage-audit.txt";
         string strWrongDump = tmp + "/wrong-pass-dump.txt";
         string strRightDump = tmp + "/right-pass-dump.txt";
         string strLiteralDump = tmp + "/literal-pass-dump.txt";
@@ -1172,6 +1180,18 @@ static int RunWalletEncryptSelfTest()
         nFail += Check(WriteTextFile(strWrongPassFile, "wrong-passphrase\n") &&
                        WriteTextFile(strRightPassFile, "btf-test-passphrase\n"),
                        "passphrase files can be written for restarted commands") ? 0 : 1;
+
+        vector<string> vStorageAuditArgs;
+        vStorageAuditArgs.push_back("-datadir=" + tmp);
+        vStorageAuditArgs.push_back("-walletstorageaudit");
+        vStorageAuditArgs.push_back("-nogui");
+        int nStorageAuditRet = RunBitflashChild(strExe, vStorageAuditArgs, NULL, &strStorageAudit);
+        nFail += Check(nStorageAuditRet == 0 &&
+                       FileContainsText(strStorageAudit, "address book labels:       3"),
+                       "the encrypted rewrite keeps address-book records") ? 0 : 1;
+        nFail += Check(nStorageAuditRet == 0 &&
+                       FileContainsText(strStorageAudit, "settings:                  1"),
+                       "the encrypted rewrite keeps wallet setting records") ? 0 : 1;
 
         vector<string> vWrongArgs;
         vWrongArgs.push_back("-datadir=" + tmp);
