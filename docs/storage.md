@@ -113,6 +113,9 @@ through the same visitor shape, so tests can compare BDB and SQLite record
 streams without introducing a SQLite runtime wallet loader yet.
 `-walletsqliteverify=FILE` compares the current `wallet.dat` stream with a
 SQLite export and prints only record counts and mismatch counts.
+`-walletsqliterestore=FILE` rebuilds `wallet.dat` from a SQLite export only in
+an empty data directory, then the verifier can prove the restored BDB file still
+matches the export byte-for-byte.
 
 ## `blkindex.dat`
 

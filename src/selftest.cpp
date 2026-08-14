@@ -1230,6 +1230,41 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strVerifyOut, "verification:              ok"),
                        "SQLite wallet export verifies against wallet.dat") ? 0 : 1;
 
+        string strRestoredDir = tmp + "/restored-wallet";
+        nFail += Check(MakeDirLocal(strRestoredDir),
+                       "restored wallet directory can be created") ? 0 : 1;
+        string strRestoreOut = tmp + "/sqlite-restore.txt";
+        vector<string> vRestoreArgs;
+        vRestoreArgs.push_back("-datadir=" + strRestoredDir);
+        vRestoreArgs.push_back("-nomanagedtor");
+        vRestoreArgs.push_back("-nogui");
+        vRestoreArgs.push_back("-walletsqliterestore=" + strSQLite);
+        int nRestoreRet = RunBitflashChild(strExe, vRestoreArgs, NULL, &strRestoreOut);
+        nFail += Check(nRestoreRet == 0 &&
+                       FileContainsText(strRestoreOut, "records restored:"),
+                       "SQLite wallet export restores into a fresh wallet.dat") ? 0 : 1;
+
+        string strVerifyRestoredOut = tmp + "/sqlite-verify-restored.txt";
+        vector<string> vVerifyRestoredArgs;
+        vVerifyRestoredArgs.push_back("-datadir=" + strRestoredDir);
+        vVerifyRestoredArgs.push_back("-nomanagedtor");
+        vVerifyRestoredArgs.push_back("-nogui");
+        vVerifyRestoredArgs.push_back("-walletsqliteverify=" + strSQLite);
+        int nVerifyRestoredRet =
+            RunBitflashChild(strExe, vVerifyRestoredArgs, NULL, &strVerifyRestoredOut);
+        nFail += Check(nVerifyRestoredRet == 0 &&
+                       FileContainsText(strVerifyRestoredOut,
+                                        "verification:              ok"),
+                       "restored wallet.dat verifies against the SQLite export") ? 0 : 1;
+
+        string strRestoreOverwriteOut = tmp + "/sqlite-restore-overwrite.txt";
+        int nRestoreOverwriteRet =
+            RunBitflashChild(strExe, vRestoreArgs, NULL, &strRestoreOverwriteOut);
+        nFail += Check(nRestoreOverwriteRet == 1 &&
+                       FileContainsText(strRestoreOverwriteOut,
+                                        "Refusing to overwrite existing wallet.dat"),
+                       "SQLite wallet restore refuses to overwrite wallet.dat") ? 0 : 1;
+
         string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
         int nOverwriteRet =
             RunBitflashChild(strExe, vExportArgs, NULL, &strOverwriteOut);

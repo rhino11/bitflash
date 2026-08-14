@@ -79,6 +79,10 @@ int CmdWalletSQLiteExport(const std::string& strDest);
 // wallet.dat raw records. Prints counts only, never record keys or values.
 int CmdWalletSQLiteVerify(const std::string& strPath);
 
+// Diagnostic/migration staging: rebuild wallet.dat from a SQLite export in an
+// empty data directory. Refuses to overwrite an existing wallet.dat.
+int CmdWalletSQLiteRestore(const std::string& strPath);
+
 // Rewrite wallet.dat so private keys and the HD seed are encrypted with the
 // given passphrase. Returns 0 on success and exits without starting the node.
 int CmdEncryptWallet(const std::string& strPassphrase);
