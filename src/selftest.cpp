@@ -1162,6 +1162,39 @@ public:
 
 } // namespace
 
+static bool CreateSQLiteWalletWithEmptyKey(const string& strPath)
+{
+    sqlite3* pdb = NULL;
+    int ret = sqlite3_open_v2(strPath.c_str(), &pdb,
+                              SQLITE_OPEN_READWRITE |
+                              SQLITE_OPEN_CREATE |
+                              SQLITE_OPEN_FULLMUTEX,
+                              NULL);
+    if (ret != SQLITE_OK || !pdb)
+    {
+        if (pdb)
+            sqlite3_close(pdb);
+        return false;
+    }
+
+    char* pszErr = NULL;
+    bool fOk =
+        sqlite3_exec(pdb,
+                     "CREATE TABLE wallet_records ("
+                     "key BLOB PRIMARY KEY NOT NULL,"
+                     "value BLOB NOT NULL"
+                     ");",
+                     NULL, NULL, &pszErr) == SQLITE_OK &&
+        sqlite3_exec(pdb,
+                     "INSERT INTO wallet_records(key, value) "
+                     "VALUES(x'', x'01');",
+                     NULL, NULL, &pszErr) == SQLITE_OK;
+    if (pszErr)
+        sqlite3_free(pszErr);
+    sqlite3_close(pdb);
+    return fOk;
+}
+
 static int RunWalletSQLiteMigrationSelfTest()
 {
     fflush(stdout);
@@ -1264,6 +1297,26 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strRestoreOverwriteOut,
                                         "Refusing to overwrite existing wallet.dat"),
                        "SQLite wallet restore refuses to overwrite wallet.dat") ? 0 : 1;
+
+        string strBadSQLite = tmp + "/bad-empty-key.sqlite";
+        nFail += Check(CreateSQLiteWalletWithEmptyKey(strBadSQLite),
+                       "bad SQLite export with an empty key can be created") ? 0 : 1;
+        string strBadRestoreDir = tmp + "/bad-restore-wallet";
+        nFail += Check(MakeDirLocal(strBadRestoreDir),
+                       "bad restore wallet directory can be created") ? 0 : 1;
+        string strBadRestoreOut = tmp + "/sqlite-restore-bad.txt";
+        vector<string> vBadRestoreArgs;
+        vBadRestoreArgs.push_back("-datadir=" + strBadRestoreDir);
+        vBadRestoreArgs.push_back("-nomanagedtor");
+        vBadRestoreArgs.push_back("-nogui");
+        vBadRestoreArgs.push_back("-walletsqliterestore=" + strBadSQLite);
+        int nBadRestoreRet =
+            RunBitflashChild(strExe, vBadRestoreArgs, NULL, &strBadRestoreOut);
+        nFail += Check(nBadRestoreRet == 1 &&
+                       FileContainsText(strBadRestoreOut,
+                                        "Cannot restore SQLite wallet export") &&
+                       !FileExists((strBadRestoreDir + "/wallet.dat").c_str()),
+                       "failed SQLite wallet restore removes incomplete wallet.dat") ? 0 : 1;
 
         string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
         int nOverwriteRet =
