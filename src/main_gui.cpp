@@ -113,8 +113,9 @@ static void PrintUsage()
     printf("  /debug\n");
     printf("  /gen\n");
     printf("  /nogui or /daemon\n");
-    printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt,\n");
-    printf("            wallet-portability, net-message, consensus-limits, pool-stratum,\n");
+    printf("  /selftest=wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity,\n");
+    printf("            wallet-crypto, wallet-encrypt, wallet-portability, net-message,\n");
+    printf("            consensus-limits, pool-stratum,\n");
     printf("            parse-money, socks5-proxy, or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
@@ -495,9 +496,36 @@ int main(int argc, char* argv[])
 
     ParseStartupArguments(argc, argv);
 
+    // Hidden self-test helper. It must run before LoadWallet(): several
+    // storage-sanity scenarios deliberately make wallet.dat unsafe to load.
+    string strSelfTestMutateWallet =
+        argval2(argc, argv, "/selftestmutatewallet", "-selftestmutatewallet");
+    if (!strSelfTestMutateWallet.empty())
+        return RunSelfTestMutateWallet(strSelfTestMutateWallet);
+
     string strSelfTest = argval2(argc, argv, "/selftest", "-selftest");
     if (!strSelfTest.empty())
         return RunSelfTest(strSelfTest);
+
+    // Storage diagnostics must run before LoadWallet(). Their job is to
+    // explain wallet.dat states that the normal wallet loader may refuse.
+    string strWalletStorageAuditJson =
+        argval2(argc, argv, "/walletstorageauditjson", "-walletstorageauditjson");
+    if (arg(argc,argv,"/walletstorageaudit") ||
+        arg(argc,argv,"-walletstorageaudit") ||
+        !strWalletStorageAuditJson.empty())
+    {
+        int nRet = CmdWalletStorageAudit(strWalletStorageAuditJson);
+        DBFlush(true);
+        return nRet;
+    }
+
+    if (arg(argc,argv,"/walletstoragecheck") || arg(argc,argv,"-walletstoragecheck"))
+    {
+        int nRet = CmdWalletStorageCheck();
+        DBFlush(true);
+        return nRet;
+    }
 
     // Berkeley DB reports failure by throwing, and CDB's constructor lets it
     // through. Nothing on this path caught anything, so an unreadable
@@ -706,24 +734,6 @@ int main(int argc, char* argv[])
     if (arg(argc,argv,"/recoveryaudit") || arg(argc,argv,"-recoveryaudit"))
     {
         int nRet = CmdRecoveryAudit();
-        DBFlush(true);
-        return nRet;
-    }
-
-    string strWalletStorageAuditJson =
-        argval2(argc, argv, "/walletstorageauditjson", "-walletstorageauditjson");
-    if (arg(argc,argv,"/walletstorageaudit") ||
-        arg(argc,argv,"-walletstorageaudit") ||
-        !strWalletStorageAuditJson.empty())
-    {
-        int nRet = CmdWalletStorageAudit(strWalletStorageAuditJson);
-        DBFlush(true);
-        return nRet;
-    }
-
-    if (arg(argc,argv,"/walletstoragecheck") || arg(argc,argv,"-walletstoragecheck"))
-    {
-        int nRet = CmdWalletStorageCheck();
         DBFlush(true);
         return nRet;
     }

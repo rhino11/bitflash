@@ -7,5 +7,6 @@
 #include <string>
 
 int RunSelfTest(const std::string& name);
+int RunSelfTestMutateWallet(const std::string& name);
 
 #endif

@@ -736,6 +736,189 @@ static int RunWalletFormatSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static bool FileContainsText(const string& strPath, const string& strNeedle);
+static bool MakeDirLocal(const string& strPath);
+static int RunBitflashChild(const string& strExe,
+                            const vector<string>& vArgs,
+                            const string* pStdinFile,
+                            const string* pOutputFile);
+
+class CWalletStorageSanityRawDB : public CWalletDB
+{
+public:
+    CWalletStorageSanityRawDB(const char* pszMode="r+")
+        : CWalletDB(pszMode) { }
+
+    bool WriteUnknownRecord()
+    {
+        return Write(string("storage-sanity-unknown"), 1);
+    }
+
+    bool WriteMalformedKeyRecord()
+    {
+        if (!pdb)
+            return false;
+        unsigned char chKey = 0xff;
+        unsigned char chValue = 0x01;
+        Dbt datKey(&chKey, 1);
+        Dbt datValue(&chValue, 1);
+        return pdb->put(GetTxn(), &datKey, &datValue, 0) == 0;
+    }
+
+    bool MakePlainHDSeedIncomplete()
+    {
+        return Erase(string("hdchaincode"));
+    }
+
+    bool AddEncryptedMarkerToPlainWallet()
+    {
+        CWalletMasterKey kMasterKey;
+        kMasterKey.vchCryptedKey.resize(48);
+        for (size_t i = 0; i < kMasterKey.vchCryptedKey.size(); i++)
+            kMasterKey.vchCryptedKey[i] = (unsigned char)(0x80 + (i & 0x3f));
+        for (size_t i = 0; i < kMasterKey.vchSalt.size(); i++)
+            kMasterKey.vchSalt[i] = (unsigned char)(0x40 + i);
+        return WriteWalletMinVersion(WALLET_FORMAT_ENCRYPTED) &&
+               WriteMasterKey(1, kMasterKey);
+    }
+};
+
+int RunSelfTestMutateWallet(const std::string& name)
+{
+    bool fOk = false;
+    try
+    {
+        CWalletStorageSanityRawDB walletdb;
+        if (name == "unknown-record")
+            fOk = walletdb.WriteUnknownRecord();
+        else if (name == "malformed-key")
+            fOk = walletdb.WriteMalformedKeyRecord();
+        else if (name == "incomplete-plain-hd")
+            fOk = walletdb.MakePlainHDSeedIncomplete();
+        else if (name == "encrypted-marker-with-plain-keys")
+            fOk = walletdb.AddEncryptedMarkerToPlainWallet();
+        else
+        {
+            fprintf(stderr, "Unknown wallet storage mutation '%s'\n", name.c_str());
+            return 1;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        fprintf(stderr, "Cannot mutate wallet storage: %s\n", e.what());
+        return 1;
+    }
+    catch (...)
+    {
+        fprintf(stderr, "Cannot mutate wallet storage: unknown exception\n");
+        return 1;
+    }
+
+    DBFlush(true);
+    return fOk ? 0 : 1;
+}
+
+static int RunWalletStorageSanitySelfTest()
+{
+    fflush(stdout);
+    printf("wallet-storage-sanity self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd))
+    {
+        printf("  FAIL could not read current directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    printf("  temp root: %s\n", tmp.c_str());
+
+    try
+    {
+#ifdef _WIN32
+        string strExe = cwd + "\\bitflash.exe";
+#else
+        string strExe = cwd + "/bitflash-node";
+#endif
+
+        struct StorageScenario
+        {
+            const char* pszName;
+            const char* pszExpectedFailure;
+        };
+
+        StorageScenario scenarios[] = {
+            { "unknown-record", "wallet.dat contains unknown records" },
+            { "malformed-key", "wallet.dat contains malformed records" },
+            { "incomplete-plain-hd", "plain HD seed is incomplete" },
+            { "encrypted-marker-with-plain-keys",
+              "encrypted wallet still contains plain private key records" },
+        };
+
+        for (size_t i = 0; i < sizeof(scenarios)/sizeof(scenarios[0]); i++)
+        {
+            string strScenarioDir = tmp + "/" + scenarios[i].pszName;
+            nFail += Check(MakeDirLocal(strScenarioDir),
+                           "scenario datadir can be created") ? 0 : 1;
+
+            string strCreateOut = tmp + "/" + scenarios[i].pszName + "-create.txt";
+            vector<string> vCreateArgs;
+            vCreateArgs.push_back("-datadir=" + strScenarioDir);
+            vCreateArgs.push_back("-nomanagedtor");
+            vCreateArgs.push_back("-nogui");
+            vCreateArgs.push_back("-newphrase");
+            int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
+            nFail += Check(nCreateRet == 0 &&
+                           FileContainsText(strCreateOut, "Write these twelve words down"),
+                           "scenario phrase wallet can be created") ? 0 : 1;
+
+            string strMutateOut = tmp + "/" + scenarios[i].pszName + "-mutate.txt";
+            vector<string> vMutateArgs;
+            vMutateArgs.push_back("-datadir=" + strScenarioDir);
+            vMutateArgs.push_back("-nomanagedtor");
+            vMutateArgs.push_back("-nogui");
+            vMutateArgs.push_back("-selftestmutatewallet=" + string(scenarios[i].pszName));
+            int nMutateRet = RunBitflashChild(strExe, vMutateArgs, NULL, &strMutateOut);
+            nFail += Check(nMutateRet == 0, scenarios[i].pszName) ? 0 : 1;
+
+            string strCheckOut = tmp + "/" + scenarios[i].pszName + "-check.txt";
+            vector<string> vCheckArgs;
+            vCheckArgs.push_back("-datadir=" + strScenarioDir);
+            vCheckArgs.push_back("-nomanagedtor");
+            vCheckArgs.push_back("-nogui");
+            vCheckArgs.push_back("-walletstoragecheck");
+            int nCheckRet = RunBitflashChild(strExe, vCheckArgs, NULL, &strCheckOut);
+            nFail += Check(nCheckRet == 2 &&
+                           FileContainsText(strCheckOut, "storage sanity:            failed") &&
+                           FileContainsText(strCheckOut, scenarios[i].pszExpectedFailure),
+                           scenarios[i].pszExpectedFailure) ? 0 : 1;
+        }
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static void ClearWalletRuntimeForTest()
 {
     CRITICAL_BLOCK(cs_mapKeys)
@@ -1991,6 +2174,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletHDSelfTest();
     if (name == "wallet-format")
         return RunWalletFormatSelfTest();
+    if (name == "wallet-storage-sanity")
+        return RunWalletStorageSanitySelfTest();
     if (name == "wallet-crypto")
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
@@ -2011,6 +2196,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
