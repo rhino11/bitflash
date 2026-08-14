@@ -968,6 +968,68 @@ static int RunWalletStorageSanitySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunDbEnvReopenSelfTest()
+{
+    fflush(stdout);
+    printf("db-env-reopen self-test\n");
+
+    std::string tmp;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+
+    int nFail = 0;
+    std::string strOldDataDir = strSetDataDir;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    try
+    {
+        for (int i = 0; i < 5; i++)
+        {
+            int64 nValue = 1000 + i;
+            {
+                CWalletDB walletdb("cr+");
+                nFail += Check(walletdb.WriteSetting("db-env-reopen-cycle", nValue),
+                               "wallet setting can be written before shutdown") ? 0 : 1;
+            }
+
+            DBFlush(true);
+
+            int64 nRead = 0;
+            {
+                CWalletDB walletdb("r");
+                nFail += Check(walletdb.ReadSetting("db-env-reopen-cycle", nRead),
+                               "wallet setting can be read after env reopen") ? 0 : 1;
+            }
+            nFail += Check(nRead == nValue,
+                           "reopened environment reads the last committed value") ? 0 : 1;
+
+            DBFlush(true);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    strSetDataDir = strOldDataDir;
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static void ClearWalletRuntimeForTest()
 {
     CRITICAL_BLOCK(cs_mapKeys)
@@ -2225,6 +2287,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletFormatSelfTest();
     if (name == "wallet-storage-sanity")
         return RunWalletStorageSanitySelfTest();
+    if (name == "db-env-reopen")
+        return RunDbEnvReopenSelfTest();
     if (name == "wallet-crypto")
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
@@ -2245,6 +2309,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
