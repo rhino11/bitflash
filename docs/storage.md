@@ -77,7 +77,8 @@ A future wallet backend must keep these properties:
 3. A locked encrypted wallet may expose public keys and balances, but not
    private keys or decrypted HD seed material.
 4. `-backupwallet` must produce a wallet file that opens in a different datadir
-   without copying `database/`.
+   without copying `database/`, and must not leave a half-written final backup
+   path if the copy or install step fails.
 5. `-recoveryaudit` must distinguish:
    - no recovery phrase installed;
    - recovery phrase present;

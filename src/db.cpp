@@ -1030,6 +1030,13 @@ bool BackupWallet(const string& strDest)
     if (!FileExists(strSrc.c_str()))
         return error("BackupWallet() : %s does not exist\n", strSrc.c_str());
 
+    string strTemp = strprintf("%s.tmp.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strTemp.c_str()); i++)
+        strTemp = strprintf("%s.tmp.%lld.%d", strDest.c_str(), GetTime(), i);
+    string strOld = strprintf("%s.old.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strOld.c_str()); i++)
+        strOld = strprintf("%s.old.%lld.%d", strDest.c_str(), GetTime(), i);
+
     CRITICAL_BLOCK(cs_db)
     {
         // Committing first, so the copy is not missing the newest records.
@@ -1044,11 +1051,11 @@ bool BackupWallet(const string& strDest)
             FILE* pfIn = fopen(strSrc.c_str(), "rb");
             if (!pfIn)
                 return error("BackupWallet() : cannot read %s\n", strSrc.c_str());
-            FILE* pfOut = fopen(strDest.c_str(), "wb");
+            FILE* pfOut = fopen(strTemp.c_str(), "wb");
             if (!pfOut)
             {
                 fclose(pfIn);
-                return error("BackupWallet() : cannot write %s\n", strDest.c_str());
+                return error("BackupWallet() : cannot write %s\n", strTemp.c_str());
             }
 
             char buf[65536];
@@ -1065,18 +1072,39 @@ bool BackupWallet(const string& strDest)
 
             if (!fOk)
             {
-                remove(strDest.c_str());   // half a wallet is worse than none
-                return error("BackupWallet() : copy to %s failed\n", strDest.c_str());
+                remove(strTemp.c_str());   // half a wallet is worse than none
+                return error("BackupWallet() : copy to %s failed\n", strTemp.c_str());
             }
 
             // Without this the copy is welded to this node's database/ dir.
-            int ret = dbenv.lsn_reset(strDest.c_str(), 0);
+            int ret = dbenv.lsn_reset(strTemp.c_str(), 0);
             if (ret != 0)
                 printf("BackupWallet() : warning -- lsn_reset returned %d; the copy "
                        "may only open beside this node's database/ directory\n", ret);
+
+            bool fHadOldDest = FileExists(strDest.c_str());
+            if (fHadOldDest && rename(strDest.c_str(), strOld.c_str()) != 0)
+            {
+                remove(strTemp.c_str());
+                return error("BackupWallet() : could not move old %s aside\n", strDest.c_str());
+            }
+            if (rename(strTemp.c_str(), strDest.c_str()) != 0)
+            {
+                remove(strTemp.c_str());
+                if (fHadOldDest)
+                    rename(strOld.c_str(), strDest.c_str());
+                return error("BackupWallet() : could not install %s\n", strDest.c_str());
+            }
+            if (fHadOldDest)
+                remove(strOld.c_str());
         }
         catch (const std::exception& e)
-        { return error("BackupWallet() : %s\n", e.what()); }
+        {
+            remove(strTemp.c_str());
+            if (FileExists(strOld.c_str()) && !FileExists(strDest.c_str()))
+                rename(strOld.c_str(), strDest.c_str());
+            return error("BackupWallet() : %s\n", e.what());
+        }
     }
 
     // Recorded here rather than by whoever called, so that a backup taken with
