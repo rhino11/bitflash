@@ -75,6 +75,10 @@ int CmdWalletStorageCheck();
 // not change which backend the runtime wallet opens.
 int CmdWalletSQLiteExport(const std::string& strDest);
 
+// Diagnostic/migration staging: compare a SQLite wallet export with the current
+// wallet.dat raw records. Prints counts only, never record keys or values.
+int CmdWalletSQLiteVerify(const std::string& strPath);
+
 // Rewrite wallet.dat so private keys and the HD seed are encrypted with the
 // given passphrase. Returns 0 on success and exits without starting the node.
 int CmdEncryptWallet(const std::string& strPassphrase);

@@ -1134,6 +1134,8 @@ static int RunWalletSQLiteSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+namespace {
+
 class CWalletRecordMapVisitor : public CWalletRecordVisitor
 {
 public:
@@ -1157,6 +1159,8 @@ public:
         return true;
     }
 };
+
+} // namespace
 
 static int RunWalletSQLiteMigrationSelfTest()
 {
@@ -1215,6 +1219,17 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strExportOut, "SQLite wallet export written"),
                        "wallet.dat can be exported to SQLite") ? 0 : 1;
 
+        string strVerifyOut = tmp + "/sqlite-verify.txt";
+        vector<string> vVerifyArgs;
+        vVerifyArgs.push_back("-datadir=" + strWalletDir);
+        vVerifyArgs.push_back("-nomanagedtor");
+        vVerifyArgs.push_back("-nogui");
+        vVerifyArgs.push_back("-walletsqliteverify=" + strSQLite);
+        int nVerifyRet = RunBitflashChild(strExe, vVerifyArgs, NULL, &strVerifyOut);
+        nFail += Check(nVerifyRet == 0 &&
+                       FileContainsText(strVerifyOut, "verification:              ok"),
+                       "SQLite wallet export verifies against wallet.dat") ? 0 : 1;
+
         string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
         int nOverwriteRet =
             RunBitflashChild(strExe, vExportArgs, NULL, &strOverwriteOut);
@@ -1265,6 +1280,32 @@ static int RunWalletSQLiteMigrationSelfTest()
         nFail += Check(db.ScanRecords(sqliteVisitor, strError) &&
                        mapSQLite == mapBDB,
                        "SQLite wallet scanner streams every exported record byte-for-byte") ? 0 : 1;
+
+        db.Close();
+        CWalletDBSQLite dbCorrupt;
+        vector<unsigned char> vchBadValue;
+        vchBadValue.push_back(0xba);
+        vchBadValue.push_back(0xad);
+        nFail += Check(!mapBDB.empty() &&
+                       dbCorrupt.Open(strSQLite, strError) &&
+                       dbCorrupt.BeginTransaction(strError) &&
+                       dbCorrupt.WriteRecord(mapBDB.begin()->first,
+                                             vchBadValue,
+                                             strError) &&
+                       dbCorrupt.CommitTransaction(strError) &&
+                       dbCorrupt.Checkpoint(strError),
+                       "SQLite export can be deliberately corrupted for verifier test") ? 0 : 1;
+        dbCorrupt.Close();
+
+        string strVerifyBadOut = tmp + "/sqlite-verify-bad.txt";
+        int nVerifyBadRet =
+            RunBitflashChild(strExe, vVerifyArgs, NULL, &strVerifyBadOut);
+        nFail += Check(nVerifyBadRet == 2 &&
+                       FileContainsText(strVerifyBadOut,
+                                        "record value mismatches:   1") &&
+                       FileContainsText(strVerifyBadOut,
+                                        "verification:              failed"),
+                       "SQLite wallet verifier detects a mismatched record value") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

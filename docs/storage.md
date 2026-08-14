@@ -111,6 +111,8 @@ overwrite an existing export and still does not change the runtime wallet
 backend. `CWalletDBSQLite::ScanRecords()` can stream those exported records back
 through the same visitor shape, so tests can compare BDB and SQLite record
 streams without introducing a SQLite runtime wallet loader yet.
+`-walletsqliteverify=FILE` compares the current `wallet.dat` stream with a
+SQLite export and prints only record counts and mismatch counts.
 
 ## `blkindex.dat`
 
