@@ -1195,6 +1195,28 @@ static bool CreateSQLiteWalletWithEmptyKey(const string& strPath)
     return fOk;
 }
 
+static bool CreateSQLiteWalletWithFutureMinVersion(const string& strPath)
+{
+    string strError;
+    CWalletDBSQLite db;
+    CDataStream ssKey(SER_DISK);
+    ssKey << string("walletminversion");
+    CDataStream ssValue(SER_DISK);
+    ssValue << (WALLET_FORMAT_SUPPORTED + 1);
+
+    if (!db.Open(strPath, strError))
+        return false;
+    if (!db.BeginTransaction(strError))
+        return false;
+    if (!db.WriteRecord(DataStreamBytes(ssKey), DataStreamBytes(ssValue), strError))
+        return false;
+    if (!db.CommitTransaction(strError))
+        return false;
+    if (!db.Checkpoint(strError))
+        return false;
+    return true;
+}
+
 static int RunWalletSQLiteMigrationSelfTest()
 {
     fflush(stdout);
@@ -1263,6 +1285,19 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strVerifyOut, "verification:              ok"),
                        "SQLite wallet export verifies against wallet.dat") ? 0 : 1;
 
+        string strLoadCheckOut = tmp + "/sqlite-loadcheck.txt";
+        vector<string> vLoadCheckArgs;
+        vLoadCheckArgs.push_back("-datadir=" + strWalletDir);
+        vLoadCheckArgs.push_back("-nomanagedtor");
+        vLoadCheckArgs.push_back("-nogui");
+        vLoadCheckArgs.push_back("-walletsqliteloadcheck=" + strSQLite);
+        int nLoadCheckRet =
+            RunBitflashChild(strExe, vLoadCheckArgs, NULL, &strLoadCheckOut);
+        nFail += Check(nLoadCheckRet == 0 &&
+                       FileContainsText(strLoadCheckOut,
+                                        "load check:                ok"),
+                       "SQLite wallet export passes the loader compatibility check") ? 0 : 1;
+
         string strRestoredDir = tmp + "/restored-wallet";
         nFail += Check(MakeDirLocal(strRestoredDir),
                        "restored wallet directory can be created") ? 0 : 1;
@@ -1317,6 +1352,25 @@ static int RunWalletSQLiteMigrationSelfTest()
                                         "Cannot restore SQLite wallet export") &&
                        !FileExists((strBadRestoreDir + "/wallet.dat").c_str()),
                        "failed SQLite wallet restore removes incomplete wallet.dat") ? 0 : 1;
+
+        string strFutureSQLite = tmp + "/future-wallet.sqlite";
+        nFail += Check(CreateSQLiteWalletWithFutureMinVersion(strFutureSQLite),
+                       "SQLite export with a future wallet format can be created") ? 0 : 1;
+        string strFutureLoadCheckOut = tmp + "/sqlite-loadcheck-future.txt";
+        vector<string> vFutureLoadCheckArgs;
+        vFutureLoadCheckArgs.push_back("-datadir=" + strWalletDir);
+        vFutureLoadCheckArgs.push_back("-nomanagedtor");
+        vFutureLoadCheckArgs.push_back("-nogui");
+        vFutureLoadCheckArgs.push_back("-walletsqliteloadcheck=" + strFutureSQLite);
+        int nFutureLoadCheckRet =
+            RunBitflashChild(strExe, vFutureLoadCheckArgs, NULL,
+                             &strFutureLoadCheckOut);
+        nFail += Check(nFutureLoadCheckRet == 2 &&
+                       FileContainsText(strFutureLoadCheckOut,
+                                        "unsupported future wallet format") &&
+                       FileContainsText(strFutureLoadCheckOut,
+                                        "load check:                failed"),
+                       "SQLite wallet load check rejects future wallet formats") ? 0 : 1;
 
         string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
         int nOverwriteRet =

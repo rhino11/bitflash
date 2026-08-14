@@ -117,6 +117,9 @@ SQLite export and prints only record counts and mismatch counts.
 an empty data directory, then the verifier can prove the restored BDB file still
 matches the export byte-for-byte. Failed exports remove the incomplete SQLite
 file and failed restores remove the incomplete `wallet.dat`.
+`-walletsqliteloadcheck=FILE` parses a SQLite export using the same record
+types the wallet loader understands, so a migration can prove the export is not
+just byte-preserving but loader-compatible before runtime activation.
 
 ## `blkindex.dat`
 
