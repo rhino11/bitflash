@@ -183,6 +183,8 @@ static void PrintUsage()
     printf("                              wallet.dat storage state)\n");
     printf("  /walletsqliteexport=FILE   (copy raw wallet.dat records into an\n");
     printf("                              experimental SQLite store, then exit)\n");
+    printf("  /walletsqliteverify=FILE   (compare wallet.dat with a SQLite export,\n");
+    printf("                              printing counts only, then exit)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -536,6 +538,15 @@ int main(int argc, char* argv[])
     if (!strWalletSQLiteExport.empty())
     {
         int nRet = CmdWalletSQLiteExport(strWalletSQLiteExport);
+        DBFlush(true);
+        return nRet;
+    }
+
+    string strWalletSQLiteVerify =
+        argval2(argc, argv, "/walletsqliteverify", "-walletsqliteverify");
+    if (!strWalletSQLiteVerify.empty())
+    {
+        int nRet = CmdWalletSQLiteVerify(strWalletSQLiteVerify);
         DBFlush(true);
         return nRet;
     }

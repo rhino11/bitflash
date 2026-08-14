@@ -796,6 +796,8 @@ static vector<unsigned char> DataStreamBytesLocal(const CDataStream& ss)
     return vector<unsigned char>(ss.begin(), ss.end());
 }
 
+namespace {
+
 class CWalletSQLiteExportVisitor : public CWalletRecordVisitor
 {
 public:
@@ -817,6 +819,32 @@ public:
         return true;
     }
 };
+
+class CWalletRecordMapVisitor : public CWalletRecordVisitor
+{
+public:
+    std::map<vector<unsigned char>, vector<unsigned char> >& mapRecords;
+
+    explicit CWalletRecordMapVisitor(
+        std::map<vector<unsigned char>, vector<unsigned char> >& mapRecordsIn)
+        : mapRecords(mapRecordsIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
+    {
+        vector<unsigned char> vchKey = DataStreamBytesLocal(ssKey);
+        if (mapRecords.count(vchKey))
+        {
+            strErrorRet = "duplicate serialized wallet key";
+            return false;
+        }
+        mapRecords[vchKey] = DataStreamBytesLocal(ssValue);
+        return true;
+    }
+};
+
+} // namespace
 
 int CmdWalletSQLiteExport(const std::string& strDest)
 {
@@ -885,6 +913,85 @@ int CmdWalletSQLiteExport(const std::string& strDest)
     printf("  records copied:            %d\n", nCopied);
     fflush(stdout);
     return 0;
+}
+
+int CmdWalletSQLiteVerify(const std::string& strPath)
+{
+    AttachTerminal();
+
+    if (strPath.empty())
+    {
+        fprintf(stderr, "Missing SQLite wallet export path.\n");
+        return 1;
+    }
+    if (!FileExists(strPath.c_str()))
+    {
+        fprintf(stderr, "SQLite wallet export does not exist: %s\n",
+                strPath.c_str());
+        return 1;
+    }
+
+    std::map<vector<unsigned char>, vector<unsigned char> > mapBDB;
+    std::map<vector<unsigned char>, vector<unsigned char> > mapSQLite;
+    string strError;
+
+    CWalletRecordMapVisitor bdbVisitor(mapBDB);
+    if (!ScanWalletRecords(bdbVisitor, strError))
+    {
+        fprintf(stderr, "Cannot scan wallet.dat records: %s\n", strError.c_str());
+        return 1;
+    }
+
+    CWalletDBSQLite db;
+    if (!db.Open(strPath, strError))
+    {
+        fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+    CWalletRecordMapVisitor sqliteVisitor(mapSQLite);
+    if (!db.ScanRecords(sqliteVisitor, strError))
+    {
+        fprintf(stderr, "Cannot scan SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+
+    int nMissing = 0;
+    int nMismatched = 0;
+    for (std::map<vector<unsigned char>, vector<unsigned char> >::const_iterator it =
+             mapBDB.begin(); it != mapBDB.end(); ++it)
+    {
+        std::map<vector<unsigned char>, vector<unsigned char> >::const_iterator sit =
+            mapSQLite.find(it->first);
+        if (sit == mapSQLite.end())
+            nMissing++;
+        else if (sit->second != it->second)
+            nMismatched++;
+    }
+
+    int nExtra = 0;
+    for (std::map<vector<unsigned char>, vector<unsigned char> >::const_iterator it =
+             mapSQLite.begin(); it != mapSQLite.end(); ++it)
+    {
+        if (!mapBDB.count(it->first))
+            nExtra++;
+    }
+
+    printf("SQLite wallet export verification\n");
+    printf("  wallet.dat records:        %u\n", (unsigned int)mapBDB.size());
+    printf("  SQLite records:            %u\n", (unsigned int)mapSQLite.size());
+    printf("  missing records:           %d\n", nMissing);
+    printf("  extra records:             %d\n", nExtra);
+    printf("  record value mismatches:   %d\n", nMismatched);
+    if (nMissing == 0 && nExtra == 0 && nMismatched == 0)
+    {
+        printf("  verification:              ok\n");
+        fflush(stdout);
+        return 0;
+    }
+
+    printf("  verification:              failed\n");
+    fflush(stdout);
+    return 2;
 }
 
 int CmdEncryptWallet(const std::string& strPassphrase)
