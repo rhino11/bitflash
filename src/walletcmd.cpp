@@ -903,6 +903,171 @@ public:
     }
 };
 
+class CWalletSQLiteLoadCheckVisitor : public CWalletRecordVisitor
+{
+public:
+    int nRecords;
+    int nUnknown;
+    string strFailure;
+
+    CWalletSQLiteLoadCheckVisitor() : nRecords(0), nUnknown(0) { }
+
+    bool Fail(const string& strMessage, string& strErrorRet)
+    {
+        strFailure = strMessage;
+        strErrorRet = strMessage;
+        return false;
+    }
+
+    bool VisitWalletRecord(const CDataStream& ssKeyIn,
+                           const CDataStream& ssValueIn,
+                           string& strErrorRet)
+    {
+        nRecords++;
+        try
+        {
+            CDataStream ssKey = ssKeyIn;
+            CDataStream ssValue = ssValueIn;
+            string strType;
+            ssKey >> strType;
+            if (ssKey.fail())
+                return Fail("malformed wallet record key", strErrorRet);
+
+            if (strType == "name")
+            {
+                string strAddress;
+                string strName;
+                ssKey >> strAddress;
+                ssValue >> strName;
+            }
+            else if (strType == "tx")
+            {
+                uint256 hash;
+                CWalletTx wtx;
+                ssKey >> hash;
+                ssValue >> wtx;
+            }
+            else if (strType == "key")
+            {
+                vector<unsigned char> vchPubKey;
+                CPrivKey vchPrivKey;
+                ssKey >> vchPubKey;
+                ssValue >> vchPrivKey;
+            }
+            else if (strType == "mkey")
+            {
+                unsigned int nID = 0;
+                CWalletMasterKey kMasterKey;
+                ssKey >> nID;
+                ssValue >> kMasterKey;
+            }
+            else if (strType == "ckey")
+            {
+                vector<unsigned char> vchPubKey;
+                vector<unsigned char> vchCryptedSecret;
+                ssKey >> vchPubKey;
+                ssValue >> vchCryptedSecret;
+            }
+            else if (strType == "defaultkey" ||
+                     strType == "hdmaster" ||
+                     strType == "hdchaincode" ||
+                     strType == "cryptedhdmaster" ||
+                     strType == "cryptedhdchaincode")
+            {
+                vector<unsigned char> vch;
+                ssValue >> vch;
+            }
+            else if (strType == "hdnext" ||
+                     strType == "hdreceivenext" ||
+                     strType == "hdchangenext" ||
+                     strType == "hdcointype")
+            {
+                unsigned int nValue = 0;
+                ssValue >> nValue;
+            }
+            else if (strType == "hdschema")
+            {
+                int nSchema = 0;
+                ssValue >> nSchema;
+                if (!ssValue.fail() &&
+                    nSchema != HD_SCHEMA_NONE &&
+                    nSchema != HD_SCHEMA_LEGACY &&
+                    nSchema != HD_SCHEMA_BIP44)
+                    return Fail("unsupported deterministic wallet schema",
+                                strErrorRet);
+            }
+            else if (strType == "walletminversion")
+            {
+                int nMinVersion = 0;
+                ssValue >> nMinVersion;
+                if (!ssValue.fail() && nMinVersion > WALLET_FORMAT_SUPPORTED)
+                    return Fail("unsupported future wallet format", strErrorRet);
+            }
+            else if (strType == "pool")
+            {
+                int64 nIndex = 0;
+                vector<unsigned char> vchPubKey;
+                ssKey >> nIndex;
+                ssValue >> vchPubKey;
+            }
+            else if (strType == "setting")
+            {
+                string strKey;
+                ssKey >> strKey;
+                if (strKey == "nTransactionFee")
+                {
+                    int64 nValue = 0;
+                    ssValue >> nValue;
+                }
+                else if (strKey == "addrIncoming")
+                {
+                    CAddress addr;
+                    ssValue >> addr;
+                }
+                else if (strKey == "nMineMode")
+                {
+                    int nValue = 0;
+                    ssValue >> nValue;
+                }
+                else if (strKey == "fGenerateBitcoins")
+                {
+                    int fValue = 0;
+                    ssValue >> fValue;
+                }
+                else if (strKey == "strParticipantPool")
+                {
+                    string strValue;
+                    ssValue >> strValue;
+                }
+            }
+            else if (strType == "version")
+            {
+                int nVersion = 0;
+                ssValue >> nVersion;
+            }
+            else
+            {
+                nUnknown++;
+            }
+
+            if (ssKey.fail())
+                return Fail("malformed wallet record key", strErrorRet);
+            if (ssValue.fail())
+                return Fail("malformed wallet record value", strErrorRet);
+        }
+        catch (const std::exception& e)
+        {
+            return Fail(strprintf("wallet record parse exception: %s", e.what()),
+                        strErrorRet);
+        }
+        catch (...)
+        {
+            return Fail("wallet record parse exception", strErrorRet);
+        }
+        return true;
+    }
+};
+
 } // namespace
 
 int CmdWalletSQLiteExport(const std::string& strDest)
@@ -1148,6 +1313,50 @@ int CmdWalletSQLiteRestore(const std::string& strPath)
 
     printf("SQLite wallet export restored to wallet.dat\n");
     printf("  records restored:          %d\n", nCopied);
+    fflush(stdout);
+    return 0;
+}
+
+int CmdWalletSQLiteLoadCheck(const std::string& strPath)
+{
+    AttachTerminal();
+
+    if (strPath.empty())
+    {
+        fprintf(stderr, "Missing SQLite wallet export path.\n");
+        return 1;
+    }
+    if (!FileExists(strPath.c_str()))
+    {
+        fprintf(stderr, "SQLite wallet export does not exist: %s\n",
+                strPath.c_str());
+        return 1;
+    }
+
+    string strError;
+    CWalletDBSQLite sqlite;
+    if (!sqlite.Open(strPath, strError))
+    {
+        fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
+        return 1;
+    }
+
+    CWalletSQLiteLoadCheckVisitor visitor;
+    if (!sqlite.ScanRecords(visitor, strError))
+    {
+        printf("SQLite wallet load check\n");
+        printf("  records checked:           %d\n", visitor.nRecords);
+        printf("  unknown records:           %d\n", visitor.nUnknown);
+        printf("  load check:                failed\n");
+        printf("  failure:                   %s\n", strError.c_str());
+        fflush(stdout);
+        return 2;
+    }
+
+    printf("SQLite wallet load check\n");
+    printf("  records checked:           %d\n", visitor.nRecords);
+    printf("  unknown records:           %d\n", visitor.nUnknown);
+    printf("  load check:                ok\n");
     fflush(stdout);
     return 0;
 }

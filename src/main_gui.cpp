@@ -187,6 +187,8 @@ static void PrintUsage()
     printf("                              printing counts only, then exit)\n");
     printf("  /walletsqliterestore=FILE  (rebuild wallet.dat from a SQLite export in\n");
     printf("                              an empty data directory, then exit)\n");
+    printf("  /walletsqliteloadcheck=FILE\n");
+    printf("                              (parse a SQLite export like the wallet loader)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -558,6 +560,15 @@ int main(int argc, char* argv[])
     if (!strWalletSQLiteRestore.empty())
     {
         int nRet = CmdWalletSQLiteRestore(strWalletSQLiteRestore);
+        DBFlush(true);
+        return nRet;
+    }
+
+    string strWalletSQLiteLoadCheck =
+        argval2(argc, argv, "/walletsqliteloadcheck", "-walletsqliteloadcheck");
+    if (!strWalletSQLiteLoadCheck.empty())
+    {
+        int nRet = CmdWalletSQLiteLoadCheck(strWalletSQLiteLoadCheck);
         DBFlush(true);
         return nRet;
     }
