@@ -6,6 +6,8 @@
 
 #include <sqlite3.h>
 
+class CWalletRecordVisitor;
+
 class CWalletDBSQLite
 {
 public:
@@ -26,6 +28,7 @@ public:
     bool ReadRecord(const vector<unsigned char>& vchKey,
                     vector<unsigned char>& vchValueRet,
                     string& strError);
+    bool ScanRecords(CWalletRecordVisitor& visitor, string& strError);
     bool CountRecords(int& nRecordsRet, string& strError);
 
 private:
