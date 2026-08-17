@@ -56,6 +56,7 @@ string strWalletLoadError;
 static DbEnv* pdbenv = NULL;
 static FILE* pdbErrFile = NULL;
 static map<string, int> mapFileUseCount;
+static CWalletDBSQLite* pWalletSQLiteRuntime = NULL;
 
 DbEnv& GetDbEnv()
 {
@@ -94,6 +95,67 @@ public:
     }
 }
 instance_of_cdbinit;
+
+bool WalletSQLiteRuntimeActive()
+{
+    return pWalletSQLiteRuntime != NULL;
+}
+
+bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet)
+{
+    strErrorRet.clear();
+    if (!FileExists(strPath.c_str()))
+    {
+        strErrorRet = strprintf("SQLite wallet does not exist: %s",
+                                strPath.c_str());
+        return false;
+    }
+
+    WalletSQLiteRuntimeClose();
+    std::auto_ptr<CWalletDBSQLite> db(new CWalletDBSQLite());
+    if (!db->Open(strPath, strErrorRet))
+        return false;
+
+    pWalletSQLiteRuntime = db.release();
+    return true;
+}
+
+void WalletSQLiteRuntimeClose()
+{
+    if (pWalletSQLiteRuntime)
+    {
+        delete pWalletSQLiteRuntime;
+        pWalletSQLiteRuntime = NULL;
+    }
+}
+
+bool WalletSQLiteRuntimeReadRecord(const vector<unsigned char>& vchKey,
+                                   vector<unsigned char>& vchValueRet)
+{
+    if (!pWalletSQLiteRuntime)
+        return false;
+    string strError;
+    return pWalletSQLiteRuntime->ReadRecord(vchKey, vchValueRet, strError);
+}
+
+bool WalletSQLiteRuntimeWriteRecord(const vector<unsigned char>& vchKey,
+                                    const vector<unsigned char>& vchValue,
+                                    bool fOverwrite)
+{
+    if (!pWalletSQLiteRuntime)
+        return false;
+    string strError;
+    return pWalletSQLiteRuntime->WriteRecord(vchKey, vchValue, strError,
+                                             fOverwrite);
+}
+
+bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey)
+{
+    if (!pWalletSQLiteRuntime)
+        return false;
+    string strError;
+    return pWalletSQLiteRuntime->EraseRecord(vchKey, strError);
+}
 
 
 CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
@@ -650,6 +712,11 @@ bool CReviewDB::WriteReviews(uint256 hash, const vector<CReview>& vReviews)
 //
 // CWalletDB
 //
+
+CWalletDB::CWalletDB(const char* pszMode, bool fTxn) :
+    CDB(WalletSQLiteRuntimeActive() ? NULL : "wallet.dat", pszMode, fTxn)
+{
+}
 
 class CSQLiteWalletRuntimeLoadVisitor : public CWalletRecordVisitor
 {
