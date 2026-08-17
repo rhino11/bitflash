@@ -1268,6 +1268,36 @@ static bool CreateSQLiteWalletWithFutureMinVersion(const string& strPath)
     return true;
 }
 
+static bool CreateTypedSQLiteWallet(const string& strPath)
+{
+    string strError;
+    CWalletDBSQLite db;
+    CKey key;
+    key.MakeNewKey();
+
+    vector<unsigned char> vchPubKey = key.GetPubKey();
+    CPrivKey vchPrivKey = key.GetPrivKey();
+    string strAddress = PubKeyToAddress(vchPubKey);
+
+    if (!db.Open(strPath, strError))
+        return false;
+    if (!db.BeginTransaction(strError))
+        return false;
+    if (!db.WriteTypedRecord(make_pair(string("key"), vchPubKey),
+                             vchPrivKey, strError, false))
+        return false;
+    if (!db.WriteTypedRecord(string("defaultkey"), vchPubKey, strError))
+        return false;
+    if (!db.WriteTypedRecord(make_pair(string("name"), strAddress),
+                             string("Typed SQLite Address"), strError))
+        return false;
+    if (!db.CommitTransaction(strError))
+        return false;
+    if (!db.Checkpoint(strError))
+        return false;
+    return true;
+}
+
 static int RunWalletSQLiteMigrationSelfTest()
 {
     fflush(stdout);
@@ -1361,6 +1391,42 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strRuntimeOut,
                                         "SQLite wallet loaded: read-only staging backend"),
                        "SQLite wallet export loads through the runtime startup path") ? 0 : 1;
+
+        string strTypedSQLite = tmp + "/typed-wallet.sqlite";
+        nFail += Check(CreateTypedSQLiteWallet(strTypedSQLite),
+                       "typed SQLite wallet can be created without Berkeley DB") ? 0 : 1;
+
+        string strTypedLoadCheckOut = tmp + "/sqlite-typed-loadcheck.txt";
+        vector<string> vTypedLoadCheckArgs;
+        vTypedLoadCheckArgs.push_back("-datadir=" + strWalletDir);
+        vTypedLoadCheckArgs.push_back("-nomanagedtor");
+        vTypedLoadCheckArgs.push_back("-nogui");
+        vTypedLoadCheckArgs.push_back("-walletsqliteloadcheck=" + strTypedSQLite);
+        int nTypedLoadCheckRet =
+            RunBitflashChild(strExe, vTypedLoadCheckArgs, NULL,
+                             &strTypedLoadCheckOut);
+        nFail += Check(nTypedLoadCheckRet == 0 &&
+                       FileContainsText(strTypedLoadCheckOut,
+                                        "load check:                ok"),
+                       "typed SQLite wallet passes the loader compatibility check") ? 0 : 1;
+
+        string strTypedRuntimeDir = tmp + "/typed-runtime-wallet";
+        nFail += Check(MakeDirLocal(strTypedRuntimeDir),
+                       "typed SQLite runtime directory can be created") ? 0 : 1;
+        string strTypedRuntimeOut = tmp + "/sqlite-typed-runtime.txt";
+        vector<string> vTypedRuntimeArgs;
+        vTypedRuntimeArgs.push_back("-datadir=" + strTypedRuntimeDir);
+        vTypedRuntimeArgs.push_back("-nomanagedtor");
+        vTypedRuntimeArgs.push_back("-nogui");
+        vTypedRuntimeArgs.push_back("-walletsqlite=" + strTypedSQLite);
+        int nTypedRuntimeRet =
+            RunBitflashChild(strExe, vTypedRuntimeArgs, NULL,
+                             &strTypedRuntimeOut);
+        nFail += Check(nTypedRuntimeRet == 0 &&
+                       FileContainsText(strTypedRuntimeOut,
+                                        "SQLite wallet loaded: read-only staging backend") &&
+                       !FileExists((strTypedRuntimeDir + "/wallet.dat").c_str()),
+                       "typed SQLite wallet loads through runtime without creating wallet.dat") ? 0 : 1;
 
         string strRestoredDir = tmp + "/restored-wallet";
         nFail += Check(MakeDirLocal(strRestoredDir),
