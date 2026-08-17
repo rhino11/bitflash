@@ -189,6 +189,7 @@ static void PrintUsage()
     printf("                              an empty data directory, then exit)\n");
     printf("  /walletsqliteloadcheck=FILE\n");
     printf("                              (parse a SQLite export like the wallet loader)\n");
+    printf("  /walletsqlite=FILE         (stage-load a SQLite wallet export, then exit)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -617,6 +618,27 @@ int main(int argc, char* argv[])
     printf("Loading wallet...\n");
     try
     {
+        string strWalletSQLite =
+            argval2(argc, argv, "/walletsqlite", "-walletsqlite");
+        if (!strWalletSQLite.empty())
+        {
+            AttachTerminal();
+            if (!LoadWalletFromSQLite(strWalletSQLite))
+            {
+                FatalStartupError(fHeadlessStartup,
+                                  "Cannot open SQLite wallet export.",
+                                  strWalletLoadError);
+                return 1;
+            }
+
+            fprintf(stderr, "SQLite wallet loaded: read-only staging backend\n");
+            fprintf(stderr, "SQLite runtime writes are not enabled yet; exiting before "
+                            "network, mining, GUI, or wallet mutation starts.\n");
+            fflush(stderr);
+            DBFlush(true);
+            return 0;
+        }
+
         if (!LoadWallet())
         {
             // LoadWallet() explains itself into strWalletLoadError when it

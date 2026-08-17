@@ -1298,6 +1298,19 @@ static int RunWalletSQLiteMigrationSelfTest()
                                         "load check:                ok"),
                        "SQLite wallet export passes the loader compatibility check") ? 0 : 1;
 
+        string strRuntimeOut = tmp + "/sqlite-runtime.txt";
+        vector<string> vRuntimeArgs;
+        vRuntimeArgs.push_back("-datadir=" + strWalletDir);
+        vRuntimeArgs.push_back("-nomanagedtor");
+        vRuntimeArgs.push_back("-nogui");
+        vRuntimeArgs.push_back("-walletsqlite=" + strSQLite);
+        int nRuntimeRet =
+            RunBitflashChild(strExe, vRuntimeArgs, NULL, &strRuntimeOut);
+        nFail += Check(nRuntimeRet == 0 &&
+                       FileContainsText(strRuntimeOut,
+                                        "SQLite wallet loaded: read-only staging backend"),
+                       "SQLite wallet export loads through the runtime startup path") ? 0 : 1;
+
         string strRestoredDir = tmp + "/restored-wallet";
         nFail += Check(MakeDirLocal(strRestoredDir),
                        "restored wallet directory can be created") ? 0 : 1;
@@ -1371,6 +1384,22 @@ static int RunWalletSQLiteMigrationSelfTest()
                        FileContainsText(strFutureLoadCheckOut,
                                         "load check:                failed"),
                        "SQLite wallet load check rejects future wallet formats") ? 0 : 1;
+
+        string strFutureRuntimeOut = tmp + "/sqlite-runtime-future.txt";
+        vector<string> vFutureRuntimeArgs;
+        vFutureRuntimeArgs.push_back("-datadir=" + strWalletDir);
+        vFutureRuntimeArgs.push_back("-nomanagedtor");
+        vFutureRuntimeArgs.push_back("-nogui");
+        vFutureRuntimeArgs.push_back("-walletsqlite=" + strFutureSQLite);
+        int nFutureRuntimeRet =
+            RunBitflashChild(strExe, vFutureRuntimeArgs, NULL,
+                             &strFutureRuntimeOut);
+        nFail += Check(nFutureRuntimeRet == 1 &&
+                       FileContainsText(strFutureRuntimeOut,
+                                        "Cannot open SQLite wallet export") &&
+                       FileContainsText(strFutureRuntimeOut,
+                                        "newer version of Bitflash"),
+                       "SQLite runtime startup rejects future wallet formats") ? 0 : 1;
 
         string strOverwriteOut = tmp + "/sqlite-export-overwrite.txt";
         int nOverwriteRet =

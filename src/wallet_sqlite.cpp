@@ -58,6 +58,25 @@ bool CWalletDBSQLite::Open(const string& strPath, string& strError)
     return true;
 }
 
+bool CWalletDBSQLite::OpenReadOnly(const string& strPath, string& strError)
+{
+    Close();
+
+    int ret = sqlite3_open_v2(strPath.c_str(), &pdb,
+                              SQLITE_OPEN_READONLY |
+                              SQLITE_OPEN_FULLMUTEX,
+                              NULL);
+    if (ret != SQLITE_OK)
+    {
+        SetSQLiteError(pdb, "cannot open SQLite wallet read-only", strError);
+        Close();
+        return false;
+    }
+
+    sqlite3_busy_timeout(pdb, 5000);
+    return true;
+}
+
 void CWalletDBSQLite::Close()
 {
     if (pdb)
