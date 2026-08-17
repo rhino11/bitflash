@@ -356,6 +356,16 @@ private:
 // Legacy IP-based peer address database (CAddrDB / addr.dat) removed --
 // peer discovery is entirely Nostr/.btf-based now.
 
+bool WalletSQLiteRuntimeActive();
+bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet);
+void WalletSQLiteRuntimeClose();
+bool WalletSQLiteRuntimeReadRecord(const vector<unsigned char>& vchKey,
+                                   vector<unsigned char>& vchValueRet);
+bool WalletSQLiteRuntimeWriteRecord(const vector<unsigned char>& vchKey,
+                                    const vector<unsigned char>& vchValue,
+                                    bool fOverwrite);
+bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey);
+
 
 
 
@@ -363,64 +373,141 @@ private:
 class CWalletDB : public CDB
 {
 public:
-    CWalletDB(const char* pszMode="r+", bool fTxn=false) : CDB("wallet.dat", pszMode, fTxn) { }
+    CWalletDB(const char* pszMode="r+", bool fTxn=false);
 private:
     CWalletDB(const CWalletDB&);
     void operator=(const CWalletDB&);
+
+    template<typename K, typename T>
+    bool ReadWalletRecord(const K& key, T& value)
+    {
+        if (!WalletSQLiteRuntimeActive())
+            return Read(key, value);
+
+        CDataStream ssKey(SER_DISK);
+        ssKey.reserve(1000);
+        ssKey << key;
+        vector<unsigned char> vchKey(ssKey.begin(), ssKey.end());
+        vector<unsigned char> vchValue;
+
+        bool fOk = WalletSQLiteRuntimeReadRecord(vchKey, vchValue);
+        if (!vchKey.empty())
+            memset(&vchKey[0], 0, vchKey.size());
+        if (!ssKey.empty())
+            memset(&ssKey[0], 0, ssKey.size());
+        if (!fOk)
+            return false;
+
+        CDataStream ssValue(vchValue, SER_DISK);
+        ssValue >> value;
+        bool fReadOk = !ssValue.fail();
+        if (!vchValue.empty())
+            memset(&vchValue[0], 0, vchValue.size());
+        if (!ssValue.empty())
+            memset(&ssValue[0], 0, ssValue.size());
+        return fReadOk;
+    }
+
+    template<typename K, typename T>
+    bool WriteWalletRecord(const K& key, const T& value, bool fOverwrite=true)
+    {
+        if (!WalletSQLiteRuntimeActive())
+            return Write(key, value, fOverwrite);
+
+        CDataStream ssKey(SER_DISK);
+        ssKey.reserve(1000);
+        ssKey << key;
+        CDataStream ssValue(SER_DISK);
+        ssValue.reserve(10000);
+        ssValue << value;
+
+        vector<unsigned char> vchKey(ssKey.begin(), ssKey.end());
+        vector<unsigned char> vchValue(ssValue.begin(), ssValue.end());
+        bool fOk = WalletSQLiteRuntimeWriteRecord(vchKey, vchValue, fOverwrite);
+
+        if (!vchKey.empty())
+            memset(&vchKey[0], 0, vchKey.size());
+        if (!vchValue.empty())
+            memset(&vchValue[0], 0, vchValue.size());
+        if (!ssKey.empty())
+            memset(&ssKey[0], 0, ssKey.size());
+        if (!ssValue.empty())
+            memset(&ssValue[0], 0, ssValue.size());
+        return fOk;
+    }
+
+    template<typename K>
+    bool EraseWalletRecord(const K& key)
+    {
+        if (!WalletSQLiteRuntimeActive())
+            return Erase(key);
+
+        CDataStream ssKey(SER_DISK);
+        ssKey.reserve(1000);
+        ssKey << key;
+        vector<unsigned char> vchKey(ssKey.begin(), ssKey.end());
+        bool fOk = WalletSQLiteRuntimeEraseRecord(vchKey);
+
+        if (!vchKey.empty())
+            memset(&vchKey[0], 0, vchKey.size());
+        if (!ssKey.empty())
+            memset(&ssKey[0], 0, ssKey.size());
+        return fOk;
+    }
 public:
     bool ReadName(const string& strAddress, string& strName)
     {
         strName = "";
-        return Read(make_pair(string("name"), strAddress), strName);
+        return ReadWalletRecord(make_pair(string("name"), strAddress), strName);
     }
 
     bool WriteName(const string& strAddress, const string& strName)
     {
         mapAddressBook[strAddress] = strName;
-        return Write(make_pair(string("name"), strAddress), strName);
+        return WriteWalletRecord(make_pair(string("name"), strAddress), strName);
     }
 
     bool EraseName(const string& strAddress)
     {
         mapAddressBook.erase(strAddress);
-        return Erase(make_pair(string("name"), strAddress));
+        return EraseWalletRecord(make_pair(string("name"), strAddress));
     }
 
     bool ReadTx(uint256 hash, CWalletTx& wtx)
     {
-        return Read(make_pair(string("tx"), hash), wtx);
+        return ReadWalletRecord(make_pair(string("tx"), hash), wtx);
     }
 
     bool WriteTx(uint256 hash, const CWalletTx& wtx)
     {
-        return Write(make_pair(string("tx"), hash), wtx);
+        return WriteWalletRecord(make_pair(string("tx"), hash), wtx);
     }
 
     bool EraseTx(uint256 hash)
     {
-        return Erase(make_pair(string("tx"), hash));
+        return EraseWalletRecord(make_pair(string("tx"), hash));
     }
 
     bool ReadKey(const vector<unsigned char>& vchPubKey, CPrivKey& vchPrivKey)
     {
         vchPrivKey.clear();
-        return Read(make_pair(string("key"), vchPubKey), vchPrivKey);
+        return ReadWalletRecord(make_pair(string("key"), vchPubKey), vchPrivKey);
     }
 
     bool WriteKey(const vector<unsigned char>& vchPubKey, const CPrivKey& vchPrivKey)
     {
-        return Write(make_pair(string("key"), vchPubKey), vchPrivKey, false);
+        return WriteWalletRecord(make_pair(string("key"), vchPubKey), vchPrivKey, false);
     }
 
     bool ReadDefaultKey(vector<unsigned char>& vchPubKey)
     {
         vchPubKey.clear();
-        return Read(string("defaultkey"), vchPubKey);
+        return ReadWalletRecord(string("defaultkey"), vchPubKey);
     }
 
     bool WriteDefaultKey(const vector<unsigned char>& vchPubKey)
     {
-        return Write(string("defaultkey"), vchPubKey);
+        return WriteWalletRecord(string("defaultkey"), vchPubKey);
     }
 
     // --- Deterministic (BIP32) seed ---------------------------------------
@@ -438,62 +525,62 @@ public:
     {
         vchMasterRet.clear();
         vchChainCodeRet.clear();
-        return Read(string("hdmaster"), vchMasterRet)
-            && Read(string("hdchaincode"), vchChainCodeRet);
+        return ReadWalletRecord(string("hdmaster"), vchMasterRet)
+            && ReadWalletRecord(string("hdchaincode"), vchChainCodeRet);
     }
 
     bool WriteHDMaster(const vector<unsigned char>& vchMaster, const vector<unsigned char>& vchChainCode)
     {
-        return Write(string("hdmaster"), vchMaster)
-            && Write(string("hdchaincode"), vchChainCode);
+        return WriteWalletRecord(string("hdmaster"), vchMaster)
+            && WriteWalletRecord(string("hdchaincode"), vchChainCode);
     }
 
     bool WriteWalletMinVersion(int nVersion)
     {
-        return Write(string("walletminversion"), nVersion);
+        return WriteWalletRecord(string("walletminversion"), nVersion);
     }
 
     bool WriteMasterKey(unsigned int nID, const CWalletMasterKey& kMasterKey)
     {
-        return Write(make_pair(string("mkey"), nID), kMasterKey, true);
+        return WriteWalletRecord(make_pair(string("mkey"), nID), kMasterKey, true);
     }
 
     bool WriteCryptedKey(const vector<unsigned char>& vchPubKey,
                          const vector<unsigned char>& vchCryptedSecret)
     {
-        return Write(make_pair(string("ckey"), vchPubKey), vchCryptedSecret, false);
+        return WriteWalletRecord(make_pair(string("ckey"), vchPubKey), vchCryptedSecret, false);
     }
 
     bool WriteCryptedHDMaster(const vector<unsigned char>& vchCryptedMaster,
                               const vector<unsigned char>& vchCryptedChainCode)
     {
-        return Write(string("cryptedhdmaster"), vchCryptedMaster)
-            && Write(string("cryptedhdchaincode"), vchCryptedChainCode);
+        return WriteWalletRecord(string("cryptedhdmaster"), vchCryptedMaster)
+            && WriteWalletRecord(string("cryptedhdchaincode"), vchCryptedChainCode);
     }
 
     bool WriteHDNext(unsigned int nNext)
     {
-        return Write(string("hdnext"), nNext);
+        return WriteWalletRecord(string("hdnext"), nNext);
     }
 
     bool WriteHDSchema(int nSchema)
     {
-        return Write(string("hdschema"), nSchema);
+        return WriteWalletRecord(string("hdschema"), nSchema);
     }
 
     bool WriteHDCoinType(unsigned int nCoinType)
     {
-        return Write(string("hdcointype"), nCoinType);
+        return WriteWalletRecord(string("hdcointype"), nCoinType);
     }
 
     bool WriteHDReceiveNext(unsigned int nNext)
     {
-        return Write(string("hdreceivenext"), nNext);
+        return WriteWalletRecord(string("hdreceivenext"), nNext);
     }
 
     bool WriteHDChangeNext(unsigned int nNext)
     {
-        return Write(string("hdchangenext"), nNext);
+        return WriteWalletRecord(string("hdchangenext"), nNext);
     }
 
     // Keys generated ahead of time and not yet handed out. The private key of
@@ -501,24 +588,24 @@ public:
     // record only says that this one is still unspoken for.
     bool WritePool(int64 nIndex, const vector<unsigned char>& vchPubKey)
     {
-        return Write(make_pair(string("pool"), nIndex), vchPubKey);
+        return WriteWalletRecord(make_pair(string("pool"), nIndex), vchPubKey);
     }
 
     bool ErasePool(int64 nIndex)
     {
-        return Erase(make_pair(string("pool"), nIndex));
+        return EraseWalletRecord(make_pair(string("pool"), nIndex));
     }
 
     template<typename T>
     bool ReadSetting(const string& strKey, T& value)
     {
-        return Read(make_pair(string("setting"), strKey), value);
+        return ReadWalletRecord(make_pair(string("setting"), strKey), value);
     }
 
     template<typename T>
     bool WriteSetting(const string& strKey, const T& value)
     {
-        return Write(make_pair(string("setting"), strKey), value);
+        return WriteWalletRecord(make_pair(string("setting"), strKey), value);
     }
 
     bool LoadWallet(vector<unsigned char>& vchDefaultKeyRet);

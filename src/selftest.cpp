@@ -1051,6 +1051,8 @@ static int RunWalletSQLiteSelfTest()
     int nFail = 0;
     string strPath = tmp + "/wallet.sqlite";
     string strError;
+    string strOldRuntimeDataDir;
+    bool fRestoreRuntimeDataDir = false;
 
     try
     {
@@ -1166,14 +1168,88 @@ static int RunWalletSQLiteSelfTest()
                            vchTypedPubKey == vchPubKey,
                            "SQLite wallet reads a typed defaultkey record") ? 0 : 1;
         }
+
+        {
+            string strRuntimePath = tmp + "/runtime-wallet.sqlite";
+            string strRuntimeDir = tmp + "/runtime-datadir";
+            nFail += Check(MakeDirLocal(strRuntimeDir),
+                           "SQLite runtime datadir can be created") ? 0 : 1;
+
+            {
+                CWalletDBSQLite db;
+                nFail += Check(db.Open(strRuntimePath, strError),
+                               "SQLite runtime wallet file can be created") ? 0 : 1;
+            }
+
+            string strOldDataDir = strSetDataDir;
+            strSetDataDir = strRuntimeDir;
+            strOldRuntimeDataDir = strOldDataDir;
+            fRestoreRuntimeDataDir = true;
+            bool fRuntimeOpened = WalletSQLiteRuntimeOpen(strRuntimePath, strError);
+            nFail += Check(fRuntimeOpened,
+                           "SQLite runtime wallet can be activated") ? 0 : 1;
+
+            if (fRuntimeOpened)
+            {
+                CKey key;
+                key.MakeNewKey();
+                vector<unsigned char> vchRuntimePubKey = key.GetPubKey();
+                CPrivKey vchRuntimePrivKey = key.GetPrivKey();
+                string strRuntimeAddress = PubKeyToAddress(vchRuntimePubKey);
+
+                nFail += Check(CWalletDB().WriteSetting("runtime-sqlite-setting",
+                                                        (int64)909090) &&
+                               CWalletDB().WriteDefaultKey(vchRuntimePubKey) &&
+                               CWalletDB().WriteKey(vchRuntimePubKey,
+                                                    vchRuntimePrivKey) &&
+                               CWalletDB().WriteName(strRuntimeAddress,
+                                                     "SQLite Runtime Address"),
+                               "CWalletDB writes route to active SQLite runtime") ? 0 : 1;
+
+                int64 nRuntimeSetting = 0;
+                vector<unsigned char> vchRuntimeDefaultKey;
+                CPrivKey vchRuntimeReadPrivKey;
+                string strRuntimeName;
+                nFail += Check(CWalletDB("r").ReadSetting("runtime-sqlite-setting",
+                                                          nRuntimeSetting) &&
+                               nRuntimeSetting == 909090 &&
+                               CWalletDB("r").ReadDefaultKey(vchRuntimeDefaultKey) &&
+                               vchRuntimeDefaultKey == vchRuntimePubKey &&
+                               CWalletDB("r").ReadKey(vchRuntimePubKey,
+                                                      vchRuntimeReadPrivKey) &&
+                               vchRuntimeReadPrivKey == vchRuntimePrivKey &&
+                               CWalletDB("r").ReadName(strRuntimeAddress,
+                                                       strRuntimeName) &&
+                               strRuntimeName == "SQLite Runtime Address",
+                               "CWalletDB reads route to active SQLite runtime") ? 0 : 1;
+
+                nFail += Check(CWalletDB().EraseName(strRuntimeAddress) &&
+                               !CWalletDB("r").ReadName(strRuntimeAddress,
+                                                        strRuntimeName),
+                               "CWalletDB erases route to active SQLite runtime") ? 0 : 1;
+
+                nFail += Check(!FileExists((strRuntimeDir + "/wallet.dat").c_str()),
+                               "active SQLite runtime does not create wallet.dat") ? 0 : 1;
+            }
+
+            WalletSQLiteRuntimeClose();
+            strSetDataDir = strOldDataDir;
+            fRestoreRuntimeDataDir = false;
+        }
     }
     catch (const std::exception& e)
     {
+        WalletSQLiteRuntimeClose();
+        if (fRestoreRuntimeDataDir)
+            strSetDataDir = strOldRuntimeDataDir;
         printf("  FAIL exception: %s\n", e.what());
         nFail++;
     }
     catch (...)
     {
+        WalletSQLiteRuntimeClose();
+        if (fRestoreRuntimeDataDir)
+            strSetDataDir = strOldRuntimeDataDir;
         printf("  FAIL unknown exception\n");
         nFail++;
     }
