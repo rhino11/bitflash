@@ -1230,6 +1230,31 @@ static int RunWalletSQLiteSelfTest()
 
                 nFail += Check(!FileExists((strRuntimeDir + "/wallet.dat").c_str()),
                                "active SQLite runtime does not create wallet.dat") ? 0 : 1;
+
+                // Durability: close the backend (checkpoints the WAL), reopen
+                // the same file, and confirm what CWalletDB wrote is still
+                // there. This is the write-survives-a-restart property the real
+                // -walletbackend=sqlite node depends on.
+                WalletSQLiteRuntimeClose();
+                bool fReopened =
+                    WalletSQLiteRuntimeOpen(strRuntimePath, strError);
+                nFail += Check(fReopened,
+                               "SQLite runtime wallet reopens after close") ? 0 : 1;
+                if (fReopened)
+                {
+                    int64 nPersisted = 0;
+                    CPrivKey vchPersistedPrivKey;
+                    vector<unsigned char> vchPersistedDefaultKey;
+                    nFail += Check(CWalletDB("r").ReadSetting("runtime-sqlite-setting",
+                                                              nPersisted) &&
+                                   nPersisted == 909090 &&
+                                   CWalletDB("r").ReadDefaultKey(vchPersistedDefaultKey) &&
+                                   vchPersistedDefaultKey == vchRuntimePubKey &&
+                                   CWalletDB("r").ReadKey(vchRuntimePubKey,
+                                                          vchPersistedPrivKey) &&
+                                   vchPersistedPrivKey == vchRuntimePrivKey,
+                                   "SQLite runtime writes persist across a close and reopen") ? 0 : 1;
+                }
             }
 
             WalletSQLiteRuntimeClose();
