@@ -156,7 +156,8 @@ bool CWalletDBSQLite::InitSchema(string& strError)
 
 bool CWalletDBSQLite::WriteRecord(const vector<unsigned char>& vchKey,
                                   const vector<unsigned char>& vchValue,
-                                  string& strError)
+                                  string& strError,
+                                  bool fOverwrite)
 {
     if (!pdb)
     {
@@ -170,8 +171,9 @@ bool CWalletDBSQLite::WriteRecord(const vector<unsigned char>& vchKey,
     }
 
     sqlite3_stmt* stmt = NULL;
-    const char* pszSql =
-        "INSERT OR REPLACE INTO wallet_records(key, value) VALUES(?, ?);";
+    const char* pszSql = fOverwrite
+        ? "INSERT OR REPLACE INTO wallet_records(key, value) VALUES(?, ?);"
+        : "INSERT INTO wallet_records(key, value) VALUES(?, ?);";
     int ret = sqlite3_prepare_v2(pdb, pszSql, -1, &stmt, NULL);
     if (ret != SQLITE_OK)
     {
@@ -248,6 +250,41 @@ bool CWalletDBSQLite::ReadRecord(const vector<unsigned char>& vchKey,
         SetSQLiteError(pdb, "cannot read SQLite wallet record", strError);
     sqlite3_finalize(stmt);
     return false;
+}
+
+bool CWalletDBSQLite::EraseRecord(const vector<unsigned char>& vchKey,
+                                  string& strError)
+{
+    if (!pdb)
+    {
+        strError = "SQLite wallet is not open";
+        return false;
+    }
+    if (vchKey.empty())
+    {
+        strError = "SQLite wallet record key is empty";
+        return false;
+    }
+
+    sqlite3_stmt* stmt = NULL;
+    const char* pszSql = "DELETE FROM wallet_records WHERE key = ?;";
+    int ret = sqlite3_prepare_v2(pdb, pszSql, -1, &stmt, NULL);
+    if (ret != SQLITE_OK)
+    {
+        SetSQLiteError(pdb, "cannot prepare SQLite wallet erase", strError);
+        return false;
+    }
+
+    ret = sqlite3_bind_blob(stmt, 1, &vchKey[0], (int)vchKey.size(),
+                            SQLITE_TRANSIENT);
+    if (ret == SQLITE_OK)
+        ret = sqlite3_step(stmt);
+
+    bool fOk = (ret == SQLITE_DONE);
+    if (!fOk)
+        SetSQLiteError(pdb, "cannot erase SQLite wallet record", strError);
+    sqlite3_finalize(stmt);
+    return fOk;
 }
 
 bool CWalletDBSQLite::ScanRecords(CWalletRecordVisitor& visitor,
