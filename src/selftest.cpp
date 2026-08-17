@@ -1115,6 +1115,57 @@ static int RunWalletSQLiteSelfTest()
             nFail += Check(!ssReadDefault.fail() && vchReadPubKey == vchPubKey,
                            "SQLite wallet preserves public key blobs") ? 0 : 1;
         }
+
+        {
+            CWalletDBSQLite db;
+            nFail += Check(db.Open(strPath, strError),
+                           "SQLite wallet reopens for typed records") ? 0 : 1;
+
+            nFail += Check(db.WriteTypedRecord(make_pair(string("setting"),
+                                                         string("sqlite-typed")),
+                                               (int64)777, strError),
+                           "SQLite wallet writes a typed setting record") ? 0 : 1;
+
+            int64 nTypedRead = 0;
+            nFail += Check(db.ReadTypedRecord(make_pair(string("setting"),
+                                                        string("sqlite-typed")),
+                                              nTypedRead, strError) &&
+                           nTypedRead == 777,
+                           "SQLite wallet reads a typed setting record") ? 0 : 1;
+
+            nFail += Check(!db.WriteTypedRecord(make_pair(string("setting"),
+                                                          string("sqlite-typed")),
+                                                (int64)888, strError, false),
+                           "SQLite wallet refuses typed overwrite when asked") ? 0 : 1;
+
+            nTypedRead = 0;
+            nFail += Check(db.ReadTypedRecord(make_pair(string("setting"),
+                                                        string("sqlite-typed")),
+                                              nTypedRead, strError) &&
+                           nTypedRead == 777,
+                           "SQLite wallet preserves the old typed value after overwrite refusal") ? 0 : 1;
+
+            nFail += Check(db.EraseTypedRecord(make_pair(string("setting"),
+                                                         string("sqlite-typed")),
+                                               strError),
+                           "SQLite wallet erases a typed record") ? 0 : 1;
+
+            nTypedRead = 0;
+            nFail += Check(!db.ReadTypedRecord(make_pair(string("setting"),
+                                                         string("sqlite-typed")),
+                                               nTypedRead, strError),
+                           "SQLite wallet typed erase removes the record") ? 0 : 1;
+
+            nFail += Check(db.WriteTypedRecord(string("defaultkey"), vchPubKey,
+                                               strError),
+                           "SQLite wallet writes a typed defaultkey record") ? 0 : 1;
+
+            vector<unsigned char> vchTypedPubKey;
+            nFail += Check(db.ReadTypedRecord(string("defaultkey"), vchTypedPubKey,
+                                              strError) &&
+                           vchTypedPubKey == vchPubKey,
+                           "SQLite wallet reads a typed defaultkey record") ? 0 : 1;
+        }
     }
     catch (const std::exception& e)
     {
