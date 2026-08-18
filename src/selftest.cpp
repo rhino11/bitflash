@@ -2252,6 +2252,191 @@ static int RunWalletEncryptSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// Encrypting a wallet while it runs on the SQLite backend. Unlike the Berkeley
+// DB encrypt test above, this drives the real command-line path end to end in
+// child processes: build a Berkeley DB wallet, export it to SQLite, then run
+// -walletbackend=sqlite -encryptwallet and prove the SQLite wallet came out
+// encrypted, unlockable, and with wallet.dat left untouched.
+static int RunWalletSQLiteEncryptSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-sqlite-encrypt self-test\n");
+
+    std::string tmp;
+    std::string cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+    try
+    {
+        // Build a normal Berkeley DB wallet with a recovery phrase, a key pool,
+        // and a couple of public records, then release it. Everything after this
+        // runs the real command-line paths in child processes.
+        if (!LoadWallet())
+            throw std::runtime_error("LoadWallet failed");
+
+        string strError;
+        const string strMnemonic =
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about";
+        nFail += Check(SetHDSeedFromMnemonic(strMnemonic, strError),
+                       "a phrase can be installed before encryption") ? 0 : 1;
+        TopUpKeyPool();
+
+        vector<unsigned char> vchDefaultPubKey = keyUser.GetPubKey();
+        CKey publicLabelKey;
+        publicLabelKey.MakeNewKey();
+        string strPublicLabelAddress = PubKeyToAddress(publicLabelKey.GetPubKey());
+        nFail += Check(CWalletDB().WriteName(strPublicLabelAddress, "rewrite-public-name") &&
+                       CWalletDB().WriteSetting("rewrite-public-setting", (int64)424242),
+                       "public wallet records can be written before encryption") ? 0 : 1;
+
+        CPrivKey vchDefaultPrivKey;
+        nFail += Check(GetWalletPrivKey(vchDefaultPubKey, vchDefaultPrivKey, strError),
+                       "the default private key is readable before encryption") ? 0 : 1;
+        vector<unsigned char> vchDefaultPrivBytes(vchDefaultPrivKey.begin(), vchDefaultPrivKey.end());
+        vector<unsigned char> vchPlainHDMaster = vchHDMaster;
+        vector<unsigned char> vchPlainHDChainCode = vchHDChainCode;
+
+        // Release wallet.dat so a child process can read it for the export.
+        DBFlush(true);
+
+#ifdef _WIN32
+        string strExe = cwd + "\\bitflash.exe";
+#else
+        string strExe = cwd + "/bitflash-node";
+#endif
+        string strSQLitePath = tmp + "/wallet.sqlite";
+        string strWalletDatPath = tmp + "/wallet.dat";
+        string strRightPassFile = tmp + "/right-pass.txt";
+        string strWrongPassFile = tmp + "/wrong-pass.txt";
+        nFail += Check(WriteTextFile(strRightPassFile, "btf-test-passphrase\n") &&
+                       WriteTextFile(strWrongPassFile, "wrong-passphrase\n"),
+                       "passphrase files can be written for restarted commands") ? 0 : 1;
+
+        // Step 1: export the Berkeley DB wallet to SQLite.
+        vector<string> vExportArgs;
+        vExportArgs.push_back("-datadir=" + tmp);
+        vExportArgs.push_back("-walletsqliteexport=" + strSQLitePath);
+        vExportArgs.push_back("-nogui");
+        int nExportRet = RunBitflashChild(strExe, vExportArgs);
+        nFail += Check(nExportRet == 0 && FileExists(strSQLitePath.c_str()),
+                       "the wallet exports to a SQLite file") ? 0 : 1;
+        nFail += Check(FileContainsBytes(strSQLitePath, vchDefaultPrivBytes),
+                       "the exported SQLite wallet holds the plaintext key before encryption") ? 0 : 1;
+
+        // Step 2: encrypt through the real SQLite backend command path.
+        string strEncryptOut = tmp + "/sqlite-encrypt-out.txt";
+        vector<string> vEncryptArgs;
+        vEncryptArgs.push_back("-datadir=" + tmp);
+        vEncryptArgs.push_back("-walletbackend=sqlite");
+        vEncryptArgs.push_back("-encryptwallet=@" + strRightPassFile);
+        vEncryptArgs.push_back("-nogui");
+        int nEncryptRet = RunBitflashChild(strExe, vEncryptArgs, NULL, &strEncryptOut);
+        nFail += Check(nEncryptRet == 0,
+                       "the SQLite wallet can be encrypted through -walletbackend=sqlite") ? 0 : 1;
+        nFail += Check(FileContainsText(strEncryptOut, "Wallet backend: SQLite"),
+                       "encryption took the SQLite persistence path") ? 0 : 1;
+        nFail += Check(FileContainsText(strEncryptOut, "wallet.sqlite.before-encrypt"),
+                       "the plaintext SQLite wallet is preserved as an explicit backup") ? 0 : 1;
+
+        // The encrypted SQLite wallet must no longer hold the plaintext secrets.
+        nFail += Check(!FileContainsBytes(strSQLitePath, vchDefaultPrivBytes),
+                       "the encrypted SQLite wallet no longer contains the default private key bytes") ? 0 : 1;
+        nFail += Check(!FileContainsBytes(strSQLitePath, vchPlainHDMaster),
+                       "the encrypted SQLite wallet no longer contains the HD master key bytes") ? 0 : 1;
+        nFail += Check(!FileContainsBytes(strSQLitePath, vchPlainHDChainCode),
+                       "the encrypted SQLite wallet no longer contains the HD chain-code bytes") ? 0 : 1;
+
+        // The Berkeley DB wallet.dat is a separate file: the SQLite encrypt path
+        // must never touch it, so its plaintext key is still exactly there.
+        nFail += Check(FileContainsBytes(strWalletDatPath, vchDefaultPrivBytes),
+                       "the original Berkeley DB wallet.dat is left untouched by the SQLite encrypt") ? 0 : 1;
+
+        // Step 3: a locked encrypted SQLite wallet reports that phrase coverage
+        // needs an unlock, exactly as the Berkeley DB path does (exit code 2).
+        string strLockedAudit = tmp + "/locked-recovery-audit.txt";
+        vector<string> vLockedArgs;
+        vLockedArgs.push_back("-datadir=" + tmp);
+        vLockedArgs.push_back("-walletbackend=sqlite");
+        vLockedArgs.push_back("-recoveryaudit");
+        vLockedArgs.push_back("-nogui");
+        int nLockedRet = RunBitflashChild(strExe, vLockedArgs, NULL, &strLockedAudit);
+        nFail += Check(nLockedRet == 2 &&
+                       FileContainsText(strLockedAudit, "recovery phrase: encrypted, unlock wallet to audit"),
+                       "a locked encrypted SQLite wallet reports that phrase coverage needs unlock") ? 0 : 1;
+
+        // The wrong passphrase is rejected and reveals nothing.
+        string strWrongDump = tmp + "/wrong-dump.txt";
+        vector<string> vWrongArgs;
+        vWrongArgs.push_back("-datadir=" + tmp);
+        vWrongArgs.push_back("-walletbackend=sqlite");
+        vWrongArgs.push_back("-walletpassphrase=@" + strWrongPassFile);
+        vWrongArgs.push_back("-dumpwallet=" + strWrongDump);
+        vWrongArgs.push_back("-nogui");
+        int nWrongRet = RunBitflashChild(strExe, vWrongArgs);
+        nFail += Check(nWrongRet != 0 && !FileExists(strWrongDump.c_str()),
+                       "a restarted SQLite wallet rejects the wrong passphrase") ? 0 : 1;
+
+        // The right passphrase unlocks and can dump the original key.
+        string strRightDump = tmp + "/right-dump.txt";
+        vector<string> vRightArgs;
+        vRightArgs.push_back("-datadir=" + tmp);
+        vRightArgs.push_back("-walletbackend=sqlite");
+        vRightArgs.push_back("-walletpassphrase=@" + strRightPassFile);
+        vRightArgs.push_back("-dumpwallet=" + strRightDump);
+        vRightArgs.push_back("-nogui");
+        int nRightRet = RunBitflashChild(strExe, vRightArgs);
+        nFail += Check(nRightRet == 0 && FileExists(strRightDump.c_str()),
+                       "a restarted SQLite wallet unlocks with the right passphrase") ? 0 : 1;
+        nFail += Check(FileContainsText(strRightDump, HexStrLocal(vchDefaultPrivBytes)),
+                       "the unlocked SQLite wallet decrypts and dumps the original key") ? 0 : 1;
+
+        // The recovery phrase survives the encryption.
+        string strAudit = tmp + "/recovery-audit.txt";
+        vector<string> vAuditArgs;
+        vAuditArgs.push_back("-datadir=" + tmp);
+        vAuditArgs.push_back("-walletbackend=sqlite");
+        vAuditArgs.push_back("-walletpassphrase=@" + strRightPassFile);
+        vAuditArgs.push_back("-recoveryaudit");
+        vAuditArgs.push_back("-nogui");
+        int nAuditRet = RunBitflashChild(strExe, vAuditArgs, NULL, &strAudit);
+        nFail += Check(nAuditRet == 0 &&
+                       FileContainsText(strAudit, "recovery phrase: present"),
+                       "the encrypted SQLite wallet still has its recovery phrase") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunWalletPortabilitySelfTest()
 {
     fflush(stdout);
@@ -2981,6 +3166,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletCryptoSelfTest();
     if (name == "wallet-encrypt")
         return RunWalletEncryptSelfTest();
+    if (name == "wallet-sqlite-encrypt")
+        return RunWalletSQLiteEncryptSelfTest();
     if (name == "wallet-portability")
         return RunWalletPortabilitySelfTest();
     if (name == "net-message")
@@ -2997,6 +3184,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }

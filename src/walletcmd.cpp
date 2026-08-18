@@ -1365,6 +1365,11 @@ int CmdEncryptWallet(const std::string& strPassphrase)
 {
     AttachTerminal();
 
+    // Capture the backend now: under SQLite, EncryptWallet() closes the runtime
+    // store to swap the file, so WalletSQLiteRuntimeActive() reads false by the
+    // time we would decide whether to purge Berkeley DB logs below.
+    bool fSQLiteBackend = WalletSQLiteRuntimeActive();
+
     string strBackup;
     string strError;
     if (!EncryptWallet(strPassphrase, strBackup, strError))
@@ -1375,6 +1380,8 @@ int CmdEncryptWallet(const std::string& strPassphrase)
     }
 
     printf("Wallet encrypted.\n");
+    if (fSQLiteBackend)
+        printf("Wallet backend: SQLite (wallet.sqlite).\n");
     printf("The old unencrypted wallet was moved to:\n");
     printf("  %s\n", strBackup.c_str());
     printf("That backup still contains private keys in plain text. Move it offline or\n");
@@ -1387,7 +1394,13 @@ int CmdEncryptWallet(const std::string& strPassphrase)
     // them. Closing the environment and dropping the logs is the last step of
     // encrypting, not an optimisation -- our own backup advice is to copy the
     // whole directory, and following it otherwise carries the keys along.
-    PurgeDbEnvironmentLogs();
+    //
+    // The SQLite backend has no Berkeley DB environment behind the wallet, and
+    // EncryptWallet() already closed and swapped the SQLite store; there is
+    // nothing to purge, and calling into the environment here would only open
+    // one needlessly.
+    if (!fSQLiteBackend)
+        PurgeDbEnvironmentLogs();
     return 0;
 }
 
