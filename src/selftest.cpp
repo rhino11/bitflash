@@ -1231,6 +1231,43 @@ static int RunWalletSQLiteSelfTest()
                 nFail += Check(!FileExists((strRuntimeDir + "/wallet.dat").c_str()),
                                "active SQLite runtime does not create wallet.dat") ? 0 : 1;
 
+                // Transaction bracket: a rolled-back group leaves nothing, a
+                // committed group persists. This is the all-or-nothing that
+                // WriteHDMaster relies on so a half-written seed cannot survive
+                // a failure between its two records.
+                bool fTxnBegan = WalletSQLiteRuntimeBeginTxn();
+                bool fTxnWrote = fTxnBegan &&
+                    CWalletDB().WriteSetting("runtime-txn-rollback", (int64)111);
+                if (fTxnBegan)
+                    WalletSQLiteRuntimeRollbackTxn();
+                nFail += Check(fTxnBegan && fTxnWrote,
+                               "a SQLite runtime transaction opens and rolls back") ? 0 : 1;
+                int64 nRolledBack = 0;
+                nFail += Check(!CWalletDB("r").ReadSetting("runtime-txn-rollback",
+                                                           nRolledBack),
+                               "a rolled-back SQLite runtime write leaves no record") ? 0 : 1;
+
+                bool fCommitOk = WalletSQLiteRuntimeBeginTxn() &&
+                    CWalletDB().WriteSetting("runtime-txn-commit", (int64)222) &&
+                    WalletSQLiteRuntimeCommitTxn();
+                int64 nCommitted = 0;
+                nFail += Check(fCommitOk &&
+                               CWalletDB("r").ReadSetting("runtime-txn-commit",
+                                                          nCommitted) &&
+                               nCommitted == 222,
+                               "a committed SQLite runtime write persists") ? 0 : 1;
+
+                // WriteHDMaster brackets its two records in that transaction;
+                // both halves of the seed must land.
+                vector<unsigned char> vchTxnMaster(32, 0x5a);
+                vector<unsigned char> vchTxnChainCode(32, 0xa5);
+                vector<unsigned char> vchReadMaster, vchReadChainCode;
+                nFail += Check(CWalletDB().WriteHDMaster(vchTxnMaster, vchTxnChainCode) &&
+                               CWalletDB("r").ReadHDMaster(vchReadMaster, vchReadChainCode) &&
+                               vchReadMaster == vchTxnMaster &&
+                               vchReadChainCode == vchTxnChainCode,
+                               "WriteHDMaster commits both halves of the seed under SQLite") ? 0 : 1;
+
                 // Durability: close the backend (checkpoints the WAL), reopen
                 // the same file, and confirm what CWalletDB wrote is still
                 // there. This is the write-survives-a-restart property the real

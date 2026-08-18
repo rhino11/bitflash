@@ -164,6 +164,40 @@ bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey)
     return pWalletSQLiteRuntime->EraseRecord(vchKey, strError);
 }
 
+// Transaction bracket for the SQLite runtime. When the SQLite backend is not
+// active these are no-ops that succeed, so a caller can wrap a group of related
+// writes and Berkeley DB keeps its existing per-write behaviour unchanged while
+// SQLite gets all-or-nothing.
+bool WalletSQLiteRuntimeBeginTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return true;
+    string strError;
+    if (pWalletSQLiteRuntime->BeginTransaction(strError))
+        return true;
+    printf("WalletSQLiteRuntimeBeginTxn() : %s\n", strError.c_str());
+    return false;
+}
+
+bool WalletSQLiteRuntimeCommitTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return true;
+    string strError;
+    if (pWalletSQLiteRuntime->CommitTransaction(strError))
+        return true;
+    printf("WalletSQLiteRuntimeCommitTxn() : %s\n", strError.c_str());
+    return false;
+}
+
+void WalletSQLiteRuntimeRollbackTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return;
+    string strError;
+    pWalletSQLiteRuntime->RollbackTransaction(strError);
+}
+
 
 CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
 {
