@@ -1496,6 +1496,22 @@ bool LoadWalletFromSQLiteRuntime(const string& strPath)
         return false;
     }
 
+    // Refuse an empty or non-wallet SQLite file up front, with a message that
+    // names the likely cause. FinishLoadedWallet below already rejects a
+    // missing default key (it is the fMayCreateDefaultKey=false path), but its
+    // wording -- "no usable default public key" -- reads as corruption when the
+    // real story is usually "this file was never an exported wallet". A blank
+    // wallet.sqlite left by a typo or a half-run export should say so.
+    if (visitor.vchDefaultKey.empty())
+    {
+        WalletSQLiteRuntimeClose();
+        strWalletLoadError =
+            "SQLite wallet has no default key record; it may be empty or not a "
+            "wallet export. Create it with -walletsqliteexport.";
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
     if (!ReconcileLoadedWalletMetadata(visitor.fHaveStoredMineMode,
                                        visitor.fHaveStoredHDCoinType))
     {

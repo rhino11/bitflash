@@ -625,6 +625,21 @@ int main(int argc, char* argv[])
         string strWalletSQLite =
             argval2(argc, argv, "/walletsqlite", "-walletsqlite");
 
+        // A misspelled backend must not fall through to Berkeley DB silently --
+        // someone who typed -walletbackend=sqlit meant to run on SQLite, and
+        // opening wallet.dat instead of telling them is the wrong surprise.
+        if (!strWalletBackend.empty() &&
+            strWalletBackend != "sqlite" && strWalletBackend != "bdb")
+        {
+            AttachTerminal();
+            FatalStartupError(fHeadlessStartup,
+                strprintf("Unknown wallet backend '%s'.", strWalletBackend.c_str()),
+                "Use -walletbackend=sqlite for the experimental SQLite backend, "
+                "or omit -walletbackend (or -walletbackend=bdb) to use the "
+                "default Berkeley DB wallet.dat.");
+            return 1;
+        }
+
         if (strWalletBackend == "sqlite")
         {
             // Opt-in, experimental. The node runs on <datadir>/wallet.sqlite and
