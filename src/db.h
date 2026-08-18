@@ -357,7 +357,7 @@ private:
 // peer discovery is entirely Nostr/.btf-based now.
 
 bool WalletSQLiteRuntimeActive();
-bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet);
+bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet, bool fMustExist=true);
 void WalletSQLiteRuntimeClose();
 bool WalletSQLiteRuntimeReadRecord(const vector<unsigned char>& vchKey,
                                    vector<unsigned char>& vchValueRet);
@@ -370,6 +370,9 @@ bool WalletSQLiteRuntimeCommitTxn();
 void WalletSQLiteRuntimeRollbackTxn();
 bool WalletSQLiteRuntimeOpenReadOnly(const string& strPath, string& strErrorRet);
 bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet);
+string ReadWalletBackendMarker();
+bool WriteWalletBackendMarker(const string& strBackend);
+bool CreateNewSQLiteWallet(const string& strPath);
 
 
 

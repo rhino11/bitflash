@@ -911,6 +911,7 @@ static int RunWalletStorageSanitySelfTest()
             vCreateArgs.push_back("-datadir=" + strScenarioDir);
             vCreateArgs.push_back("-nomanagedtor");
             vCreateArgs.push_back("-nogui");
+            vCreateArgs.push_back("-walletbackend=bdb");   // this suite is about wallet.dat
             vCreateArgs.push_back("-newphrase");
             int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
             nFail += Check(nCreateRet == 0 &&
@@ -1474,6 +1475,7 @@ static int RunWalletSQLiteMigrationSelfTest()
         vCreateArgs.push_back("-datadir=" + strWalletDir);
         vCreateArgs.push_back("-nomanagedtor");
         vCreateArgs.push_back("-nogui");
+        vCreateArgs.push_back("-walletbackend=bdb");   // migrate FROM a Berkeley DB wallet.dat
         vCreateArgs.push_back("-newphrase");
         int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
         nFail += Check(nCreateRet == 0 &&
@@ -2534,6 +2536,134 @@ static int RunWalletSQLiteEncryptSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// Backend resolution when no -walletbackend flag is given: a fresh install
+// starts on SQLite (the new default), an existing wallet.dat stays on Berkeley
+// DB, the persistent marker overrides the default, and an explicit flag
+// overrides everything. Each scenario runs a real child process.
+static int RunWalletBackendDefaultSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-backend-default self-test\n");
+
+    std::string tmp, cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+#ifdef _WIN32
+    string strExe = cwd + "\\bitflash.exe";
+#else
+    string strExe = cwd + "/bitflash-node";
+#endif
+
+    try
+    {
+        // 1. Fresh datadir, no flag -> new wallet.sqlite, marker "sqlite", no wallet.dat.
+        string d1 = tmp + "/fresh";
+        nFail += Check(MakeDirLocal(d1), "fresh scenario dir can be created") ? 0 : 1;
+        vector<string> a1;
+        a1.push_back("-datadir=" + d1);
+        a1.push_back("-nomanagedtor");
+        a1.push_back("-nogui");
+        a1.push_back("-newaddress");
+        int r1 = RunBitflashChild(strExe, a1);
+        nFail += Check(r1 == 0 &&
+                       FileExists((d1 + "/wallet.sqlite").c_str()) &&
+                       !FileExists((d1 + "/wallet.dat").c_str()) &&
+                       FileContainsText(d1 + "/wallet-backend", "sqlite"),
+                       "a fresh install starts on SQLite (new default) and records the marker") ? 0 : 1;
+
+        // 1b. Second run reuses it, still SQLite, still no wallet.dat.
+        int r1b = RunBitflashChild(strExe, a1);
+        nFail += Check(r1b == 0 &&
+                       FileExists((d1 + "/wallet.sqlite").c_str()) &&
+                       !FileExists((d1 + "/wallet.dat").c_str()),
+                       "the recorded SQLite choice survives a restart") ? 0 : 1;
+
+        // 2. Existing wallet.dat, no flag -> stays on Berkeley DB.
+        string d2 = tmp + "/existing-bdb";
+        nFail += Check(MakeDirLocal(d2), "existing-bdb scenario dir can be created") ? 0 : 1;
+        vector<string> a2c;
+        a2c.push_back("-datadir=" + d2);
+        a2c.push_back("-nomanagedtor");
+        a2c.push_back("-nogui");
+        a2c.push_back("-walletbackend=bdb");
+        a2c.push_back("-newphrase");
+        RunBitflashChild(strExe, a2c);
+        vector<string> a2;
+        a2.push_back("-datadir=" + d2);
+        a2.push_back("-nomanagedtor");
+        a2.push_back("-nogui");
+        a2.push_back("-newaddress");
+        int r2 = RunBitflashChild(strExe, a2);
+        nFail += Check(r2 == 0 &&
+                       FileExists((d2 + "/wallet.dat").c_str()) &&
+                       !FileExists((d2 + "/wallet.sqlite").c_str()),
+                       "an existing wallet.dat keeps a flagless start on Berkeley DB") ? 0 : 1;
+
+        // 3. Marker "bdb" forces Berkeley DB even on a fresh datadir.
+        string d3 = tmp + "/marker-bdb";
+        nFail += Check(MakeDirLocal(d3), "marker-bdb scenario dir can be created") ? 0 : 1;
+        nFail += Check(WriteTextFile(d3 + "/wallet-backend", "bdb\n"),
+                       "a bdb marker can be written") ? 0 : 1;
+        vector<string> a3;
+        a3.push_back("-datadir=" + d3);
+        a3.push_back("-nomanagedtor");
+        a3.push_back("-nogui");
+        a3.push_back("-newaddress");
+        int r3 = RunBitflashChild(strExe, a3);
+        nFail += Check(r3 == 0 &&
+                       FileExists((d3 + "/wallet.dat").c_str()) &&
+                       !FileExists((d3 + "/wallet.sqlite").c_str()),
+                       "a bdb marker forces Berkeley DB on a fresh datadir") ? 0 : 1;
+
+        // 4. Explicit -walletbackend=bdb on a fresh datadir -> wallet.dat.
+        string d4 = tmp + "/explicit-bdb";
+        nFail += Check(MakeDirLocal(d4), "explicit-bdb scenario dir can be created") ? 0 : 1;
+        vector<string> a4;
+        a4.push_back("-datadir=" + d4);
+        a4.push_back("-nomanagedtor");
+        a4.push_back("-nogui");
+        a4.push_back("-walletbackend=bdb");
+        a4.push_back("-newaddress");
+        int r4 = RunBitflashChild(strExe, a4);
+        nFail += Check(r4 == 0 &&
+                       FileExists((d4 + "/wallet.dat").c_str()) &&
+                       !FileExists((d4 + "/wallet.sqlite").c_str()),
+                       "an explicit -walletbackend=bdb creates wallet.dat on a fresh datadir") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunWalletPortabilitySelfTest()
 {
     fflush(stdout);
@@ -2576,6 +2706,7 @@ static int RunWalletPortabilitySelfTest()
         vCreateArgs.push_back("-datadir=" + strOriginal);
         vCreateArgs.push_back("-nomanagedtor");
         vCreateArgs.push_back("-nogui");
+        vCreateArgs.push_back("-walletbackend=bdb");   // this suite is about wallet.dat portability
         vCreateArgs.push_back("-newphrase");
         int nCreateRet = RunBitflashChild(strExe, vCreateArgs, NULL, &strCreateOut);
         nFail += Check(nCreateRet == 0 &&
@@ -3265,6 +3396,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletEncryptSelfTest();
     if (name == "wallet-sqlite-encrypt")
         return RunWalletSQLiteEncryptSelfTest();
+    if (name == "wallet-backend-default")
+        return RunWalletBackendDefaultSelfTest();
     if (name == "wallet-portability")
         return RunWalletPortabilitySelfTest();
     if (name == "net-message")
@@ -3281,6 +3414,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }

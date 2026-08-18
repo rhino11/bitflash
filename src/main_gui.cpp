@@ -743,14 +743,80 @@ int main(int argc, char* argv[])
             DBFlush(true);
             return 0;
         }
-        else if (!LoadWallet())
+        else if (strWalletBackend == "bdb")
         {
-            // LoadWallet() explains itself into strWalletLoadError when it
-            // knows why -- an unsupported wallet format, for one, which is the
-            // case this whole path exists to make visible.
-            FatalStartupError(fHeadlessStartup, "Cannot open wallet.dat.",
-                              strWalletLoadError);
-            return 1;
+            // Explicit -walletbackend=bdb overrides the marker and the default:
+            // force Berkeley DB (LoadWallet creates wallet.dat if none exists).
+            if (!LoadWallet())
+            {
+                FatalStartupError(fHeadlessStartup, "Cannot open wallet.dat.",
+                                  strWalletLoadError);
+                return 1;
+            }
+        }
+        else
+        {
+            // No explicit -walletbackend on the command line. Resolve it from
+            // the persistent marker, then defaults: an existing wallet.sqlite
+            // stays on SQLite, an existing wallet.dat stays on Berkeley DB (the
+            // GUI offers to convert), and a fresh install starts on SQLite --
+            // the new default. wallet.dat is never touched by any of this.
+            string strSQLitePath = GetAppDir() + "/wallet.sqlite";
+            bool fSQLiteExists = FileExists(strSQLitePath.c_str());
+            bool fWalletDatExists = FileExists((GetAppDir() + "/wallet.dat").c_str());
+            string strMarker = ReadWalletBackendMarker();
+
+            bool fUseSQLite = false;
+            bool fCreateSQLite = false;
+            if (strMarker == "sqlite")
+            {
+                if (fSQLiteExists)          fUseSQLite = true;
+                else if (fWalletDatExists)  fUseSQLite = false;  // marker stale; real wallet is BDB
+                else { fUseSQLite = true; fCreateSQLite = true; }
+            }
+            else if (strMarker == "bdb")
+            {
+                fUseSQLite = false;
+            }
+            else  // no marker recorded yet
+            {
+                if (fSQLiteExists && !fWalletDatExists) fUseSQLite = true;
+                else if (fWalletDatExists)              fUseSQLite = false;
+                else { fUseSQLite = true; fCreateSQLite = true; }
+            }
+
+            if (fUseSQLite)
+            {
+                AttachTerminal();
+                bool fOk = fCreateSQLite
+                    ? CreateNewSQLiteWallet(strSQLitePath)
+                    : LoadWalletFromSQLiteRuntime(strSQLitePath);
+                if (!fOk)
+                {
+                    FatalStartupError(fHeadlessStartup,
+                        fCreateSQLite ? "Cannot create the SQLite wallet."
+                                      : "Cannot open the SQLite wallet.",
+                        strWalletLoadError);
+                    return 1;
+                }
+                // Record the choice so it is stable from here on.
+                if (ReadWalletBackendMarker() != "sqlite")
+                    WriteWalletBackendMarker("sqlite");
+                fprintf(stderr, "Wallet backend: SQLite\n  %s\n%s",
+                        strSQLitePath.c_str(),
+                        fCreateSQLite ? "A new wallet was created here.\n" : "");
+                fflush(stderr);
+                // Fall through and run the node; CWalletDB routes to this file.
+            }
+            else if (!LoadWallet())
+            {
+                // LoadWallet() explains itself into strWalletLoadError when it
+                // knows why -- an unsupported wallet format, for one, which is
+                // the case this whole path exists to make visible.
+                FatalStartupError(fHeadlessStartup, "Cannot open wallet.dat.",
+                                  strWalletLoadError);
+                return 1;
+            }
         }
 
         // After the block index, so there is a chain to compare the wallet
