@@ -1070,10 +1070,109 @@ public:
 
 } // namespace
 
+// Export the currently-loaded wallet to a SQLite file. Shared by the
+// -walletsqliteexport command and the GUI conversion wizard: opens the
+// destination, copies every record inside one transaction, checkpoints, and
+// verifies the stored count matches. Returns false with strErrorRet set on any
+// failure and leaves no partial file behind; the source wallet is only read.
+bool ExportActiveWalletToSQLite(const std::string& strDest, int& nCopiedRet,
+                                std::string& strErrorRet)
+{
+    nCopiedRet = 0;
+    if (strDest.empty())
+    {
+        strErrorRet = "no SQLite export path was given";
+        return false;
+    }
+    if (FileExists(strDest.c_str()))
+    {
+        strErrorRet = strprintf("refusing to overwrite existing file: %s", strDest.c_str());
+        return false;
+    }
+
+    CWalletDBSQLite db;
+    if (!db.Open(strDest, strErrorRet))
+    {
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+    if (!db.BeginTransaction(strErrorRet))
+    {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+
+    CWalletSQLiteExportVisitor visitor(db, nCopiedRet);
+    if (!ScanWalletRecords(visitor, strErrorRet))
+    {
+        string strRollbackError;
+        db.RollbackTransaction(strRollbackError);
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+    if (!db.CommitTransaction(strErrorRet) || !db.Checkpoint(strErrorRet))
+    {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+
+    int nCount = 0;
+    if (!db.CountRecords(nCount, strErrorRet))
+    {
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+    if (nCount != nCopiedRet)
+    {
+        strErrorRet = strprintf("export count mismatch: copied %d, stored %d",
+                                nCopiedRet, nCount);
+        db.Close();
+        RemoveSQLiteExportFiles(strDest);
+        return false;
+    }
+    db.Close();
+    return true;
+}
+
+// Convert the running Berkeley DB wallet to SQLite for the GUI wizard: export
+// wallet.dat to <datadir>/wallet.sqlite, then record the backend marker so the
+// next start opens SQLite. wallet.dat is never modified -- it stays as the
+// fallback. Refuses if already on SQLite or if a wallet.sqlite already exists.
+bool DoConvertWalletToSQLite(int& nCopiedRet, std::string& strErrorRet)
+{
+    nCopiedRet = 0;
+    if (WalletSQLiteRuntimeActive())
+    {
+        strErrorRet = "this wallet is already on the SQLite backend";
+        return false;
+    }
+    string strDest = GetAppDir() + "/wallet.sqlite";
+    if (FileExists(strDest.c_str()))
+    {
+        strErrorRet = strprintf("a SQLite wallet already exists at %s", strDest.c_str());
+        return false;
+    }
+    if (!ExportActiveWalletToSQLite(strDest, nCopiedRet, strErrorRet))
+        return false;
+    if (!WriteWalletBackendMarker("sqlite"))
+    {
+        strErrorRet = "the wallet was exported but the backend choice could not be saved";
+        return false;
+    }
+    return true;
+}
+
 int CmdWalletSQLiteExport(const std::string& strDest)
 {
     AttachTerminal();
 
+    // Keep the command's own specific messages for the two conditions the
+    // shared helper folds into a generic error, so scripts and the tests that
+    // read this output see the same wording as before.
     if (strDest.empty())
     {
         fprintf(stderr, "Missing SQLite wallet export path.\n");
@@ -1086,63 +1185,11 @@ int CmdWalletSQLiteExport(const std::string& strDest)
         return 1;
     }
 
-    string strError;
-    CWalletDBSQLite db;
-    if (!db.Open(strDest, strError))
-    {
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot open SQLite wallet export: %s\n", strError.c_str());
-        return 1;
-    }
-    if (!db.BeginTransaction(strError))
-    {
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot begin SQLite wallet export: %s\n", strError.c_str());
-        return 1;
-    }
-
     int nCopied = 0;
-    CWalletSQLiteExportVisitor visitor(db, nCopied);
-    if (!ScanWalletRecords(visitor, strError))
+    string strError;
+    if (!ExportActiveWalletToSQLite(strDest, nCopied, strError))
     {
-        string strRollbackError;
-        db.RollbackTransaction(strRollbackError);
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot export wallet.dat to SQLite: %s\n", strError.c_str());
-        return 1;
-    }
-    if (!db.CommitTransaction(strError))
-    {
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot commit SQLite wallet export: %s\n", strError.c_str());
-        return 1;
-    }
-    if (!db.Checkpoint(strError))
-    {
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot checkpoint SQLite wallet export: %s\n", strError.c_str());
-        return 1;
-    }
-
-    int nCount = 0;
-    if (!db.CountRecords(nCount, strError))
-    {
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "Cannot verify SQLite wallet export count: %s\n",
-                strError.c_str());
-        return 1;
-    }
-    if (nCount != nCopied)
-    {
-        db.Close();
-        RemoveSQLiteExportFiles(strDest);
-        fprintf(stderr, "SQLite wallet export count mismatch: copied %d, stored %d\n",
-                nCopied, nCount);
+        fprintf(stderr, "Cannot export wallet to SQLite: %s\n", strError.c_str());
         return 1;
     }
 

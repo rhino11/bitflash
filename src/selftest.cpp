@@ -2664,6 +2664,110 @@ static int RunWalletBackendDefaultSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// The wizard's conversion action, headless: build a Berkeley DB wallet, run
+// DoConvertWalletToSQLite() (what the GUI button calls), and prove it produced a
+// usable wallet.sqlite + backend marker while leaving wallet.dat untouched, then
+// that a flagless restart opens the converted SQLite wallet.
+static int RunWalletConvertSelfTest()
+{
+    fflush(stdout);
+    printf("wallet-convert self-test\n");
+
+    std::string tmp, cwd;
+    if (!MakeTempDir(tmp))
+    {
+        printf("  FAIL could not create a temporary data directory\n");
+        return 1;
+    }
+    if (!GetCurrentDir(cwd) || !SetCurrentDir(tmp))
+    {
+        printf("  FAIL could not move into the temporary data directory\n");
+        RemoveTree(tmp);
+        return 1;
+    }
+
+    int nFail = 0;
+    strSetDataDir = tmp;
+    printf("  temp datadir: %s\n", tmp.c_str());
+
+#ifdef _WIN32
+    string strExe = cwd + "\\bitflash.exe";
+#else
+    string strExe = cwd + "/bitflash-node";
+#endif
+
+    try
+    {
+        if (!LoadWallet())
+            throw std::runtime_error("LoadWallet failed");
+
+        string strError;
+        nFail += Check(SetHDSeedFromMnemonic(
+                           "abandon abandon abandon abandon abandon abandon abandon "
+                           "abandon abandon abandon abandon about", strError),
+                       "a phrase can be installed before conversion") ? 0 : 1;
+        TopUpKeyPool();
+
+        vector<unsigned char> vchDefaultPubKey = keyUser.GetPubKey();
+        CPrivKey vchDefaultPrivKey;
+        nFail += Check(GetWalletPrivKey(vchDefaultPubKey, vchDefaultPrivKey, strError),
+                       "the default private key is readable before conversion") ? 0 : 1;
+        vector<unsigned char> vchDefaultPrivBytes(vchDefaultPrivKey.begin(),
+                                                  vchDefaultPrivKey.end());
+
+        // The conversion action the GUI button invokes.
+        int nCopied = 0;
+        string strConvertError;
+        bool fConverted = DoConvertWalletToSQLite(nCopied, strConvertError);
+        nFail += Check(fConverted && nCopied > 0,
+                       "DoConvertWalletToSQLite exports the wallet") ? 0 : 1;
+        nFail += Check(FileExists((tmp + "/wallet.sqlite").c_str()) &&
+                       FileContainsText(tmp + "/wallet-backend", "sqlite"),
+                       "conversion writes wallet.sqlite and records the sqlite marker") ? 0 : 1;
+        nFail += Check(FileContainsBytes(tmp + "/wallet.dat", vchDefaultPrivBytes),
+                       "wallet.dat is left untouched by the conversion") ? 0 : 1;
+
+        // Idempotence guard: a second conversion refuses rather than overwrite.
+        int nCopied2 = 0;
+        string strSecondError;
+        nFail += Check(!DoConvertWalletToSQLite(nCopied2, strSecondError),
+                       "a second conversion refuses to overwrite wallet.sqlite") ? 0 : 1;
+
+        DBFlush(true);
+
+        // A flagless restart now opens the converted SQLite wallet (the marker
+        // routes it) and finds the same recovery phrase.
+        string strAudit = tmp + "/converted-recovery-audit.txt";
+        vector<string> vAuditArgs;
+        vAuditArgs.push_back("-datadir=" + tmp);
+        vAuditArgs.push_back("-nomanagedtor");
+        vAuditArgs.push_back("-nogui");
+        vAuditArgs.push_back("-recoveryaudit");
+        int nAuditRet = RunBitflashChild(strExe, vAuditArgs, NULL, &strAudit);
+        nFail += Check(nAuditRet == 0 &&
+                       FileContainsText(strAudit, "recovery phrase: present"),
+                       "a flagless restart opens the converted SQLite wallet") ? 0 : 1;
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    DBFlush(true);
+    SetCurrentDir(cwd);
+    RemoveTree(tmp);
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunWalletPortabilitySelfTest()
 {
     fflush(stdout);
@@ -3398,6 +3502,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletSQLiteEncryptSelfTest();
     if (name == "wallet-backend-default")
         return RunWalletBackendDefaultSelfTest();
+    if (name == "wallet-convert")
+        return RunWalletConvertSelfTest();
     if (name == "wallet-portability")
         return RunWalletPortabilitySelfTest();
     if (name == "net-message")
@@ -3414,6 +3520,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
