@@ -1627,11 +1627,23 @@ void ThreadSocketHandler2(void* parg)
                 // node or a deliberate connection-exhaustion flood -- must not
                 // be able to take the whole table, which is what starved the
                 // relays.
+                //
+                // Loopback is exempt. Onion peers reach a managed-Tor node
+                // through its local hidden-service listener, so every one of
+                // them accepts as 127.0.0.1; capping loopback would cap all
+                // inbound onion peers as a single group, which is the opposite
+                // of where the network is headed. The global MAX_CONNECTIONS
+                // still bounds the total, and the direct-IP flood this defends
+                // against never arrives over loopback. (Per-onion-identity
+                // limiting, once a peer's identity is known past accept(), is
+                // the right tool for onion and is left for later.)
+                bool fLoopback = (addr.GetByte(3) == 127);
                 unsigned int nFromThisIP = 0;
-                CRITICAL_BLOCK(cs_vNodes)
-                    for (vector<CNode*>::iterator it = vNodes.begin(); it != vNodes.end(); ++it)
-                        if ((*it)->addr.ip == addr.ip)
-                            nFromThisIP++;
+                if (!fLoopback)
+                    CRITICAL_BLOCK(cs_vNodes)
+                        for (vector<CNode*>::iterator it = vNodes.begin(); it != vNodes.end(); ++it)
+                            if ((*it)->addr.ip == addr.ip)
+                                nFromThisIP++;
 
                 if (nNodes >= MAX_CONNECTIONS)
                 {
@@ -1639,7 +1651,7 @@ void ThreadSocketHandler2(void* parg)
                              addr.ToString().c_str(), nNodes);
                     BtfCloseSocket(hSocket);
                 }
-                else if (nFromThisIP >= MAX_CONNECTIONS_PER_IP)
+                else if (!fLoopback && nFromThisIP >= MAX_CONNECTIONS_PER_IP)
                 {
                     LogPrint("net", "refusing connection from %s, already %u from that address\n",
                              addr.ToString().c_str(), nFromThisIP);

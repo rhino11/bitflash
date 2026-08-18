@@ -119,6 +119,14 @@ static const unsigned int MAX_CONNECTIONS = 125;
 // needs only a handful; 32 leaves generous room while denying any one address
 // more than a quarter of the table. The firewall connlimit on the relays does
 // the same thing a layer lower; this makes every build carry the defense.
+//
+// Loopback (127.0.0.0/8) is exempt in the accept path. A managed-Tor node
+// receives every inbound onion peer over its local hidden-service listener, so
+// they all appear as 127.0.0.1 -- capping loopback would cap onion peers as a
+// group, which is exactly wrong for a network moving toward onion-only. The
+// global MAX_CONNECTIONS still bounds the total; a per-onion-identity limit,
+// applied once identity is known after accept(), is the right future tool for
+// onion floods.
 static const unsigned int MAX_CONNECTIONS_PER_IP = 32;
 
 // A node marked for disconnect is normally held until its buffers drain, so
