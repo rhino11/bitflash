@@ -524,19 +524,57 @@ int main(int argc, char* argv[])
     // explain wallet.dat states that the normal wallet loader may refuse.
     string strWalletStorageAuditJson =
         argval2(argc, argv, "/walletstorageauditjson", "-walletstorageauditjson");
-    if (arg(argc,argv,"/walletstorageaudit") ||
-        arg(argc,argv,"-walletstorageaudit") ||
-        !strWalletStorageAuditJson.empty())
+    bool fDiagWantsAudit = arg(argc,argv,"/walletstorageaudit") ||
+                           arg(argc,argv,"-walletstorageaudit") ||
+                           !strWalletStorageAuditJson.empty();
+    bool fDiagWantsCheck = arg(argc,argv,"/walletstoragecheck") ||
+                           arg(argc,argv,"-walletstoragecheck");
+
+    // These diagnostics normally read wallet.dat. Under -walletbackend=sqlite
+    // the live wallet is wallet.sqlite, so open it read-only as the active
+    // store and let the same scan walk the right file. This runs before the
+    // normal backend resolution further down, so validate the value here too.
+    string strDiagBackend = argval2(argc, argv, "/walletbackend", "-walletbackend");
+    if ((fDiagWantsAudit || fDiagWantsCheck) && !strDiagBackend.empty() &&
+        strDiagBackend != "sqlite" && strDiagBackend != "bdb")
+    {
+        AttachTerminal();
+        fprintf(stderr, "Unknown wallet backend '%s'. Use -walletbackend=sqlite "
+                        "or -walletbackend=bdb.\n", strDiagBackend.c_str());
+        return 1;
+    }
+    bool fDiagSQLite = (strDiagBackend == "sqlite") &&
+                       (fDiagWantsAudit || fDiagWantsCheck);
+    if (fDiagSQLite)
+    {
+        AttachTerminal();
+        string strSQLitePath = GetAppDir() + "/wallet.sqlite";
+        string strOpenErr;
+        if (!WalletSQLiteRuntimeOpenReadOnly(strSQLitePath, strOpenErr))
+        {
+            fprintf(stderr, "Cannot open the SQLite wallet for diagnostics: %s\n",
+                    strOpenErr.c_str());
+            return 1;
+        }
+    }
+
+    if (fDiagWantsAudit)
     {
         int nRet = CmdWalletStorageAudit(strWalletStorageAuditJson);
-        DBFlush(true);
+        if (fDiagSQLite)
+            WalletSQLiteRuntimeClose();
+        else
+            DBFlush(true);
         return nRet;
     }
 
-    if (arg(argc,argv,"/walletstoragecheck") || arg(argc,argv,"-walletstoragecheck"))
+    if (fDiagWantsCheck)
     {
         int nRet = CmdWalletStorageCheck();
-        DBFlush(true);
+        if (fDiagSQLite)
+            WalletSQLiteRuntimeClose();
+        else
+            DBFlush(true);
         return nRet;
     }
 

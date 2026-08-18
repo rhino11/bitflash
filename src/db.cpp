@@ -164,6 +164,72 @@ bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey)
     return pWalletSQLiteRuntime->EraseRecord(vchKey, strError);
 }
 
+// Transaction bracket for the SQLite runtime. When the SQLite backend is not
+// active these are no-ops that succeed, so a caller can wrap a group of related
+// writes and Berkeley DB keeps its existing per-write behaviour unchanged while
+// SQLite gets all-or-nothing.
+bool WalletSQLiteRuntimeBeginTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return true;
+    string strError;
+    if (pWalletSQLiteRuntime->BeginTransaction(strError))
+        return true;
+    printf("WalletSQLiteRuntimeBeginTxn() : %s\n", strError.c_str());
+    return false;
+}
+
+bool WalletSQLiteRuntimeCommitTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return true;
+    string strError;
+    if (pWalletSQLiteRuntime->CommitTransaction(strError))
+        return true;
+    printf("WalletSQLiteRuntimeCommitTxn() : %s\n", strError.c_str());
+    return false;
+}
+
+void WalletSQLiteRuntimeRollbackTxn()
+{
+    if (!pWalletSQLiteRuntime)
+        return;
+    string strError;
+    pWalletSQLiteRuntime->RollbackTransaction(strError);
+}
+
+// Open the SQLite wallet read-only as the active runtime. Used by the one-shot
+// storage diagnostics, which run before the normal wallet load and must be able
+// to inspect a wallet that the loader would refuse -- so this opens the file for
+// scanning without loading or validating its records.
+bool WalletSQLiteRuntimeOpenReadOnly(const string& strPath, string& strErrorRet)
+{
+    strErrorRet.clear();
+    if (!FileExists(strPath.c_str()))
+    {
+        strErrorRet = strprintf("SQLite wallet does not exist: %s", strPath.c_str());
+        return false;
+    }
+
+    WalletSQLiteRuntimeClose();
+    std::auto_ptr<CWalletDBSQLite> db(new CWalletDBSQLite());
+    if (!db->OpenReadOnly(strPath, strErrorRet))
+        return false;
+
+    pWalletSQLiteRuntime = db.release();
+    return true;
+}
+
+bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet)
+{
+    if (!pWalletSQLiteRuntime)
+    {
+        strErrorRet = "SQLite wallet backend is not active";
+        return false;
+    }
+    return pWalletSQLiteRuntime->Checkpoint(strErrorRet);
+}
+
 
 CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
 {
@@ -1320,6 +1386,16 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
 
 bool ScanWalletRecords(CWalletRecordVisitor& visitor, string& strErrorRet)
 {
+    // Under the SQLite backend there is no Berkeley DB cursor to walk; scan the
+    // active SQLite store instead. This is the single choke point every "read
+    // every wallet record" caller goes through (storage audit and check among
+    // them), so routing it here makes those honour -walletbackend=sqlite.
+    if (WalletSQLiteRuntimeActive())
+    {
+        strErrorRet.clear();
+        return pWalletSQLiteRuntime->ScanRecords(visitor, strErrorRet);
+    }
+
     class CWalletScanDB : public CWalletDB
     {
     public:
@@ -1550,10 +1626,80 @@ bool LoadWalletFromSQLiteRuntime(const string& strPath)
 // this file was written are not spendable from it. Backing up once is not
 // enough, and that is a property of the wallet format rather than of this
 // function.
+// Back up the active SQLite wallet. The store is checkpointed so the WAL is
+// folded into the main file, then the single self-contained wallet.sqlite is
+// copied through a temp file and renamed into place (same temp/old/rename dance
+// as the Berkeley DB path, for Windows' non-overwriting rename). No lsn_reset:
+// a checkpointed SQLite file needs nothing beside it to open.
+static bool BackupWalletSQLite(const string& strDest)
+{
+    string strSrc = GetAppDir() + "/wallet.sqlite";
+    if (!FileExists(strSrc.c_str()))
+        return error("BackupWallet() : %s does not exist\n", strSrc.c_str());
+
+    string strCheckpointError;
+    if (!WalletSQLiteRuntimeCheckpoint(strCheckpointError))
+        return error("BackupWallet() : checkpoint failed: %s\n", strCheckpointError.c_str());
+
+    string strTemp = strprintf("%s.tmp.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strTemp.c_str()); i++)
+        strTemp = strprintf("%s.tmp.%lld.%d", strDest.c_str(), GetTime(), i);
+    string strOld = strprintf("%s.old.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strOld.c_str()); i++)
+        strOld = strprintf("%s.old.%lld.%d", strDest.c_str(), GetTime(), i);
+
+    FILE* pfIn = fopen(strSrc.c_str(), "rb");
+    if (!pfIn)
+        return error("BackupWallet() : cannot read %s\n", strSrc.c_str());
+    FILE* pfOut = fopen(strTemp.c_str(), "wb");
+    if (!pfOut)
+    {
+        fclose(pfIn);
+        return error("BackupWallet() : cannot write %s\n", strTemp.c_str());
+    }
+
+    char buf[65536];
+    size_t n;
+    bool fOk = true;
+    while ((n = fread(buf, 1, sizeof(buf), pfIn)) > 0)
+        if (fwrite(buf, 1, n, pfOut) != n) { fOk = false; break; }
+    if (ferror(pfIn))
+        fOk = false;
+    fclose(pfIn);
+    if (fclose(pfOut) != 0)
+        fOk = false;
+    if (!fOk)
+    {
+        remove(strTemp.c_str());   // half a wallet is worse than none
+        return error("BackupWallet() : copy to %s failed\n", strTemp.c_str());
+    }
+
+    bool fHadOldDest = FileExists(strDest.c_str());
+    if (fHadOldDest && rename(strDest.c_str(), strOld.c_str()) != 0)
+    {
+        remove(strTemp.c_str());
+        return error("BackupWallet() : could not move old %s aside\n", strDest.c_str());
+    }
+    if (rename(strTemp.c_str(), strDest.c_str()) != 0)
+    {
+        remove(strTemp.c_str());
+        if (fHadOldDest)
+            rename(strOld.c_str(), strDest.c_str());
+        return error("BackupWallet() : could not install %s\n", strDest.c_str());
+    }
+    if (fHadOldDest)
+        remove(strOld.c_str());
+    return true;
+}
+
 bool BackupWallet(const string& strDest)
 {
     if (strDest.empty())
         return error("BackupWallet() : no destination given\n");
+
+    // Under the SQLite backend the live wallet is wallet.sqlite, not wallet.dat.
+    if (WalletSQLiteRuntimeActive())
+        return BackupWalletSQLite(strDest);
 
     string strSrc = GetAppDir() + "/wallet.dat";
     if (!FileExists(strSrc.c_str()))
@@ -1974,9 +2120,9 @@ static bool CopyPublicWalletRecordsTo(CWalletRewriteDB& dbTo,
     return ScanWalletRecords(visitor, strErrorRet);
 }
 
-static string WalletEncryptBackupPath()
+static string WalletEncryptBackupPathFor(const char* pszBaseName)
 {
-    string strBase = GetAppDir() + "/wallet.dat.before-encrypt.";
+    string strBase = GetAppDir() + "/" + pszBaseName + ".before-encrypt.";
     string strPath = strBase + i64tostr(GetTime()) + ".bak";
     for (int i = 1; FileExists(strPath.c_str()); i++)
         strPath = strBase + i64tostr(GetTime()) + "." + itostr(i) + ".bak";
@@ -2004,6 +2150,192 @@ static void SecureClearBytes(vector<unsigned char>& vch)
     if (!vch.empty())
         OPENSSL_cleanse(&vch[0], vch.size());
     vch.clear();
+}
+
+// The SQLite counterpart of CWalletPublicRecordCopyVisitor: same skip list,
+// same byte-for-byte copy, but the destination is a CWalletDBSQLite record
+// store rather than a Berkeley DB file.
+class CWalletPublicRecordCopyToSQLiteVisitor : public CWalletRecordVisitor
+{
+public:
+    CWalletDBSQLite& dbTo;
+    int& nCopied;
+
+    CWalletPublicRecordCopyToSQLiteVisitor(CWalletDBSQLite& dbToIn, int& nCopiedIn)
+        : dbTo(dbToIn), nCopied(nCopiedIn) { }
+
+    bool VisitWalletRecord(const CDataStream& ssKey,
+                           const CDataStream& ssValue,
+                           string& strErrorRet)
+    {
+        string strType;
+        try
+        {
+            CDataStream ssType = ssKey;
+            ssType >> strType;
+        }
+        catch (...)
+        {
+            strErrorRet = "SQLite wallet has a record whose key type cannot be read";
+            return false;
+        }
+
+        if (IsWalletEncryptionPrivateRecord(strType))
+            return true;
+
+        vector<unsigned char> vchKey(ssKey.begin(), ssKey.end());
+        vector<unsigned char> vchValue(ssValue.begin(), ssValue.end());
+        bool fOk = dbTo.WriteRecord(vchKey, vchValue, strErrorRet, true);
+        if (!vchKey.empty())
+            memset(&vchKey[0], 0, vchKey.size());
+        if (!vchValue.empty())
+            memset(&vchValue[0], 0, vchValue.size());
+        if (!fOk)
+        {
+            strErrorRet = strprintf("could not copy wallet record '%s': %s",
+                                    strType.c_str(), strErrorRet.c_str());
+            return false;
+        }
+        nCopied++;
+        return true;
+    }
+};
+
+// Persist an encrypted wallet under the SQLite backend. Everything the caller
+// computed -- the master key, the re-encrypted private keys, the fresh crypted
+// key pool, the encrypted HD seed -- lands in a brand new wallet.sqlite built
+// in one transaction, which is then swapped in for the plaintext original.
+//
+// A fresh file rather than an in-place rewrite for two reasons: it keeps the
+// whole change atomic (a crash before the rename leaves the old wallet whole),
+// and it guarantees no plaintext key survives in a freed page the way an
+// in-place DELETE would leave behind until a VACUUM.
+static bool EncryptWalletPersistSQLite(
+    const vector<pair<vector<unsigned char>, vector<unsigned char> > >& vCryptedKeys,
+    const vector<pair<vector<unsigned char>, vector<unsigned char> > >& vNewPoolKeys,
+    const vector<pair<int64, vector<unsigned char> > >& vNewPool,
+    const CWalletMasterKey& kMasterKey,
+    const vector<unsigned char>& vchCryptedHDMasterNew,
+    const vector<unsigned char>& vchCryptedHDChainCodeNew,
+    unsigned int nHDNextNew,
+    int& nCopiedRet,
+    string& strBackupRet,
+    string& strErrorRet)
+{
+    nCopiedRet = 0;
+    if (!pWalletSQLiteRuntime)
+    {
+        strErrorRet = "SQLite wallet backend is not active";
+        return false;
+    }
+
+    string strWalletPath = GetAppDir() + "/wallet.sqlite";
+    string strTempPath = GetAppDir() + "/" +
+        strprintf("wallet.sqlite.encrypting.%lld", GetTime());
+    remove(strTempPath.c_str());
+    remove((strTempPath + "-wal").c_str());
+    remove((strTempPath + "-shm").c_str());
+
+    {
+        CWalletDBSQLite dbTmp;
+        if (!dbTmp.Open(strTempPath, strErrorRet))
+        {
+            remove(strTempPath.c_str());
+            return false;
+        }
+        if (!dbTmp.BeginTransaction(strErrorRet))
+        {
+            dbTmp.Close();
+            remove(strTempPath.c_str());
+            return false;
+        }
+
+        // The public records come from the live SQLite store -- under this
+        // backend ScanWalletRecords() has no Berkeley DB behind it to read.
+        CWalletPublicRecordCopyToSQLiteVisitor visitor(dbTmp, nCopiedRet);
+        bool fOk = pWalletSQLiteRuntime->ScanRecords(visitor, strErrorRet);
+
+        // Encrypted metadata, serialized byte-for-byte the way the Berkeley DB
+        // path (CWalletRewriteDB) writes it, so a wallet encrypted under either
+        // backend is the same set of records. ckey uses INSERT-only to match
+        // WriteCryptedKey; the rest overwrite.
+        fOk = fOk &&
+            dbTmp.WriteTypedRecord(string("walletminversion"),
+                                   (int)WALLET_FORMAT_ENCRYPTED, strErrorRet, true) &&
+            dbTmp.WriteTypedRecord(make_pair(string("mkey"),
+                                       (unsigned int)(nWalletMasterKeyMaxID + 1)),
+                                   kMasterKey, strErrorRet, true);
+        for (size_t i = 0; fOk && i < vCryptedKeys.size(); i++)
+            fOk = dbTmp.WriteTypedRecord(make_pair(string("ckey"), vCryptedKeys[i].first),
+                                         vCryptedKeys[i].second, strErrorRet, false);
+        for (size_t i = 0; fOk && i < vNewPoolKeys.size(); i++)
+            fOk = dbTmp.WriteTypedRecord(make_pair(string("ckey"), vNewPoolKeys[i].first),
+                                         vNewPoolKeys[i].second, strErrorRet, false);
+        if (fOk && !vchCryptedHDMasterNew.empty())
+            fOk = dbTmp.WriteTypedRecord(string("cryptedhdmaster"),
+                                         vchCryptedHDMasterNew, strErrorRet, true) &&
+                  dbTmp.WriteTypedRecord(string("cryptedhdchaincode"),
+                                         vchCryptedHDChainCodeNew, strErrorRet, true);
+        if (fOk)
+            fOk = dbTmp.WriteTypedRecord(string("hdnext"), nHDNextNew, strErrorRet, true);
+        for (size_t i = 0; fOk && i < vNewPool.size(); i++)
+            fOk = dbTmp.WriteTypedRecord(make_pair(string("pool"), vNewPool[i].first),
+                                         vNewPool[i].second, strErrorRet, true);
+
+        if (!fOk)
+        {
+            string strIgnore;
+            dbTmp.RollbackTransaction(strIgnore);
+            dbTmp.Close();
+            remove(strTempPath.c_str());
+            remove((strTempPath + "-wal").c_str());
+            remove((strTempPath + "-shm").c_str());
+            return false;
+        }
+
+        if (!dbTmp.CommitTransaction(strErrorRet))
+        {
+            dbTmp.Close();
+            remove(strTempPath.c_str());
+            remove((strTempPath + "-wal").c_str());
+            remove((strTempPath + "-shm").c_str());
+            return false;
+        }
+        string strCheckpointError;
+        dbTmp.Checkpoint(strCheckpointError);
+        dbTmp.Close();
+    }
+
+    // The rebuilt wallet is committed and self-contained. Close the live handle
+    // so the file can be swapped: Windows will not rename a file that still has
+    // an open handle, and the node exits right after this.
+    WalletSQLiteRuntimeClose();
+
+    string strBackupPath = WalletEncryptBackupPathFor("wallet.sqlite");
+    if (rename(strWalletPath.c_str(), strBackupPath.c_str()) != 0)
+    {
+        strErrorRet = strprintf("could not move the original SQLite wallet to %s",
+                                strBackupPath.c_str());
+        remove(strTempPath.c_str());
+        return false;
+    }
+    // The moved-aside wallet owns any leftover write-ahead log or shared-memory
+    // sidecar; drop stale ones so they cannot shadow the new wallet.
+    remove((strWalletPath + "-wal").c_str());
+    remove((strWalletPath + "-shm").c_str());
+
+    if (rename(strTempPath.c_str(), strWalletPath.c_str()) != 0)
+    {
+        rename(strBackupPath.c_str(), strWalletPath.c_str());
+        strErrorRet = "could not install the encrypted SQLite wallet; the original was restored";
+        remove(strTempPath.c_str());
+        return false;
+    }
+    remove((strTempPath + "-wal").c_str());
+    remove((strTempPath + "-shm").c_str());
+
+    strBackupRet = strBackupPath;
+    return true;
 }
 
 bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& strErrorRet)
@@ -2144,6 +2476,24 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
         vNewPool.push_back(make_pair((int64)i + 1, vchPubKey));
     }
 
+    // Every ciphertext is computed; nothing has touched the store yet. Under
+    // the SQLite backend, persist by rebuilding wallet.sqlite in one atomic
+    // transaction and swapping it in. The Berkeley DB path below is unchanged.
+    if (WalletSQLiteRuntimeActive())
+    {
+        int nCopiedSQLite = 0;
+        if (!EncryptWalletPersistSQLite(vCryptedKeys, vNewPoolKeys, vNewPool,
+                                        kMasterKey, vchCryptedHDMasterNew,
+                                        vchCryptedHDChainCodeNew, nHDNextNew,
+                                        nCopiedSQLite, strBackupRet, strErrorRet))
+            return false;
+        printf("EncryptWallet() : copied %d public record(s), encrypted %u key(s), "
+               "rebuilt %d key-pool entry(s) [SQLite]\n",
+               nCopiedSQLite, (unsigned int)(vCryptedKeys.size() + vNewPoolKeys.size()),
+               (int)vNewPool.size());
+        return true;
+    }
+
     string strTempFile = strprintf("wallet.encrypting.%lld.dat", GetTime());
     string strTempPath = GetAppDir() + "/" + strTempFile;
     remove(strTempPath.c_str());
@@ -2211,7 +2561,7 @@ bool EncryptWallet(const string& strPassphrase, string& strBackupRet, string& st
     DBFlush(true);
 
     string strWalletPath = GetAppDir() + "/wallet.dat";
-    string strBackupPath = WalletEncryptBackupPath();
+    string strBackupPath = WalletEncryptBackupPathFor("wallet.dat");
     if (rename(strWalletPath.c_str(), strBackupPath.c_str()) != 0)
     {
         strErrorRet = strprintf("could not move the original wallet to %s", strBackupPath.c_str());

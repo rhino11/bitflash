@@ -365,6 +365,11 @@ bool WalletSQLiteRuntimeWriteRecord(const vector<unsigned char>& vchKey,
                                     const vector<unsigned char>& vchValue,
                                     bool fOverwrite);
 bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey);
+bool WalletSQLiteRuntimeBeginTxn();
+bool WalletSQLiteRuntimeCommitTxn();
+void WalletSQLiteRuntimeRollbackTxn();
+bool WalletSQLiteRuntimeOpenReadOnly(const string& strPath, string& strErrorRet);
+bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet);
 
 
 
@@ -531,8 +536,21 @@ public:
 
     bool WriteHDMaster(const vector<unsigned char>& vchMaster, const vector<unsigned char>& vchChainCode)
     {
-        return WriteWalletRecord(string("hdmaster"), vchMaster)
-            && WriteWalletRecord(string("hdchaincode"), vchChainCode);
+        // hdmaster and hdchaincode are halves of one seed: a wallet with one but
+        // not the other is an incomplete HD wallet (-walletstoragecheck flags
+        // exactly that). Under the SQLite runtime write them in one transaction
+        // so a failure or crash between the two cannot leave that half-state.
+        // Berkeley DB keeps its existing per-write behaviour -- the bracket is a
+        // no-op there.
+        if (!WalletSQLiteRuntimeBeginTxn())
+            return false;
+        if (!WriteWalletRecord(string("hdmaster"), vchMaster) ||
+            !WriteWalletRecord(string("hdchaincode"), vchChainCode))
+        {
+            WalletSQLiteRuntimeRollbackTxn();
+            return false;
+        }
+        return WalletSQLiteRuntimeCommitTxn();
     }
 
     bool WriteWalletMinVersion(int nVersion)
