@@ -112,6 +112,23 @@ static const int          BTF_INCOMPLETE_MESSAGE_TIMEOUT_SECS = 2 * 60;
 // 125 is Bitcoin's number and remains a conservative public-node default.
 static const unsigned int MAX_CONNECTIONS = 125;
 
+// Cap inbound connections from any single address. Without it one source can
+// hold every slot up to MAX_CONNECTIONS -- exactly what happened to the
+// rendezvous relays, where a single IP parked hundreds of connections and
+// starved real peers. A legitimate peer, even a relay talking to a relay,
+// needs only a handful; 32 leaves generous room while denying any one address
+// more than a quarter of the table. The firewall connlimit on the relays does
+// the same thing a layer lower; this makes every build carry the defense.
+//
+// Loopback (127.0.0.0/8) is exempt in the accept path. A managed-Tor node
+// receives every inbound onion peer over its local hidden-service listener, so
+// they all appear as 127.0.0.1 -- capping loopback would cap onion peers as a
+// group, which is exactly wrong for a network moving toward onion-only. The
+// global MAX_CONNECTIONS still bounds the total; a per-onion-identity limit,
+// applied once identity is known after accept(), is the right future tool for
+// onion floods.
+static const unsigned int MAX_CONNECTIONS_PER_IP = 32;
+
 // A node marked for disconnect is normally held until its buffers drain, so
 // a last message still goes out. But vSend cannot drain through a socket
 // whose far end is gone, and that made such a node immortal: it stayed in
