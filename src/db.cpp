@@ -124,6 +124,13 @@ void WalletSQLiteRuntimeClose()
 {
     if (pWalletSQLiteRuntime)
     {
+        // Fold the write-ahead log into the main file on the way out. WAL +
+        // synchronous=FULL already makes every committed write durable across a
+        // kill, so this is housekeeping, not the thing that protects the data:
+        // if it fails, or the node is killed before it runs, the wallet is
+        // still whole. Best effort, never throws.
+        string strCheckpointError;
+        pWalletSQLiteRuntime->Checkpoint(strCheckpointError);
         delete pWalletSQLiteRuntime;
         pWalletSQLiteRuntime = NULL;
     }
@@ -1424,6 +1431,106 @@ bool LoadWalletFromSQLite(const string& strPath)
     }
 
     return FinishLoadedWallet(visitor.vchDefaultKey, false);
+}
+
+// Open a SQLite wallet read-write and keep it open as the active runtime
+// backend, then load its records into memory the same way LoadWalletFromSQLite
+// does. Unlike the read-only staging path, this leaves pWalletSQLiteRuntime set
+// so every later CWalletDB read/write/erase routes to this file for the life of
+// the process. The Berkeley DB wallet.dat is never opened.
+bool LoadWalletFromSQLiteRuntime(const string& strPath)
+{
+    strWalletLoadError.clear();
+
+    if (!FileExists(strPath.c_str()))
+    {
+        strWalletLoadError = strprintf("SQLite wallet does not exist: %s",
+                                       strPath.c_str());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
+    string strError;
+    if (!WalletSQLiteRuntimeOpen(strPath, strError))
+    {
+        strWalletLoadError = strError;
+        printf("LoadWallet: cannot open SQLite wallet backend: %s\n",
+               strError.c_str());
+        return false;
+    }
+
+    CSQLiteWalletRuntimeLoadVisitor visitor;
+    try
+    {
+        CRITICAL_BLOCK(cs_mapKeys)
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            if (!pWalletSQLiteRuntime->ScanRecords(visitor, strError))
+            {
+                WalletSQLiteRuntimeClose();
+                if (strWalletLoadError.empty())
+                    strWalletLoadError = strError;
+                printf("LoadWallet: SQLite wallet backend could not be read. "
+                       "Failed while handling a '%s' record: %s\n",
+                       visitor.strLastType.c_str(), strError.c_str());
+                return false;
+            }
+        }
+    }
+    catch (const std::exception& e)
+    {
+        WalletSQLiteRuntimeClose();
+        strWalletLoadError = strprintf(
+            "SQLite wallet backend could not be read while handling a '%s' record: %s",
+            visitor.strLastType.c_str(), e.what());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+    catch (...)
+    {
+        WalletSQLiteRuntimeClose();
+        strWalletLoadError = strprintf(
+            "SQLite wallet backend could not be read while handling a '%s' record",
+            visitor.strLastType.c_str());
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
+    // Refuse an empty or non-wallet SQLite file up front, with a message that
+    // names the likely cause. FinishLoadedWallet below already rejects a
+    // missing default key (it is the fMayCreateDefaultKey=false path), but its
+    // wording -- "no usable default public key" -- reads as corruption when the
+    // real story is usually "this file was never an exported wallet". A blank
+    // wallet.sqlite left by a typo or a half-run export should say so.
+    if (visitor.vchDefaultKey.empty())
+    {
+        WalletSQLiteRuntimeClose();
+        strWalletLoadError =
+            "SQLite wallet has no default key record; it may be empty or not a "
+            "wallet export. Create it with -walletsqliteexport.";
+        printf("LoadWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
+    if (!ReconcileLoadedWalletMetadata(visitor.fHaveStoredMineMode,
+                                       visitor.fHaveStoredHDCoinType))
+    {
+        WalletSQLiteRuntimeClose();
+        if (strWalletLoadError.empty())
+            strWalletLoadError = "SQLite wallet metadata is not supported by this build";
+        return false;
+    }
+
+    // Never fabricate a default key: an export always carries one, and a file
+    // that does not is refused with the wallet left open to no writes rather
+    // than quietly minted into a new identity.
+    if (!FinishLoadedWallet(visitor.vchDefaultKey, false))
+    {
+        WalletSQLiteRuntimeClose();
+        return false;
+    }
+
+    return true;
 }
 
 

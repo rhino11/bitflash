@@ -624,6 +624,7 @@ bool ScanWalletRecords(CWalletRecordVisitor& visitor, string& strErrorRet);
 
 bool LoadWallet();
 bool LoadWalletFromSQLite(const string& strPath);
+bool LoadWalletFromSQLiteRuntime(const string& strPath);
 
 // Writes a wallet.dat that opens on its own, anywhere -- see the definition in
 // db.cpp for why a plain file copy does not. Still a point-in-time snapshot:

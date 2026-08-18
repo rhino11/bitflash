@@ -190,6 +190,8 @@ static void PrintUsage()
     printf("  /walletsqliteloadcheck=FILE\n");
     printf("                              (parse a SQLite export like the wallet loader)\n");
     printf("  /walletsqlite=FILE         (stage-load a SQLite wallet export, then exit)\n");
+    printf("  /walletbackend=sqlite      (opt-in: run the node on <datadir>/wallet.sqlite\n");
+    printf("                              instead of wallet.dat; export one first)\n");
     printf("  /rescan                    (walk the chain for coins this wallet owns\n");
     printf("                              but never recorded, then exit)\n");
     printf("\n");
@@ -618,9 +620,74 @@ int main(int argc, char* argv[])
     printf("Loading wallet...\n");
     try
     {
+        string strWalletBackend =
+            argval2(argc, argv, "/walletbackend", "-walletbackend");
         string strWalletSQLite =
             argval2(argc, argv, "/walletsqlite", "-walletsqlite");
-        if (!strWalletSQLite.empty())
+
+        // A misspelled backend must not fall through to Berkeley DB silently --
+        // someone who typed -walletbackend=sqlit meant to run on SQLite, and
+        // opening wallet.dat instead of telling them is the wrong surprise.
+        if (!strWalletBackend.empty() &&
+            strWalletBackend != "sqlite" && strWalletBackend != "bdb")
+        {
+            AttachTerminal();
+            FatalStartupError(fHeadlessStartup,
+                strprintf("Unknown wallet backend '%s'.", strWalletBackend.c_str()),
+                "Use -walletbackend=sqlite for the experimental SQLite backend, "
+                "or omit -walletbackend (or -walletbackend=bdb) to use the "
+                "default Berkeley DB wallet.dat.");
+            return 1;
+        }
+
+        if (strWalletBackend == "sqlite")
+        {
+            // Opt-in, experimental. The node runs on <datadir>/wallet.sqlite and
+            // never opens wallet.dat, but the user has to have exported one
+            // first -- there is no silent migration, and wallet.dat is left
+            // exactly where it is so a plain restart goes back to it.
+            AttachTerminal();
+            string strSQLitePath = GetAppDir() + "/wallet.sqlite";
+            if (!FileExists(strSQLitePath.c_str()))
+            {
+                string strGuide = strprintf(
+                    "No SQLite wallet was found at\n"
+                    "  %s\n\n"
+                    "The SQLite wallet backend is opt-in and needs an exported\n"
+                    "wallet first. Your Berkeley DB wallet.dat is not touched by\n"
+                    "any of this.\n\n"
+                    "  Step 1  Export your existing wallet to SQLite:\n"
+                    "            bitflash -walletsqliteexport=\"%s\"\n"
+                    "  Step 2  Start again with the SQLite backend:\n"
+                    "            bitflash -walletbackend=sqlite\n\n"
+                    "To go back to Berkeley DB at any time, just start without\n"
+                    "-walletbackend=sqlite. wallet.dat is still your wallet.",
+                    strSQLitePath.c_str(), strSQLitePath.c_str());
+                FatalStartupError(fHeadlessStartup,
+                                  "The SQLite wallet backend needs an exported wallet first.",
+                                  strGuide);
+                return 1;
+            }
+
+            if (!LoadWalletFromSQLiteRuntime(strSQLitePath))
+            {
+                FatalStartupError(fHeadlessStartup,
+                                  "Cannot open the SQLite wallet backend.",
+                                  strWalletLoadError);
+                return 1;
+            }
+
+            fprintf(stderr,
+                    "Wallet backend: SQLite (experimental)\n"
+                    "  %s\n"
+                    "Your Berkeley DB wallet.dat is left untouched. Restart without\n"
+                    "-walletbackend=sqlite to go back to it.\n",
+                    strSQLitePath.c_str());
+            fflush(stderr);
+            // Fall through and run the node normally: every CWalletDB read,
+            // write, and erase now routes to this SQLite file.
+        }
+        else if (!strWalletSQLite.empty())
         {
             AttachTerminal();
             if (!LoadWalletFromSQLite(strWalletSQLite))
@@ -638,8 +705,7 @@ int main(int argc, char* argv[])
             DBFlush(true);
             return 0;
         }
-
-        if (!LoadWallet())
+        else if (!LoadWallet())
         {
             // LoadWallet() explains itself into strWalletLoadError when it
             // knows why -- an unsupported wallet format, for one, which is the
@@ -650,7 +716,9 @@ int main(int argc, char* argv[])
         }
 
         // After the block index, so there is a chain to compare the wallet
-        // against, and before anything reports a balance.
+        // against, and before anything reports a balance. Works on either
+        // backend: RescanSpentFlags writes corrected flags through CWalletDB,
+        // which routes to SQLite when that backend is active.
         RescanSpentFlags();
     }
     catch (const std::exception& e)
@@ -894,6 +962,10 @@ int main(int argc, char* argv[])
         // called here, which is why a wallet.dat copied elsewhere would not
         // open -- issue #40. Not optional.
         DBFlush(true);
+        // Checkpoint and close the SQLite wallet backend if one is active. A
+        // no-op on the Berkeley DB path. Safe to kill before this runs: WAL +
+        // synchronous=FULL already made every committed write durable.
+        WalletSQLiteRuntimeClose();
 #ifdef _WIN32
         // wallet.dat is safely flushed and closed now; let a pending console
         // control handler (CLOSE/LOGOFF/SHUTDOWN) return so the OS can finish.
@@ -910,6 +982,7 @@ int main(int argc, char* argv[])
     StopNode();
     BtfStopManagedTor();
     DBFlush(true);
+    WalletSQLiteRuntimeClose();
     return ret;
 #endif
 }
