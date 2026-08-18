@@ -2453,6 +2453,66 @@ static int RunWalletSQLiteEncryptSelfTest()
         nFail += Check(nAuditRet == 0 &&
                        FileContainsText(strAudit, "recovery phrase: present"),
                        "the encrypted SQLite wallet still has its recovery phrase") ? 0 : 1;
+
+        // One-shot storage commands honour -walletbackend. The SQLite wallet is
+        // encrypted; the wallet.dat beside it is still plaintext. Same datadir,
+        // opposite answers -> the flag routes the diagnostic to the right file.
+        string strSqliteAuditJson = tmp + "/sqlite-audit.json";
+        vector<string> vSqliteAuditArgs;
+        vSqliteAuditArgs.push_back("-datadir=" + tmp);
+        vSqliteAuditArgs.push_back("-walletbackend=sqlite");
+        vSqliteAuditArgs.push_back("-walletstorageauditjson=" + strSqliteAuditJson);
+        vSqliteAuditArgs.push_back("-nogui");
+        int nSqliteAuditRet = RunBitflashChild(strExe, vSqliteAuditArgs);
+        nFail += Check(nSqliteAuditRet == 0 &&
+                       FileContainsText(strSqliteAuditJson, "\"encrypted_hd_seed\": \"complete\"") &&
+                       FileContainsText(strSqliteAuditJson, "\"plain_hd_seed\": \"none\""),
+                       "-walletstorageaudit under SQLite reads the encrypted wallet.sqlite") ? 0 : 1;
+
+        string strBdbAuditJson = tmp + "/bdb-audit.json";
+        vector<string> vBdbAuditArgs;
+        vBdbAuditArgs.push_back("-datadir=" + tmp);
+        vBdbAuditArgs.push_back("-walletstorageauditjson=" + strBdbAuditJson);
+        vBdbAuditArgs.push_back("-nogui");
+        int nBdbAuditRet = RunBitflashChild(strExe, vBdbAuditArgs);
+        nFail += Check(nBdbAuditRet == 0 &&
+                       FileContainsText(strBdbAuditJson, "\"plain_hd_seed\": \"complete\"") &&
+                       FileContainsText(strBdbAuditJson, "\"encrypted_hd_seed\": \"none\""),
+                       "-walletstorageaudit without the flag still reads the plaintext wallet.dat") ? 0 : 1;
+
+        string strSqliteCheckOut = tmp + "/sqlite-check.txt";
+        vector<string> vSqliteCheckArgs;
+        vSqliteCheckArgs.push_back("-datadir=" + tmp);
+        vSqliteCheckArgs.push_back("-walletbackend=sqlite");
+        vSqliteCheckArgs.push_back("-walletstoragecheck");
+        vSqliteCheckArgs.push_back("-nogui");
+        int nSqliteCheckRet = RunBitflashChild(strExe, vSqliteCheckArgs, NULL, &strSqliteCheckOut);
+        nFail += Check(nSqliteCheckRet == 0,
+                       "-walletstoragecheck under SQLite passes on the encrypted wallet.sqlite") ? 0 : 1;
+
+        // Backup under SQLite copies wallet.sqlite, not the plaintext wallet.dat.
+        // The copy is a standalone SQLite wallet (loadcheck accepts it) and holds
+        // none of the plaintext key that wallet.dat still contains.
+        string strBackupDest = tmp + "/backup.sqlite";
+        vector<string> vBackupArgs;
+        vBackupArgs.push_back("-datadir=" + tmp);
+        vBackupArgs.push_back("-walletbackend=sqlite");
+        vBackupArgs.push_back("-backupwallet=" + strBackupDest);
+        vBackupArgs.push_back("-nogui");
+        int nBackupRet = RunBitflashChild(strExe, vBackupArgs);
+        nFail += Check(nBackupRet == 0 && FileExists(strBackupDest.c_str()),
+                       "-backupwallet under SQLite writes a backup file") ? 0 : 1;
+        nFail += Check(!FileContainsBytes(strBackupDest, vchDefaultPrivBytes),
+                       "the SQLite backup holds no plaintext key (it copied wallet.sqlite, not wallet.dat)") ? 0 : 1;
+
+        string strBackupLoadCheck = tmp + "/backup-loadcheck.txt";
+        vector<string> vLoadCheckArgs;
+        vLoadCheckArgs.push_back("-datadir=" + tmp);
+        vLoadCheckArgs.push_back("-walletsqliteloadcheck=" + strBackupDest);
+        vLoadCheckArgs.push_back("-nogui");
+        int nBackupLoadRet = RunBitflashChild(strExe, vLoadCheckArgs, NULL, &strBackupLoadCheck);
+        nFail += Check(nBackupLoadRet == 0,
+                       "the SQLite backup is a valid standalone SQLite wallet") ? 0 : 1;
     }
     catch (const std::exception& e)
     {

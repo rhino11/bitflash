@@ -198,6 +198,38 @@ void WalletSQLiteRuntimeRollbackTxn()
     pWalletSQLiteRuntime->RollbackTransaction(strError);
 }
 
+// Open the SQLite wallet read-only as the active runtime. Used by the one-shot
+// storage diagnostics, which run before the normal wallet load and must be able
+// to inspect a wallet that the loader would refuse -- so this opens the file for
+// scanning without loading or validating its records.
+bool WalletSQLiteRuntimeOpenReadOnly(const string& strPath, string& strErrorRet)
+{
+    strErrorRet.clear();
+    if (!FileExists(strPath.c_str()))
+    {
+        strErrorRet = strprintf("SQLite wallet does not exist: %s", strPath.c_str());
+        return false;
+    }
+
+    WalletSQLiteRuntimeClose();
+    std::auto_ptr<CWalletDBSQLite> db(new CWalletDBSQLite());
+    if (!db->OpenReadOnly(strPath, strErrorRet))
+        return false;
+
+    pWalletSQLiteRuntime = db.release();
+    return true;
+}
+
+bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet)
+{
+    if (!pWalletSQLiteRuntime)
+    {
+        strErrorRet = "SQLite wallet backend is not active";
+        return false;
+    }
+    return pWalletSQLiteRuntime->Checkpoint(strErrorRet);
+}
+
 
 CDB::CDB(const char* pszFile, const char* pszMode, bool fTxn) : pdb(NULL)
 {
@@ -1354,6 +1386,16 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
 
 bool ScanWalletRecords(CWalletRecordVisitor& visitor, string& strErrorRet)
 {
+    // Under the SQLite backend there is no Berkeley DB cursor to walk; scan the
+    // active SQLite store instead. This is the single choke point every "read
+    // every wallet record" caller goes through (storage audit and check among
+    // them), so routing it here makes those honour -walletbackend=sqlite.
+    if (WalletSQLiteRuntimeActive())
+    {
+        strErrorRet.clear();
+        return pWalletSQLiteRuntime->ScanRecords(visitor, strErrorRet);
+    }
+
     class CWalletScanDB : public CWalletDB
     {
     public:
@@ -1584,10 +1626,80 @@ bool LoadWalletFromSQLiteRuntime(const string& strPath)
 // this file was written are not spendable from it. Backing up once is not
 // enough, and that is a property of the wallet format rather than of this
 // function.
+// Back up the active SQLite wallet. The store is checkpointed so the WAL is
+// folded into the main file, then the single self-contained wallet.sqlite is
+// copied through a temp file and renamed into place (same temp/old/rename dance
+// as the Berkeley DB path, for Windows' non-overwriting rename). No lsn_reset:
+// a checkpointed SQLite file needs nothing beside it to open.
+static bool BackupWalletSQLite(const string& strDest)
+{
+    string strSrc = GetAppDir() + "/wallet.sqlite";
+    if (!FileExists(strSrc.c_str()))
+        return error("BackupWallet() : %s does not exist\n", strSrc.c_str());
+
+    string strCheckpointError;
+    if (!WalletSQLiteRuntimeCheckpoint(strCheckpointError))
+        return error("BackupWallet() : checkpoint failed: %s\n", strCheckpointError.c_str());
+
+    string strTemp = strprintf("%s.tmp.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strTemp.c_str()); i++)
+        strTemp = strprintf("%s.tmp.%lld.%d", strDest.c_str(), GetTime(), i);
+    string strOld = strprintf("%s.old.%lld", strDest.c_str(), GetTime());
+    for (int i = 1; FileExists(strOld.c_str()); i++)
+        strOld = strprintf("%s.old.%lld.%d", strDest.c_str(), GetTime(), i);
+
+    FILE* pfIn = fopen(strSrc.c_str(), "rb");
+    if (!pfIn)
+        return error("BackupWallet() : cannot read %s\n", strSrc.c_str());
+    FILE* pfOut = fopen(strTemp.c_str(), "wb");
+    if (!pfOut)
+    {
+        fclose(pfIn);
+        return error("BackupWallet() : cannot write %s\n", strTemp.c_str());
+    }
+
+    char buf[65536];
+    size_t n;
+    bool fOk = true;
+    while ((n = fread(buf, 1, sizeof(buf), pfIn)) > 0)
+        if (fwrite(buf, 1, n, pfOut) != n) { fOk = false; break; }
+    if (ferror(pfIn))
+        fOk = false;
+    fclose(pfIn);
+    if (fclose(pfOut) != 0)
+        fOk = false;
+    if (!fOk)
+    {
+        remove(strTemp.c_str());   // half a wallet is worse than none
+        return error("BackupWallet() : copy to %s failed\n", strTemp.c_str());
+    }
+
+    bool fHadOldDest = FileExists(strDest.c_str());
+    if (fHadOldDest && rename(strDest.c_str(), strOld.c_str()) != 0)
+    {
+        remove(strTemp.c_str());
+        return error("BackupWallet() : could not move old %s aside\n", strDest.c_str());
+    }
+    if (rename(strTemp.c_str(), strDest.c_str()) != 0)
+    {
+        remove(strTemp.c_str());
+        if (fHadOldDest)
+            rename(strOld.c_str(), strDest.c_str());
+        return error("BackupWallet() : could not install %s\n", strDest.c_str());
+    }
+    if (fHadOldDest)
+        remove(strOld.c_str());
+    return true;
+}
+
 bool BackupWallet(const string& strDest)
 {
     if (strDest.empty())
         return error("BackupWallet() : no destination given\n");
+
+    // Under the SQLite backend the live wallet is wallet.sqlite, not wallet.dat.
+    if (WalletSQLiteRuntimeActive())
+        return BackupWalletSQLite(strDest);
 
     string strSrc = GetAppDir() + "/wallet.dat";
     if (!FileExists(strSrc.c_str()))

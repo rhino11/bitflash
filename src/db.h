@@ -368,6 +368,8 @@ bool WalletSQLiteRuntimeEraseRecord(const vector<unsigned char>& vchKey);
 bool WalletSQLiteRuntimeBeginTxn();
 bool WalletSQLiteRuntimeCommitTxn();
 void WalletSQLiteRuntimeRollbackTxn();
+bool WalletSQLiteRuntimeOpenReadOnly(const string& strPath, string& strErrorRet);
+bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet);
 
 
 
