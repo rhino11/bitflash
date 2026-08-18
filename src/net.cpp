@@ -1622,10 +1622,27 @@ void ThreadSocketHandler2(void* parg)
                 unsigned int nNodes = 0;
                 CRITICAL_BLOCK(cs_vNodes)
                     nNodes = (unsigned int)vNodes.size();
+                // Also count how many connections this one address already
+                // holds. A single IP that keeps opening sockets -- a broken
+                // node or a deliberate connection-exhaustion flood -- must not
+                // be able to take the whole table, which is what starved the
+                // relays.
+                unsigned int nFromThisIP = 0;
+                CRITICAL_BLOCK(cs_vNodes)
+                    for (vector<CNode*>::iterator it = vNodes.begin(); it != vNodes.end(); ++it)
+                        if ((*it)->addr.ip == addr.ip)
+                            nFromThisIP++;
+
                 if (nNodes >= MAX_CONNECTIONS)
                 {
                     LogPrint("net", "refusing connection from %s, already at %u\n",
                              addr.ToString().c_str(), nNodes);
+                    BtfCloseSocket(hSocket);
+                }
+                else if (nFromThisIP >= MAX_CONNECTIONS_PER_IP)
+                {
+                    LogPrint("net", "refusing connection from %s, already %u from that address\n",
+                             addr.ToString().c_str(), nFromThisIP);
                     BtfCloseSocket(hSocket);
                 }
                 else
