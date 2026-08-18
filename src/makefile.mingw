@@ -113,6 +113,8 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=wallet-crypto
 	./bitflash.exe -selftest=wallet-encrypt
 	./bitflash.exe -selftest=wallet-sqlite-encrypt
+	./bitflash.exe -selftest=wallet-backend-default
+	./bitflash.exe -selftest=wallet-convert
 	./bitflash.exe -selftest=net-message
 	./bitflash.exe -selftest=consensus-limits
 	./bitflash.exe -selftest=pool-stratum

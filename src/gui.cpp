@@ -1391,6 +1391,84 @@ static void DrawAboutDialog()
     ImGui::End();
 }
 
+// First-run offer to move a Berkeley DB wallet to the SQLite backend. Only the
+// button actions touch anything: "Convert" exports wallet.dat to wallet.sqlite
+// and records the backend marker (wallet.dat is left untouched, so a restart
+// picks up SQLite while the old file stays as a fallback); "Keep Berkeley DB"
+// just records that choice so the offer does not return; "Decide later" leaves
+// no marker and asks again next start.
+static bool        g_showBackendWizard = false;
+static std::string g_wizardStatus;
+static bool        g_wizardConverted   = false;
+
+static void DrawBackendWizardDialog()
+{
+    if (!g_showBackendWizard) return;
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 0.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::Begin("Wallet Storage", &g_showBackendWizard,
+        ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
+    {
+        if (g_wizardConverted)
+        {
+            ImGui::TextColored(ImVec4(0.35f, 1.0f, 0.45f, 1.0f), "Converted to SQLite.");
+            ImGui::TextWrapped("%s", g_wizardStatus.c_str());
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "Restart Bitflash to start using the SQLite wallet. Your Berkeley "
+                "DB wallet.dat is kept untouched as a fallback.");
+            ImGui::Spacing();
+            if (ImGui::Button("Close", ImVec2(120.0f, 0.0f)))
+                g_showBackendWizard = false;
+        }
+        else
+        {
+            ImGui::TextWrapped(
+                "Bitflash can store your wallet in a new SQLite format: a single "
+                "file that is easier to back up and does not depend on the "
+                "database/ directory beside it.");
+            ImGui::Spacing();
+            ImGui::TextWrapped(
+                "Your current Berkeley DB wallet (wallet.dat) is kept exactly as it "
+                "is -- nothing is deleted, and you can go back to it at any time. "
+                "The change takes effect after you restart.");
+            ImGui::Spacing();
+            if (ImGui::Button("Convert to SQLite", ImVec2(180.0f, 0.0f)))
+            {
+                int nCopied = 0;
+                std::string strError;
+                if (DoConvertWalletToSQLite(nCopied, strError))
+                {
+                    g_wizardStatus =
+                        strprintf("%d record(s) copied to wallet.sqlite.", nCopied);
+                    g_wizardConverted = true;
+                }
+                else
+                    g_wizardStatus = "Conversion failed: " + strError;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Keep Berkeley DB", ImVec2(160.0f, 0.0f)))
+            {
+                WriteWalletBackendMarker("bdb");
+                g_showBackendWizard = false;
+            }
+            ImGui::SameLine();
+            if (ImGui::Button("Decide later", ImVec2(120.0f, 0.0f)))
+                g_showBackendWizard = false;
+
+            if (!g_wizardStatus.empty())
+            {
+                ImGui::Spacing();
+                ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.35f, 1.0f));
+                ImGui::TextWrapped("%s", g_wizardStatus.c_str());
+                ImGui::PopStyleColor();
+            }
+        }
+    }
+    ImGui::End();
+}
+
 // ---------------------------------------------------------------------------
 // Entry point
 // ---------------------------------------------------------------------------
@@ -1457,6 +1535,17 @@ int RunGUI(int argc, char* argv[])
     g_mineRadio = nMineMode;
     strncpy(g_participantPool, strParticipantPool.c_str(), sizeof(g_participantPool)-1);
 
+    // First run on a Berkeley DB wallet with no recorded choice yet: offer to
+    // convert to SQLite. Never when already on SQLite, once wallet.sqlite exists,
+    // or once a choice has been recorded in the backend marker.
+    if (!WalletSQLiteRuntimeActive() &&
+        FileExists((GetAppDir() + "/wallet.dat").c_str()) &&
+        !FileExists((GetAppDir() + "/wallet.sqlite").c_str()) &&
+        ReadWalletBackendMarker().empty())
+    {
+        g_showBackendWizard = true;
+    }
+
     int frame = 0;
     while (!glfwWindowShouldClose(window) && !fShutdown)
     {
@@ -1480,6 +1569,7 @@ int RunGUI(int argc, char* argv[])
         DrawRestorePhraseDialog();
         DrawDiagnosticsDialog();
         DrawAboutDialog();
+        DrawBackendWizardDialog();
         DrawStatusBar();
 
         ImGui::Render();

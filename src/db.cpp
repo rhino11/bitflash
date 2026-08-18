@@ -101,10 +101,13 @@ bool WalletSQLiteRuntimeActive()
     return pWalletSQLiteRuntime != NULL;
 }
 
-bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet)
+bool WalletSQLiteRuntimeOpen(const string& strPath, string& strErrorRet, bool fMustExist)
 {
     strErrorRet.clear();
-    if (!FileExists(strPath.c_str()))
+    // Callers that load an existing wallet want the clear "does not exist"
+    // message rather than silently creating a blank one; the create path passes
+    // fMustExist=false so Open() (SQLITE_OPEN_CREATE) can make a fresh file.
+    if (fMustExist && !FileExists(strPath.c_str()))
     {
         strErrorRet = strprintf("SQLite wallet does not exist: %s",
                                 strPath.c_str());
@@ -228,6 +231,47 @@ bool WalletSQLiteRuntimeCheckpoint(string& strErrorRet)
         return false;
     }
     return pWalletSQLiteRuntime->Checkpoint(strErrorRet);
+}
+
+// The persistent record of which backend this datadir uses, so the choice
+// survives a restart without a command-line flag. A plain text file holding
+// "sqlite" or "bdb" -- visible and hand-editable on purpose, no hidden state.
+static string WalletBackendMarkerPath()
+{
+    return GetAppDir() + "/wallet-backend";
+}
+
+string ReadWalletBackendMarker()
+{
+    FILE* pf = fopen(WalletBackendMarkerPath().c_str(), "rb");
+    if (!pf)
+        return "";
+    char buf[16] = {0};
+    size_t n = fread(buf, 1, sizeof(buf) - 1, pf);
+    fclose(pf);
+    string s(buf, n);
+    while (!s.empty() && isspace((unsigned char)s[s.size() - 1]))
+        s.erase(s.size() - 1);
+    while (!s.empty() && isspace((unsigned char)s[0]))
+        s.erase(0, 1);
+    if (s == "sqlite" || s == "bdb")
+        return s;
+    return "";
+}
+
+bool WriteWalletBackendMarker(const string& strBackend)
+{
+    if (strBackend != "sqlite" && strBackend != "bdb")
+        return false;
+    FILE* pf = fopen(WalletBackendMarkerPath().c_str(), "wb");
+    if (!pf)
+        return false;
+    bool fOk = fwrite(strBackend.c_str(), 1, strBackend.size(), pf) == strBackend.size();
+    if (fputc('\n', pf) == EOF)
+        fOk = false;
+    if (fclose(pf) != 0)
+        fOk = false;
+    return fOk;
 }
 
 
@@ -1603,6 +1647,49 @@ bool LoadWalletFromSQLiteRuntime(const string& strPath)
     if (!FinishLoadedWallet(visitor.vchDefaultKey, false))
     {
         WalletSQLiteRuntimeClose();
+        return false;
+    }
+
+    return true;
+}
+
+// Create a brand-new wallet directly in the SQLite backend. For a fresh install
+// where SQLite is the default there is no wallet.dat to export from, so open a
+// new wallet.sqlite (Open() creates the file and its schema) and let
+// FinishLoadedWallet mint the first default key straight into it -- the same
+// call the Berkeley DB create path uses, so a new wallet is identical either
+// way. Refuses to touch an existing file, and cleans up on failure so a broken
+// half-initialised wallet.sqlite is never left for the next start to load.
+bool CreateNewSQLiteWallet(const string& strPath)
+{
+    strWalletLoadError.clear();
+
+    if (FileExists(strPath.c_str()))
+    {
+        strWalletLoadError = strprintf("SQLite wallet already exists: %s",
+                                       strPath.c_str());
+        printf("CreateNewSQLiteWallet: %s\n", strWalletLoadError.c_str());
+        return false;
+    }
+
+    string strError;
+    if (!WalletSQLiteRuntimeOpen(strPath, strError, false))
+    {
+        strWalletLoadError = strError;
+        printf("CreateNewSQLiteWallet: cannot create SQLite wallet: %s\n",
+               strError.c_str());
+        return false;
+    }
+
+    vector<unsigned char> vchNoDefaultKey;
+    if (!FinishLoadedWallet(vchNoDefaultKey, true))
+    {
+        WalletSQLiteRuntimeClose();
+        remove(strPath.c_str());
+        remove((strPath + "-wal").c_str());
+        remove((strPath + "-shm").c_str());
+        if (strWalletLoadError.empty())
+            strWalletLoadError = "could not initialise the new SQLite wallet";
         return false;
     }
 

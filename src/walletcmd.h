@@ -75,6 +75,15 @@ int CmdWalletStorageCheck();
 // not change which backend the runtime wallet opens.
 int CmdWalletSQLiteExport(const std::string& strDest);
 
+// Export the currently-loaded wallet to a SQLite file (shared by the command
+// above and the GUI wizard). Returns false with an error on any failure.
+bool ExportActiveWalletToSQLite(const std::string& strDest, int& nCopiedRet,
+                                std::string& strErrorRet);
+
+// Convert the running Berkeley DB wallet to SQLite and record the backend
+// marker so the next start opens it. wallet.dat is left untouched as fallback.
+bool DoConvertWalletToSQLite(int& nCopiedRet, std::string& strErrorRet);
+
 // Diagnostic/migration staging: compare a SQLite wallet export with the current
 // wallet.dat raw records. Prints counts only, never record keys or values.
 int CmdWalletSQLiteVerify(const std::string& strPath);
