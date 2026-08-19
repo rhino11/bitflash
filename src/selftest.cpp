@@ -10,6 +10,9 @@
 #include "bip32.h"
 #include "proxy.h"
 #include "selftest.h"
+#ifndef _WIN32
+#include <sys/wait.h>   // WIFEXITED/WEXITSTATUS for the child-process helper
+#endif
 #include "sockcount.h"
 #include "tor.h"
 #include "walletcmd.h"
@@ -2110,7 +2113,13 @@ static int RunBitflashChild(const string& strExe,
         strCmd += " > " + QuoteCommandArg(*pOutputFile) + " 2>&1";
     else
         strCmd += " > /dev/null 2>&1";
-    return system(strCmd.c_str());
+    // system() returns a wait status, not the exit code; unwrap it so callers
+    // see the same value the Windows _spawnv path returns (e.g. exit code 2 is
+    // 2, not 512). Without this every "== 2" assertion fails only on Linux.
+    int nSysRet = system(strCmd.c_str());
+    if (nSysRet != -1 && WIFEXITED(nSysRet))
+        return WEXITSTATUS(nSysRet);
+    return nSysRet;
 #endif
 }
 
