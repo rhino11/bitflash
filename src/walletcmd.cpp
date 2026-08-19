@@ -429,13 +429,13 @@ int CmdRecoveryAudit()
     }
     printf("  covered by recovery phrase:   %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nRecoverableCredit).c_str(), audit.nRecoverableTx);
-    printf("  wallet.dat-only balance:      %s BTF (%d transaction(s))\n",
+    printf("  not phrase-backed balance:    %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nLegacyCredit).c_str(), audit.nLegacyTx);
     printf("  immature mining rewards:      %s BTF\n", FormatMoney(nImmatureTotal).c_str());
     printf("    phrase-backed immature:     %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nRecoverableImmatureCredit).c_str(),
            audit.nRecoverableImmatureTx);
-    printf("    wallet.dat-only immature:   %s BTF (%d transaction(s))\n",
+    printf("    not phrase-backed immature: %s BTF (%d transaction(s))\n",
            FormatMoney(audit.nLegacyImmatureCredit).c_str(),
            audit.nLegacyImmatureTx);
 
@@ -457,7 +457,7 @@ int CmdRecoveryAudit()
     {
         printf("\n");
         printf("Warning: some coins are on keys the phrase does not reproduce.\n");
-        printf("Keep wallet.dat backups until that balance has been moved to a phrase-backed address.\n");
+        printf("Keep a file backup of this wallet until that balance has been moved to a phrase-backed address.\n");
         fflush(stdout);
         return 2;
     }

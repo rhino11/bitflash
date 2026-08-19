@@ -11,6 +11,11 @@
 #include <ctime>
 #include <cstdio>
 #include <sstream>
+#ifdef _WIN32
+#include <shellapi.h>   // ShellExecuteA, to open the website in the browser
+#else
+#include <unistd.h>
+#endif
 #include <iomanip>
 #include <atomic>
 #include <mutex>
@@ -172,7 +177,11 @@ static bool PathIsInsideDataDir(const std::string& strPath)
 
 static void SetDefaultBackupPath()
 {
-    std::string path = DefaultBackupDir() + "/wallet-backup-" + BackupTimeSuffix() + ".dat";
+    // Match the extension to the live backend: BackupWallet copies wallet.sqlite
+    // under the SQLite backend and wallet.dat under Berkeley DB, so a ".dat"
+    // default name would put SQLite contents in a misleadingly-named file.
+    const char* pszExt = WalletSQLiteRuntimeActive() ? ".sqlite" : ".dat";
+    std::string path = DefaultBackupDir() + "/wallet-backup-" + BackupTimeSuffix() + pszExt;
     strncpy(g_backupPath, path.c_str(), sizeof(g_backupPath)-1);
     g_backupPath[sizeof(g_backupPath)-1] = '\0';
 }
@@ -1254,11 +1263,11 @@ static void DrawWalletSafetyDialog()
         }
         ImGui::Text("Phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableCredit).c_str());
-        ImGui::Text("Wallet.dat-only spendable balance: %s BTF",
+        ImGui::Text("Not phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nLegacyCredit).c_str());
         ImGui::Text("Phrase-backed immature mining rewards: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableImmatureCredit).c_str());
-        ImGui::Text("Wallet.dat-only immature mining rewards: %s BTF",
+        ImGui::Text("Not phrase-backed immature mining rewards: %s BTF",
                     FmtMoney(g_recoveryAudit.nLegacyImmatureCredit).c_str());
         if (!g_recoveryAudit.fDeriveComplete)
         {
@@ -1272,8 +1281,8 @@ static void DrawWalletSafetyDialog()
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
             ImGui::TextWrapped(
                 "Some coins are on keys the phrase does not reproduce. "
-                "Keep wallet.dat backups until that balance has been moved to a "
-                "phrase-backed address.");
+                "Keep a file backup of this wallet until that balance has been "
+                "moved to a phrase-backed address.");
             ImGui::PopStyleColor();
         }
         else if (HaveHDSeed() &&
@@ -1369,16 +1378,38 @@ static void DrawDiagnosticsDialog()
     ImGui::End();
 }
 
+static void OpenURL(const char* pszUrl)
+{
+#ifdef _WIN32
+    ShellExecuteA(NULL, "open", pszUrl, NULL, NULL, SW_SHOWNORMAL);
+#else
+    std::string cmd = std::string("xdg-open '") + pszUrl + "' >/dev/null 2>&1 &";
+    int r = system(cmd.c_str());
+    (void)r;
+#endif
+}
+
 static void DrawAboutDialog()
 {
     if (!g_showAbout) return;
-    ImGui::SetNextWindowSize(ImVec2(380.0f, 170.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 205.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("About Bitflash", &g_showAbout,
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Bitflash  BTF  v1.1.0");
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
+                           "Bitflash  BTF  v" BITFLASH_VERSION_STRING);
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.0f, 1.0f));
+        ImGui::TextUnformatted("https://bitflash.network");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(0))
+                OpenURL("https://bitflash.network");
+        }
         ImGui::Spacing();
         ImGui::TextWrapped(
             "CPU-only cryptocurrency. RandomX proof of work. "
@@ -1400,6 +1431,98 @@ static void DrawAboutDialog()
 static bool        g_showBackendWizard = false;
 static std::string g_wizardStatus;
 static bool        g_wizardConverted   = false;
+static int         g_restartArgc       = 0;
+static char**      g_restartArgv       = NULL;
+
+#ifdef _WIN32
+// Quote one argument so CommandLineToArgvW parses it back to exactly this
+// string: only backslashes that immediately precede a double quote (including
+// the closing one) are doubled, so ordinary Windows paths are not mangled.
+static std::string QuoteArgWin(const std::string& a)
+{
+    if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos)
+        return a;
+    std::string r = "\"";
+    size_t bs = 0;
+    for (size_t i = 0; i < a.size(); i++)
+    {
+        if (a[i] == '\\') { bs++; continue; }
+        if (a[i] == '"') { r.append(bs * 2 + 1, '\\'); r += '"'; bs = 0; continue; }
+        r.append(bs, '\\'); bs = 0; r += a[i];
+    }
+    r.append(bs * 2, '\\');
+    r += "\"";
+    return r;
+}
+#endif
+
+// Relaunch Bitflash with the same arguments and datadir, then ask this instance
+// to exit -- but only once the relaunch has actually started, so a failure never
+// leaves the user with no node running. The new instance waits (-restartwait)
+// before it opens the network port and the block index, so this one is gone
+// first and they never fight over the same files.
+static void RestartApplication()
+{
+    bool fLaunched = false;
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
+        return;
+    std::string strCmd = QuoteArgWin(exePath);
+    bool fHasDataDir = false;
+    for (int i = 1; i < g_restartArgc; i++)
+    {
+        std::string a = g_restartArgv[i] ? g_restartArgv[i] : "";
+        if (a.find("-datadir=") == 0 || a.find("/datadir=") == 0)
+            fHasDataDir = true;
+        strCmd += " " + QuoteArgWin(a);
+    }
+    if (!fHasDataDir)
+        strCmd += " " + QuoteArgWin("-datadir=" + GetAppDir());
+    strCmd += " -restartwait";
+
+    std::vector<char> cmdBuf(strCmd.begin(), strCmd.end());
+    cmdBuf.push_back('\0');
+    STARTUPINFOA si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    if (CreateProcessA(NULL, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        fLaunched = true;
+    }
+#else
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        // Child: wait for the parent to release the port and files, then re-exec.
+        // /proc/self/exe is the reliable absolute path; argv[0] may be relative
+        // or a bare name that execv() cannot resolve.
+        sleep(2);
+        char exePath[4096];
+        ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (len > 0)
+        {
+            exePath[len] = '\0';
+            execv(exePath, g_restartArgv);
+        }
+        if (g_restartArgv)
+            execv(g_restartArgv[0], g_restartArgv);
+        _exit(127);
+    }
+    fLaunched = (pid > 0);
+#endif
+
+    if (fLaunched)
+    {
+        fShutdown = true;
+        if (glfwGetCurrentContext())
+            glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
+    }
+    else
+        g_wizardStatus = "Could not relaunch automatically -- please restart "
+                         "Bitflash yourself to switch to the SQLite wallet.";
+}
 
 static void DrawBackendWizardDialog()
 {
@@ -1416,11 +1539,19 @@ static void DrawBackendWizardDialog()
             ImGui::TextWrapped("%s", g_wizardStatus.c_str());
             ImGui::Spacing();
             ImGui::TextWrapped(
-                "Restart Bitflash to start using the SQLite wallet. Your Berkeley "
-                "DB wallet.dat is kept untouched as a fallback.");
+                "The switch takes effect when Bitflash restarts. Until then it is "
+                "still running on the old Berkeley DB wallet. Your wallet.dat is "
+                "kept untouched as a fallback.");
             ImGui::Spacing();
-            if (ImGui::Button("Close", ImVec2(120.0f, 0.0f)))
+            if (ImGui::Button("Restart Now", ImVec2(140.0f, 0.0f)))
+                RestartApplication();
+            ImGui::SameLine();
+            if (ImGui::Button("Later", ImVec2(120.0f, 0.0f)))
                 g_showBackendWizard = false;
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "If you keep mining before restarting, new coins go to the old "
+                "wallet until you switch.");
         }
         else
         {
@@ -1534,6 +1665,10 @@ int RunGUI(int argc, char* argv[])
 
     g_mineRadio = nMineMode;
     strncpy(g_participantPool, strParticipantPool.c_str(), sizeof(g_participantPool)-1);
+
+    // Kept for the wizard's "Restart Now": relaunch with the same command line.
+    g_restartArgc = argc;
+    g_restartArgv = argv;
 
     // First run on a Berkeley DB wallet with no recorded choice yet: offer to
     // convert to SQLite. Never when already on SQLite, once wallet.sqlite exists,

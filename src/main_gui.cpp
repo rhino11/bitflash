@@ -509,6 +509,14 @@ int main(int argc, char* argv[])
 
     ParseStartupArguments(argc, argv);
 
+#ifdef _WIN32
+    // Set by the GUI "Restart Now" button: give the previous instance a moment
+    // to release the network port and the block-index files before this one
+    // opens them, so a relaunch does not race the process it is replacing.
+    if (arg(argc, argv, "/restartwait") || arg(argc, argv, "-restartwait"))
+        Sleep(2500);
+#endif
+
     // Hidden self-test helper. It must run before LoadWallet(): several
     // storage-sanity scenarios deliberately make wallet.dat unsafe to load.
     string strSelfTestMutateWallet =
