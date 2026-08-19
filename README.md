@@ -8,9 +8,10 @@ CPU-only cryptocurrency. A revival of Bitcoin 0.1.0 with RandomX proof of work a
 
 ![PoW](https://img.shields.io/badge/PoW-RandomX%20(CPU)-2ea44f?style=for-the-badge)
 ![Privacy](https://img.shields.io/badge/addresses-.btf%20anonymous-2ea44f?style=for-the-badge)
+![Tor](https://img.shields.io/badge/tor-onion%20service-7d4698?style=for-the-badge)
 ![Fair Launch](https://img.shields.io/badge/premine-none-2ea44f?style=for-the-badge)
 
-**[Download](../../releases/latest)**
+**[Download](https://releases.bitflash.network/)**
 
 </div>
 
@@ -46,14 +47,14 @@ For a plain SOCKS5 proxy without Tor-specific defaults, use
 
 ## Quick start
 
-Download the [latest release](../../releases/latest) and run. No install, no
-configuration — it connects automatically and starts syncing.
+Download the [latest release](https://releases.bitflash.network/) and run. No
+install, no configuration — it connects automatically and starts syncing.
 
 **Linux:** make the `.AppImage` executable and run it.
 
-**Windows:** extract the `-windows.zip` and run `Bitflash.exe`.
-If you want managed Tor without a separate Tor install, use the
-`-windows-with-tor.zip` package and start Bitflash with `-managedtor`.
+**Windows:** extract the `-windows-with-tor.zip` and run `Bitflash.exe`. Tor is
+bundled and a managed Tor instance starts automatically, so onion transport
+works with no separate install. Pass `-nomanagedtor` to turn it off.
 
 Every release ships a `SHA256SUMS` covering the assets. Verifying takes a second
 and is worth doing:
@@ -83,7 +84,7 @@ Public mirrors should make the latest checksum files available both under the
 versioned release directory and at the release root:
 
 ```text
-https://releases.bitflash.network/v1.2.19/SHA256SUMS
+https://releases.bitflash.network/v1.2.20/SHA256SUMS
 https://releases.bitflash.network/SHA256SUMS        # alias to latest
 ```
 
@@ -165,6 +166,12 @@ Since 1.2.12 a wallet can hold twelve words that rebuild it. Since 1.2.13 those
 words also cover the address the window shows you. **Both still matter** — the
 phrase and the file back up different things, and the difference is where people
 lose money.
+
+Since 1.2.20 the file is a single self-contained `wallet.sqlite` by default. A
+fresh data directory starts on it; an existing Berkeley DB `wallet.dat` keeps
+working and the desktop app converts it in one click on first run, never
+touching the original, which stays as a fallback. See
+[wallet storage](docs/storage.md).
 
 The derivation is written down in [docs/derivation.md](docs/derivation.md), with
 test vectors and a script that reproduces them from scratch. It is there so the
