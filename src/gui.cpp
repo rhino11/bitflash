@@ -11,6 +11,9 @@
 #include <ctime>
 #include <cstdio>
 #include <sstream>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <iomanip>
 #include <atomic>
 #include <mutex>
@@ -1400,6 +1403,67 @@ static void DrawAboutDialog()
 static bool        g_showBackendWizard = false;
 static std::string g_wizardStatus;
 static bool        g_wizardConverted   = false;
+static int         g_restartArgc       = 0;
+static char**      g_restartArgv       = NULL;
+
+// Relaunch Bitflash with the same arguments and datadir, then ask this instance
+// to exit. A short delay lets the old process release the network port and the
+// block-index files before the new one opens them, so mining resumes cleanly on
+// the SQLite wallet instead of both instances fighting over the same files.
+static void RestartApplication()
+{
+#ifdef _WIN32
+    char exePath[MAX_PATH];
+    if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
+        return;
+    std::string strArgs;
+    bool fHasDataDir = false;
+    for (int i = 1; i < g_restartArgc; i++)
+    {
+        std::string a = g_restartArgv[i] ? g_restartArgv[i] : "";
+        if (a.find("-datadir=") == 0 || a.find("/datadir=") == 0)
+            fHasDataDir = true;
+        strArgs += " \"" + a + "\"";
+    }
+    if (!fHasDataDir)
+        strArgs += " \"-datadir=" + GetAppDir() + "\"";
+
+    std::string strBat = GetAppDir() + "\\bitflash-restart.bat";
+    FILE* pf = fopen(strBat.c_str(), "wb");
+    if (pf)
+    {
+        // ping is the reliable no-console delay on Windows; timeout needs a tty.
+        fprintf(pf,
+                "@echo off\r\n"
+                "ping 127.0.0.1 -n 3 >nul\r\n"
+                "start \"\" \"%s\"%s\r\n"
+                "del \"%%~f0\"\r\n",
+                exePath, strArgs.c_str());
+        fclose(pf);
+        std::string strCmd = "cmd /c \"" + strBat + "\"";
+        STARTUPINFOA si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+        PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+        if (CreateProcessA(NULL, (char*)strCmd.c_str(), NULL, NULL, FALSE,
+                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
+        {
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+        }
+    }
+#else
+    pid_t pid = fork();
+    if (pid == 0)
+    {
+        sleep(2);
+        if (g_restartArgv)
+            execv(g_restartArgv[0], g_restartArgv);
+        _exit(127);
+    }
+#endif
+    fShutdown = true;
+    if (glfwGetCurrentContext())
+        glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
+}
 
 static void DrawBackendWizardDialog()
 {
@@ -1416,11 +1480,19 @@ static void DrawBackendWizardDialog()
             ImGui::TextWrapped("%s", g_wizardStatus.c_str());
             ImGui::Spacing();
             ImGui::TextWrapped(
-                "Restart Bitflash to start using the SQLite wallet. Your Berkeley "
-                "DB wallet.dat is kept untouched as a fallback.");
+                "The switch takes effect when Bitflash restarts. Until then it is "
+                "still running on the old Berkeley DB wallet. Your wallet.dat is "
+                "kept untouched as a fallback.");
             ImGui::Spacing();
-            if (ImGui::Button("Close", ImVec2(120.0f, 0.0f)))
+            if (ImGui::Button("Restart Now", ImVec2(140.0f, 0.0f)))
+                RestartApplication();
+            ImGui::SameLine();
+            if (ImGui::Button("Later", ImVec2(120.0f, 0.0f)))
                 g_showBackendWizard = false;
+            ImGui::Spacing();
+            ImGui::TextDisabled(
+                "If you keep mining before restarting, new coins go to the old "
+                "wallet until you switch.");
         }
         else
         {
@@ -1534,6 +1606,10 @@ int RunGUI(int argc, char* argv[])
 
     g_mineRadio = nMineMode;
     strncpy(g_participantPool, strParticipantPool.c_str(), sizeof(g_participantPool)-1);
+
+    // Kept for the wizard's "Restart Now": relaunch with the same command line.
+    g_restartArgc = argc;
+    g_restartArgv = argv;
 
     // First run on a Berkeley DB wallet with no recorded choice yet: offer to
     // convert to SQLite. Never when already on SQLite, once wallet.sqlite exists,
