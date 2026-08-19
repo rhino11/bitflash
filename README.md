@@ -170,7 +170,9 @@ lose money.
 Since 1.2.20 the file is a single self-contained `wallet.sqlite` by default. A
 fresh data directory starts on it; an existing Berkeley DB `wallet.dat` keeps
 working and the desktop app converts it in one click on first run, never
-touching the original, which stays as a fallback. See
+touching the original, which stays as a fallback. Choose a backend explicitly
+with `-walletbackend=sqlite` or `-walletbackend=bdb`, recorded in a
+`wallet-backend` marker in the data directory. See
 [wallet storage](docs/storage.md).
 
 The derivation is written down in [docs/derivation.md](docs/derivation.md), with
@@ -356,6 +358,7 @@ Other options worth knowing:
 -socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
 -managedtor[=PATH] # start Tor, create a hidden service, advertise its onion
+-nomanagedtor    # disable the automatic bundled-Tor startup
 -onionservice=HOST.onion:PORT # advertise this node's Tor hidden service
 -debug           # verbose log; without it debug.log is nearly silent
 -help            # full list
@@ -375,6 +378,10 @@ proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
 `127.0.0.1:9050`. It routes outbound Nostr discovery, `.btf` rendezvous dials,
 and signed direct `.onion` peer dials through Tor, and keeps external-IP probes
 disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
+
+The desktop app starts a managed Tor automatically when no other Tor option is
+set, so onion transport works out of the box; `-nomanagedtor` turns that off.
+For a headless node, ask for it explicitly:
 
 `-managedtor[=PATH]` starts a Tor process for this node, writes a local `torrc`,
 creates a v3 hidden service for port `8433`, routes outbound discovery through
