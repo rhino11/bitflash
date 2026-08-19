@@ -186,8 +186,11 @@ bitflash -newphrase                          # create it, show it once, exit
 bitflash -restorephrase="twelve words here"  # rebuild a wallet from it
 ```
 
-`-newphrase` installs a BIP32 seed, derives the wallet's key pool and default
-receiving address from it, and prints the words once. It refuses if a phrase
+`-newphrase` installs a BIP39/BIP32 seed and derives the wallet as a BIP44 tree
+along `m/44'/4346950'/0'/…` — coin type **4346950** is `0x425446`, the ASCII
+bytes `BTF`, registered in [SLIP-0044](https://github.com/satoshilabs/slips/blob/master/slip-0044.md).
+It builds the key pool and default receiving address from the seed, and prints
+the words once. It refuses if a phrase
 already exists: replacing one silently would strand every coin on addresses the
 written-down words no longer describe.
 
@@ -213,6 +216,10 @@ matter.
 > reproduce while the window said a phrase existed. Restoring repairs it.
 
 ### The file
+
+Under the SQLite default the wallet is one self-contained `wallet.sqlite`, and
+`-backupwallet` writes a matching `.sqlite` copy that opens on its own — no
+sidecar directory. The Berkeley DB notes below apply to a legacy `wallet.dat`.
 
 **Copying `wallet.dat` on its own is not a backup.** Berkeley DB ties the file
 to the environment in the `database/` subdirectory beside it, so a lone
@@ -251,7 +258,7 @@ as a verdict to somebody who has just lost a wallet.
 
 ### When wallet.dat itself will not open
 
-Everything above still runs through Berkeley DB. If the database is the thing
+A legacy `wallet.dat` runs on Berkeley DB. If that database is the thing
 that is broken — a build that will not read it, a file truncated by a bad copy,
 an environment beyond recovery — the keys are usually still fine, and you can
 take them out as text:
@@ -493,7 +500,8 @@ windows-tor` to require the extra signature check.
 | Addressing | `.btf` rendezvous — see the caveats above |
 | Premine | None |
 | Pool server | Built-in — `.btf` rendezvous only |
-| Wallet recovery | Twelve-word phrase (BIP39 + BIP32), plus file backup |
+| Wallet recovery | Twelve-word phrase (BIP39 + BIP32 + BIP44, coin type 4346950), plus file backup |
+| Wallet storage | SQLite `wallet.sqlite` by default, or Berkeley DB `wallet.dat` |
 
 The halving interval is the number most people get wrong coming from Bitcoin.
 Same 210,000 blocks, but at two minutes instead of ten, so it arrives in about
