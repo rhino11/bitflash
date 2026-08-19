@@ -516,6 +516,6 @@ ten months rather than four years.
 
 ---
 
-Experimental software. Young network. Don't put in more than you are willing to lose.
+Young network. Keep your node current and don't put in more than you are willing to lose.
 
 MIT. Built on Bitcoin 0.1.0 (Satoshi Nakamoto, 2009).
