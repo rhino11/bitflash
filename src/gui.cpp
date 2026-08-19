@@ -175,7 +175,11 @@ static bool PathIsInsideDataDir(const std::string& strPath)
 
 static void SetDefaultBackupPath()
 {
-    std::string path = DefaultBackupDir() + "/wallet-backup-" + BackupTimeSuffix() + ".dat";
+    // Match the extension to the live backend: BackupWallet copies wallet.sqlite
+    // under the SQLite backend and wallet.dat under Berkeley DB, so a ".dat"
+    // default name would put SQLite contents in a misleadingly-named file.
+    const char* pszExt = WalletSQLiteRuntimeActive() ? ".sqlite" : ".dat";
+    std::string path = DefaultBackupDir() + "/wallet-backup-" + BackupTimeSuffix() + pszExt;
     strncpy(g_backupPath, path.c_str(), sizeof(g_backupPath)-1);
     g_backupPath[sizeof(g_backupPath)-1] = '\0';
 }
@@ -1257,11 +1261,11 @@ static void DrawWalletSafetyDialog()
         }
         ImGui::Text("Phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableCredit).c_str());
-        ImGui::Text("Wallet.dat-only spendable balance: %s BTF",
+        ImGui::Text("Not phrase-backed spendable balance: %s BTF",
                     FmtMoney(g_recoveryAudit.nLegacyCredit).c_str());
         ImGui::Text("Phrase-backed immature mining rewards: %s BTF",
                     FmtMoney(g_recoveryAudit.nRecoverableImmatureCredit).c_str());
-        ImGui::Text("Wallet.dat-only immature mining rewards: %s BTF",
+        ImGui::Text("Not phrase-backed immature mining rewards: %s BTF",
                     FmtMoney(g_recoveryAudit.nLegacyImmatureCredit).c_str());
         if (!g_recoveryAudit.fDeriveComplete)
         {
@@ -1275,8 +1279,8 @@ static void DrawWalletSafetyDialog()
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.75f, 0.25f, 1.0f));
             ImGui::TextWrapped(
                 "Some coins are on keys the phrase does not reproduce. "
-                "Keep wallet.dat backups until that balance has been moved to a "
-                "phrase-backed address.");
+                "Keep a file backup of this wallet until that balance has been "
+                "moved to a phrase-backed address.");
             ImGui::PopStyleColor();
         }
         else if (HaveHDSeed() &&
