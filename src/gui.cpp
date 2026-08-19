@@ -11,7 +11,9 @@
 #include <ctime>
 #include <cstdio>
 #include <sstream>
-#ifndef _WIN32
+#ifdef _WIN32
+#include <shellapi.h>   // ShellExecuteA, to open the website in the browser
+#else
 #include <unistd.h>
 #endif
 #include <iomanip>
@@ -1376,16 +1378,38 @@ static void DrawDiagnosticsDialog()
     ImGui::End();
 }
 
+static void OpenURL(const char* pszUrl)
+{
+#ifdef _WIN32
+    ShellExecuteA(NULL, "open", pszUrl, NULL, NULL, SW_SHOWNORMAL);
+#else
+    std::string cmd = std::string("xdg-open '") + pszUrl + "' >/dev/null 2>&1 &";
+    int r = system(cmd.c_str());
+    (void)r;
+#endif
+}
+
 static void DrawAboutDialog()
 {
     if (!g_showAbout) return;
-    ImGui::SetNextWindowSize(ImVec2(380.0f, 170.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(380.0f, 205.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("About Bitflash", &g_showAbout,
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
     {
-        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f), "Bitflash  BTF  v1.1.0");
+        ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.0f, 1.0f),
+                           "Bitflash  BTF  v" BITFLASH_VERSION_STRING);
+        ImGui::Spacing();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.40f, 0.70f, 1.0f, 1.0f));
+        ImGui::TextUnformatted("https://bitflash.network");
+        ImGui::PopStyleColor();
+        if (ImGui::IsItemHovered())
+        {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+            if (ImGui::IsMouseClicked(0))
+                OpenURL("https://bitflash.network");
+        }
         ImGui::Spacing();
         ImGui::TextWrapped(
             "CPU-only cryptocurrency. RandomX proof of work. "

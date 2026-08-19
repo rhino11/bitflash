@@ -1,6 +1,11 @@
 // Core node headers -- no GUI framework dependency.
 // Included by gui.cpp and all non-GUI source files.
 
+// The one place the human-readable release version lives -- bump it at release.
+// It is what the About dialog shows. Protocol and transaction versions elsewhere
+// (nVersion fields) are unrelated and must not be changed for a release.
+#define BITFLASH_VERSION_STRING "1.2.20"
+
 #ifdef _MSC_VER
 #pragma warning(disable:4786)
 #endif
