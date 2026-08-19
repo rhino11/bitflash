@@ -1410,63 +1410,94 @@ static bool        g_wizardConverted   = false;
 static int         g_restartArgc       = 0;
 static char**      g_restartArgv       = NULL;
 
+#ifdef _WIN32
+// Quote one argument so CommandLineToArgvW parses it back to exactly this
+// string: only backslashes that immediately precede a double quote (including
+// the closing one) are doubled, so ordinary Windows paths are not mangled.
+static std::string QuoteArgWin(const std::string& a)
+{
+    if (!a.empty() && a.find_first_of(" \t\"") == std::string::npos)
+        return a;
+    std::string r = "\"";
+    size_t bs = 0;
+    for (size_t i = 0; i < a.size(); i++)
+    {
+        if (a[i] == '\\') { bs++; continue; }
+        if (a[i] == '"') { r.append(bs * 2 + 1, '\\'); r += '"'; bs = 0; continue; }
+        r.append(bs, '\\'); bs = 0; r += a[i];
+    }
+    r.append(bs * 2, '\\');
+    r += "\"";
+    return r;
+}
+#endif
+
 // Relaunch Bitflash with the same arguments and datadir, then ask this instance
-// to exit. A short delay lets the old process release the network port and the
-// block-index files before the new one opens them, so mining resumes cleanly on
-// the SQLite wallet instead of both instances fighting over the same files.
+// to exit -- but only once the relaunch has actually started, so a failure never
+// leaves the user with no node running. The new instance waits (-restartwait)
+// before it opens the network port and the block index, so this one is gone
+// first and they never fight over the same files.
 static void RestartApplication()
 {
+    bool fLaunched = false;
 #ifdef _WIN32
     char exePath[MAX_PATH];
     if (GetModuleFileNameA(NULL, exePath, MAX_PATH) == 0)
         return;
-    std::string strArgs;
+    std::string strCmd = QuoteArgWin(exePath);
     bool fHasDataDir = false;
     for (int i = 1; i < g_restartArgc; i++)
     {
         std::string a = g_restartArgv[i] ? g_restartArgv[i] : "";
         if (a.find("-datadir=") == 0 || a.find("/datadir=") == 0)
             fHasDataDir = true;
-        strArgs += " \"" + a + "\"";
+        strCmd += " " + QuoteArgWin(a);
     }
     if (!fHasDataDir)
-        strArgs += " \"-datadir=" + GetAppDir() + "\"";
+        strCmd += " " + QuoteArgWin("-datadir=" + GetAppDir());
+    strCmd += " -restartwait";
 
-    std::string strBat = GetAppDir() + "\\bitflash-restart.bat";
-    FILE* pf = fopen(strBat.c_str(), "wb");
-    if (pf)
+    std::vector<char> cmdBuf(strCmd.begin(), strCmd.end());
+    cmdBuf.push_back('\0');
+    STARTUPINFOA si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
+    PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
+    if (CreateProcessA(NULL, &cmdBuf[0], NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
     {
-        // ping is the reliable no-console delay on Windows; timeout needs a tty.
-        fprintf(pf,
-                "@echo off\r\n"
-                "ping 127.0.0.1 -n 3 >nul\r\n"
-                "start \"\" \"%s\"%s\r\n"
-                "del \"%%~f0\"\r\n",
-                exePath, strArgs.c_str());
-        fclose(pf);
-        std::string strCmd = "cmd /c \"" + strBat + "\"";
-        STARTUPINFOA si; memset(&si, 0, sizeof(si)); si.cb = sizeof(si);
-        PROCESS_INFORMATION pi; memset(&pi, 0, sizeof(pi));
-        if (CreateProcessA(NULL, (char*)strCmd.c_str(), NULL, NULL, FALSE,
-                           CREATE_NO_WINDOW, NULL, NULL, &si, &pi))
-        {
-            CloseHandle(pi.hProcess);
-            CloseHandle(pi.hThread);
-        }
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        fLaunched = true;
     }
 #else
     pid_t pid = fork();
     if (pid == 0)
     {
+        // Child: wait for the parent to release the port and files, then re-exec.
+        // /proc/self/exe is the reliable absolute path; argv[0] may be relative
+        // or a bare name that execv() cannot resolve.
         sleep(2);
+        char exePath[4096];
+        ssize_t len = readlink("/proc/self/exe", exePath, sizeof(exePath) - 1);
+        if (len > 0)
+        {
+            exePath[len] = '\0';
+            execv(exePath, g_restartArgv);
+        }
         if (g_restartArgv)
             execv(g_restartArgv[0], g_restartArgv);
         _exit(127);
     }
+    fLaunched = (pid > 0);
 #endif
-    fShutdown = true;
-    if (glfwGetCurrentContext())
-        glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
+
+    if (fLaunched)
+    {
+        fShutdown = true;
+        if (glfwGetCurrentContext())
+            glfwSetWindowShouldClose(glfwGetCurrentContext(), true);
+    }
+    else
+        g_wizardStatus = "Could not relaunch automatically -- please restart "
+                         "Bitflash yourself to switch to the SQLite wallet.";
 }
 
 static void DrawBackendWizardDialog()
