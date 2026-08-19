@@ -182,7 +182,7 @@ static void PrintUsage()
     printf("  /walletstoragecheck        (fail closed on inconsistent or unsafe\n");
     printf("                              wallet.dat storage state)\n");
     printf("  /walletsqliteexport=FILE   (copy raw wallet.dat records into an\n");
-    printf("                              experimental SQLite store, then exit)\n");
+    printf("                              SQLite store, then exit)\n");
     printf("  /walletsqliteverify=FILE   (compare wallet.dat with a SQLite export,\n");
     printf("                              printing counts only, then exit)\n");
     printf("  /walletsqliterestore=FILE  (rebuild wallet.dat from a SQLite export in\n");
@@ -680,17 +680,17 @@ int main(int argc, char* argv[])
             AttachTerminal();
             FatalStartupError(fHeadlessStartup,
                 strprintf("Unknown wallet backend '%s'.", strWalletBackend.c_str()),
-                "Use -walletbackend=sqlite for the experimental SQLite backend, "
-                "or omit -walletbackend (or -walletbackend=bdb) to use the "
-                "default Berkeley DB wallet.dat.");
+                "Use -walletbackend=sqlite for the SQLite backend, or "
+                "-walletbackend=bdb for the Berkeley DB wallet.dat.");
             return 1;
         }
 
         if (strWalletBackend == "sqlite")
         {
-            // Opt-in, experimental. The node runs on <datadir>/wallet.sqlite and
-            // never opens wallet.dat, but the user has to have exported one
-            // first -- there is no silent migration, and wallet.dat is left
+            // Explicit opt-in via the flag. The node runs on
+            // <datadir>/wallet.sqlite and never opens wallet.dat, but the user
+            // has to have exported one first -- there is no silent migration,
+            // and wallet.dat is left
             // exactly where it is so a plain restart goes back to it.
             AttachTerminal();
             string strSQLitePath = GetAppDir() + "/wallet.sqlite";
@@ -724,7 +724,7 @@ int main(int argc, char* argv[])
             }
 
             fprintf(stderr,
-                    "Wallet backend: SQLite (experimental)\n"
+                    "Wallet backend: SQLite\n"
                     "  %s\n"
                     "Your Berkeley DB wallet.dat is left untouched. Restart without\n"
                     "-walletbackend=sqlite to go back to it.\n",

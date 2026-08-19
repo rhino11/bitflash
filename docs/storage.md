@@ -85,10 +85,11 @@ A future wallet backend must keep these properties:
    - recovery phrase encrypted and locked, requiring unlock before coverage can
      be audited.
 
-## Experimental SQLite Wallet Store
+## SQLite Wallet Store
 
-The SQLite wallet path starts as a byte-preserving record store, not as a new
-wallet format:
+Since v1.2.20 SQLite is the default wallet backend. It is a byte-preserving
+record store, not a new wallet format -- the same serialized `CDataStream` bytes
+`wallet.dat` uses:
 
 ```sql
 CREATE TABLE wallet_records (
@@ -98,32 +99,26 @@ CREATE TABLE wallet_records (
 PRAGMA user_version=1;
 ```
 
-Keys and values are the same serialized `CDataStream` bytes used by `wallet.dat`.
-The first implementation is exercised only by `-selftest=wallet-sqlite`; the
-runtime wallet still opens Berkeley DB. The purpose is to prove schema creation,
-raw record write/read, close/reopen behavior, and value preservation before any
-BDB-to-SQLite migration or runtime backend flag exists.
+A fresh data directory starts on `wallet.sqlite`. An existing `wallet.dat` keeps
+running on Berkeley DB until it is converted: the GUI offers a one-click
+conversion on first run, and `-walletbackend=sqlite` / `-walletbackend=bdb`
+(recorded in a plain-text `wallet-backend` marker file in the datadir) select a
+backend explicitly. Conversion never modifies `wallet.dat`; it stays as a
+fallback, and the change takes effect on restart.
 
-`-walletsqliteexport=FILE` is the next staging tool. It streams every raw
-`wallet.dat` record through `ScanWalletRecords()` and writes those same key and
-value bytes into the SQLite table inside one transaction. It refuses to
-overwrite an existing export and still does not change the runtime wallet
-backend. `CWalletDBSQLite::ScanRecords()` can stream those exported records back
-through the same visitor shape, so tests can compare BDB and SQLite record
-streams without introducing a SQLite runtime wallet loader yet.
-`-walletsqliteverify=FILE` compares the current `wallet.dat` stream with a
-SQLite export and prints only record counts and mismatch counts.
-`-walletsqliterestore=FILE` rebuilds `wallet.dat` from a SQLite export only in
-an empty data directory, then the verifier can prove the restored BDB file still
-matches the export byte-for-byte. Failed exports remove the incomplete SQLite
-file and failed restores remove the incomplete `wallet.dat`.
-`-walletsqliteloadcheck=FILE` parses a SQLite export using the same record
-types the wallet loader understands, so a migration can prove the export is not
-just byte-preserving but loader-compatible before runtime activation.
-`-walletsqlite=FILE` is the first runtime staging flag: it loads a SQLite export
-through the startup wallet path, initializes the in-memory wallet state, reports
-success, and exits before network, mining, GUI, or wallet mutation begins. It is
-deliberately read-only until the write path is routed to SQLite as well.
+Every wallet operation runs on either backend: read, write, erase, key-pool and
+HD-seed writes (the two halves of the seed bracketed in one SQLite transaction),
+`-backupwallet` (checkpoint then copy the self-contained file), `-encryptwallet`
+(an atomic rebuild-and-swap in one transaction), and the `-walletstorageaudit` /
+`-walletstoragecheck` diagnostics, which read the active backend's file.
+
+The migration tooling remains available for scripted use. `-walletsqliteexport=FILE`
+streams every raw `wallet.dat` record through `ScanWalletRecords()` into a SQLite
+file in one transaction, refusing to overwrite. `-walletsqliteverify=FILE`
+compares the two streams and prints only counts. `-walletsqliteloadcheck=FILE`
+parses an export with the same record types the loader uses.
+`-walletsqliterestore=FILE` rebuilds a `wallet.dat` from an export in an empty
+data directory. Failed exports and restores remove their incomplete output.
 
 ## `blkindex.dat`
 
@@ -150,12 +145,14 @@ conversion path.
 The old IP address database (`addr.dat`) has been removed. Peer discovery is
 handled by Nostr, `.btf`, rendezvous relays, and direct onion peers.
 
-## Recommended Migration Order
+## Migration Order (shipped in v1.2.20)
 
-1. Keep adding storage self-tests around current BDB behavior.
-2. Add an experimental wallet backend behind an explicit flag.
-3. Implement BDB-to-new-wallet migration as a one-way copy with a backup.
-4. Make the new wallet backend default only after cross-version restore,
-   encryption, backup, and recovery-audit tests pass.
+1. Storage self-tests were added around Berkeley DB behavior first.
+2. The SQLite backend landed behind an explicit flag, then behind a
+   `wallet-backend` marker and a GUI conversion wizard.
+3. BDB-to-SQLite migration is a one-way copy that leaves `wallet.dat` as a backup.
+4. SQLite became the default for new wallets only after cross-version restore,
+   encryption, backup, and recovery-audit tests passed -- and a live coin-proof
+   of receive, spend, restart, and encrypt on real mainnet funds.
 5. Treat `blkindex.dat` separately; it is safer to rebuild than to migrate under
    pressure.

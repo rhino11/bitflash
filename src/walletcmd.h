@@ -70,9 +70,9 @@ int CmdWalletStorageAudit(const std::string& strJsonOut = "");
 // or migration-unsafe mix of storage records.
 int CmdWalletStorageCheck();
 
-// Diagnostic/migration staging: copy every raw wallet.dat record into an
-// experimental SQLite key/value store, preserving serialized bytes. This does
-// not change which backend the runtime wallet opens.
+// Copy every raw wallet.dat record into a SQLite key/value store, preserving
+// serialized bytes. A migration/scripting tool; it does not change which backend
+// the runtime wallet opens.
 int CmdWalletSQLiteExport(const std::string& strDest);
 
 // Export the currently-loaded wallet to a SQLite file (shared by the command
