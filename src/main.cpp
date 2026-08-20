@@ -41,12 +41,30 @@ unsigned int nTransactionsUpdated = 0;
 map<COutPoint, CInPoint> mapNextTx;
 
 map<uint256, CBlockIndex*> mapBlockIndex;
-// Bitflash genesis -- mined under RandomX PoW on 2026-07-22
-// (nTime 1753142400, nBits 0x1f0fffff, RandomX key "Bitflash/RandomX/v1/...")
-// Bitflash 2026 stable relaunch genesis (2-min blocks, RandomX). Mined values.
-unsigned int GENESIS_NONCE = 3141;
-uint256 hashGenesisBlock("0x5bd7cb255d814e48cebcdfb72da4dc87b34bd774227f8ceb546c5640f4bdc169");
-uint256 hashGenesisMerkleRoot("0x1a45b4482532abb29b10e234d3f13132230525a339ecea91658ffa675a5b1325");
+// Bitflash mainnet genesis -- mined under RandomX PoW for the 2026 stable
+// relaunch. Testnet gets its own resettable genesis below so block indexes,
+// headers, and wallet scans cannot be accidentally mixed across networks.
+static const unsigned int MAINNET_GENESIS_TIME  = 1753315200; // 2026-07-24 00:00:00 UTC
+static const unsigned int MAINNET_GENESIS_NONCE = 3141;
+static const char* MAINNET_GENESIS_TIMESTAMP =
+    "Bitflash 24/Jul/2026 Fair launch: one CPU one vote, no premine";
+static const char* MAINNET_GENESIS_HASH =
+    "0x5bd7cb255d814e48cebcdfb72da4dc87b34bd774227f8ceb546c5640f4bdc169";
+static const char* MAINNET_GENESIS_MERKLE =
+    "0x1a45b4482532abb29b10e234d3f13132230525a339ecea91658ffa675a5b1325";
+
+static const unsigned int TESTNET_GENESIS_TIME  = 1787184000; // 2026-08-20 00:00:00 UTC
+static const unsigned int TESTNET_GENESIS_NONCE = 3199;
+static const char* TESTNET_GENESIS_TIMESTAMP =
+    "Bitflash testnet 20/Aug/2026: resettable public test chain";
+static const char* TESTNET_GENESIS_HASH =
+    "0xa9d11c6d697bcb7aea0653bc088b12dcf9f44e732df205162cf085fd9d9963eb";
+static const char* TESTNET_GENESIS_MERKLE =
+    "0x510b293105e3ff85b8d4c3920e357f85d1a86bf199eb4e7d11f04f380030ec5c";
+
+unsigned int GENESIS_NONCE = MAINNET_GENESIS_NONCE;
+uint256 hashGenesisBlock(MAINNET_GENESIS_HASH);
+uint256 hashGenesisMerkleRoot(MAINNET_GENESIS_MERKLE);
 CBlockIndex* pindexGenesisBlock = NULL;
 int nBestHeight = -1;
 uint256 hashBestChain = 0;
@@ -116,6 +134,63 @@ static std::atomic<uint64> gParticipantHashes{0};
 static std::atomic<uint64> gParticipantHashRateX1000{0};
 static std::mutex gParticipantStatusMutex;
 static std::string gParticipantStatus;
+
+void SelectGenesisParams(bool fTestNetIn)
+{
+    static bool fGenesisParamsSelected = false;
+    static bool fGenesisParamsTestNet = false;
+    if (fGenesisParamsSelected && fGenesisParamsTestNet == fTestNetIn)
+        return;
+
+    fGenesisParamsSelected = true;
+    fGenesisParamsTestNet = fTestNetIn;
+
+    if (fTestNetIn)
+    {
+        GENESIS_NONCE = TESTNET_GENESIS_NONCE;
+        hashGenesisBlock = uint256(TESTNET_GENESIS_HASH);
+        hashGenesisMerkleRoot = uint256(TESTNET_GENESIS_MERKLE);
+    }
+    else
+    {
+        GENESIS_NONCE = MAINNET_GENESIS_NONCE;
+        hashGenesisBlock = uint256(MAINNET_GENESIS_HASH);
+        hashGenesisMerkleRoot = uint256(MAINNET_GENESIS_MERKLE);
+    }
+}
+
+void SelectChainParams(bool fTestNetIn)
+{
+    SelectNetworkParams(fTestNetIn);
+    SelectGenesisParams(fTestNetIn);
+}
+
+static CBlock BuildGenesisBlock()
+{
+    const char* pszTimestamp = IsTestNet() ?
+        TESTNET_GENESIS_TIMESTAMP : MAINNET_GENESIS_TIMESTAMP;
+
+    CTransaction txNew;
+    txNew.vin.resize(1);
+    txNew.vout.resize(1);
+    txNew.vin[0].scriptSig = CScript() << 486604799 << CBigNum(4) <<
+        vector<unsigned char>((unsigned char*)pszTimestamp,
+                              (unsigned char*)pszTimestamp + strlen(pszTimestamp));
+    txNew.vout[0].nValue = 50 * COIN;
+    txNew.vout[0].scriptPubKey = CScript() <<
+        CBigNum("0x5F1DF16B2B704C8A578D0BBAF74D385CDE12C11EE50455F3C438EF4C3FBCF649B6DE611FEAE06279A60939E028A8D65C10B73071A6F16719274855FEB0FD8A6704") <<
+        OP_CHECKSIG;
+
+    CBlock block;
+    block.vtx.push_back(txNew);
+    block.hashPrevBlock = 0;
+    block.hashMerkleRoot = block.BuildMerkleTree();
+    block.nVersion = 1;
+    block.nTime = IsTestNet() ? TESTNET_GENESIS_TIME : MAINNET_GENESIS_TIME;
+    block.nBits = 0x1f0fffff; // = bnProofOfWorkLimit (Bitflash RandomX floor)
+    block.nNonce = GENESIS_NONCE;
+    return block;
+}
 
 void SetParticipantMiningStatus(const std::string& status)
 {
@@ -2664,21 +2739,7 @@ bool LoadBlockIndex(bool fAllowNew)
         //   vMerkleTree: 4a5e1e
 
         // Bitflash genesis block -- own header (fair launch, 2026 stable relaunch)
-        char* pszTimestamp = "Bitflash 24/Jul/2026 Fair launch: one CPU one vote, no premine";
-        CTransaction txNew;
-        txNew.vin.resize(1);
-        txNew.vout.resize(1);
-        txNew.vin[0].scriptSig     = CScript() << 486604799 << CBigNum(4) << vector<unsigned char>((unsigned char*)pszTimestamp, (unsigned char*)pszTimestamp + strlen(pszTimestamp));
-        txNew.vout[0].nValue       = 50 * COIN;
-        txNew.vout[0].scriptPubKey = CScript() << CBigNum("0x5F1DF16B2B704C8A578D0BBAF74D385CDE12C11EE50455F3C438EF4C3FBCF649B6DE611FEAE06279A60939E028A8D65C10B73071A6F16719274855FEB0FD8A6704") << OP_CHECKSIG;
-        CBlock block;
-        block.vtx.push_back(txNew);
-        block.hashPrevBlock = 0;
-        block.hashMerkleRoot = block.BuildMerkleTree();
-        block.nVersion = 1;
-        block.nTime    = 1753315200; // 2026-07-24 00:00:00 UTC (stable relaunch)
-        block.nBits    = 0x1f0fffff; // = bnProofOfWorkLimit (Bitflash RandomX floor)
-        block.nNonce   = GENESIS_NONCE;
+        CBlock block = BuildGenesisBlock();
 
         // If the nonce has not been found yet, mine the genesis once (RandomX)
         // and print the values to be hardcoded in the constants above.

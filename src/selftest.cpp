@@ -3085,7 +3085,7 @@ static int RunNetworkParamsSelfTest()
     std::string strOldDataDir = strSetDataDir;
     try
     {
-        SelectNetworkParams(false);
+        SelectChainParams(false);
         nFail += Check(!IsTestNet(), "starts on mainnet after explicit selection") ? 0 : 1;
         nFail += Check(ntohs(GetDefaultPort()) == MAINNET_PORT,
                        "mainnet default P2P port is 8433") ? 0 : 1;
@@ -3095,8 +3095,11 @@ static int RunNetworkParamsSelfTest()
         CMessageHeader mainHeader("ping", 0);
         char mainMagic[4];
         memcpy(mainMagic, mainHeader.pchMessageStart, sizeof(mainMagic));
+        uint256 mainGenesis = hashGenesisBlock;
+        uint256 mainMerkle = hashGenesisMerkleRoot;
+        unsigned int mainNonce = GENESIS_NONCE;
 
-        SelectNetworkParams(true);
+        SelectChainParams(true);
         nFail += Check(IsTestNet(), "testnet selection is sticky") ? 0 : 1;
         nFail += Check(ntohs(GetDefaultPort()) == TESTNET_PORT,
                        "testnet default P2P port is 18433") ? 0 : 1;
@@ -3106,6 +3109,14 @@ static int RunNetworkParamsSelfTest()
         CMessageHeader testHeader("ping", 0);
         nFail += Check(memcmp(mainMagic, testHeader.pchMessageStart, sizeof(mainMagic)) != 0,
                        "testnet message magic differs from mainnet") ? 0 : 1;
+        nFail += Check(hashGenesisBlock != mainGenesis &&
+                       hashGenesisMerkleRoot != mainMerkle &&
+                       GENESIS_NONCE != mainNonce,
+                       "testnet genesis constants differ from mainnet") ? 0 : 1;
+        nFail += Check(hashGenesisBlock == uint256("0xa9d11c6d697bcb7aea0653bc088b12dcf9f44e732df205162cf085fd9d9963eb") &&
+                       hashGenesisMerkleRoot == uint256("0x510b293105e3ff85b8d4c3920e357f85d1a86bf199eb4e7d11f04f380030ec5c") &&
+                       GENESIS_NONCE == 3199,
+                       "testnet genesis constants are pinned") ? 0 : 1;
 
         std::string tmp;
         if (!MakeTempDir(tmp))
@@ -3115,9 +3126,9 @@ static int RunNetworkParamsSelfTest()
         else
         {
             strSetDataDir = tmp;
-            SelectNetworkParams(false);
+            SelectChainParams(false);
             std::string mainDir = GetAppDir();
-            SelectNetworkParams(true);
+            SelectChainParams(true);
             std::string testDir = GetAppDir();
             nFail += Check(mainDir == tmp,
                            "mainnet uses the selected data directory") ? 0 : 1;
@@ -3138,7 +3149,7 @@ static int RunNetworkParamsSelfTest()
     }
 
     strSetDataDir = strOldDataDir;
-    SelectNetworkParams(false);
+    SelectChainParams(false);
 
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");

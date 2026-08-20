@@ -355,7 +355,7 @@ Other options worth knowing:
 
 ```bash
 -datadir=PATH    # wallet and chain data elsewhere
--testnet         # isolated test network datadir, port 18433, and message magic
+-testnet         # isolated test network genesis, datadir, port 18433, and magic
 -port=N          # P2P listen port, default 8433; testnet default 18433
 -socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050

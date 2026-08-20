@@ -59,6 +59,8 @@ extern map<uint256, CBlockIndex*> mapBlockIndex;
 extern uint256 hashGenesisBlock;
 extern uint256 hashGenesisMerkleRoot;
 extern unsigned int GENESIS_NONCE;
+void SelectGenesisParams(bool fTestNetIn);
+void SelectChainParams(bool fTestNetIn);
 extern CBlockIndex* pindexGenesisBlock;
 extern int nBestHeight;
 extern uint256 hashBestChain;
