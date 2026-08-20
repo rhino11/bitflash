@@ -366,6 +366,7 @@ string GetDiagnosticsText()
                                      nMining,
                                      (RandomXFastReady() ? 2080 : 256) + 2 * nMining).c_str()
                          : ", not mining");
+    str += strprintf("  large pages       %s\n", RandomXLargePagesStatus());
 
     str += SockAccountingText();
 

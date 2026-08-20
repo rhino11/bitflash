@@ -127,6 +127,8 @@ static void PrintUsage()
     printf("  /stratumbridgeport=N       (default 3333; listen on 127.0.0.1)\n");
     printf("  /solomine\n");
     printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
+    printf("  /nolargepages              (do not ask for 2 MB pages for the RandomX\n");
+    printf("                              cache, dataset and scratchpads)\n");
     printf("  /checkblocks=N             (blocks re-verified at startup, default 288, 0 = all)\n");
     printf("\n");
     printf("Pool operator announcement:\n");
@@ -229,6 +231,11 @@ static void ParseStartupArguments(int argc, char* argv[])
     string strCheckBlocks = argval2(argc, argv, "/checkblocks", "-checkblocks");
     if (!strCheckBlocks.empty())
         nCheckBlocksOnLoad = atoi(strCheckBlocks.c_str());
+
+    // Must be read before LoadBlockIndex(), which is what first calls
+    // RandomXInit() and fixes how the cache is allocated.
+    if (arg(argc,argv,"/nolargepages") || arg(argc,argv,"-nolargepages"))
+        fRandomXLargePages = false;
 
     // /genproclimit=N -- threads to hash with. 0 or absent means automatic,
     // which is every core but one. Named after Bitcoin's own option so it reads
