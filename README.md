@@ -355,7 +355,8 @@ Other options worth knowing:
 
 ```bash
 -datadir=PATH    # wallet and chain data elsewhere
--port=N          # P2P listen port, default 8433
+-testnet         # isolated test network datadir, port 18433, and message magic
+-port=N          # P2P listen port, default 8433; testnet default 18433
 -socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
 -managedtor[=PATH] # start Tor, create a hidden service, advertise its onion

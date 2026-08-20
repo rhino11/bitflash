@@ -193,6 +193,7 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=wallet-crypto
 	./bitflash-node -selftest=wallet-encrypt
 	./bitflash-node -selftest=net-message
+	./bitflash-node -selftest=network-params
 	./bitflash-node -selftest=consensus-limits
 	./bitflash-node -selftest=pool-stratum
 	./bitflash-node -selftest=parse-money

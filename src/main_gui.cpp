@@ -118,7 +118,7 @@ static void PrintUsage()
     printf("            wallet-crypto, wallet-encrypt, wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
-    printf("            parse-money, socks5-proxy, or managed-tor\n");
+    printf("            parse-money, network-params, socks5-proxy, or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
@@ -143,7 +143,8 @@ static void PrintUsage()
     printf("  /onionservice=HOST.onion:PORT  (advertise this node's Tor hidden service)\n");
     printf("\n");
     printf("Network:\n");
-    printf("  /port=N                    (P2P listen port, default 8433)\n");
+    printf("  /testnet                   (isolated test network datadir, port, and magic)\n");
+    printf("  /port=N                    (P2P listen port, default 8433; testnet 18433)\n");
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
@@ -204,6 +205,8 @@ static void ParseStartupArguments(int argc, char* argv[])
 {
     if (arg(argc,argv,"/datadir") || arg(argc,argv,"-datadir"))
         strSetDataDir = argval2(argc, argv, "/datadir", "-datadir");
+
+    SelectNetworkParams(arg(argc, argv, "/testnet") || arg(argc, argv, "-testnet"));
 
     if (arg(argc,argv,"/debug") || arg(argc,argv,"-debug"))
         fDebug = true;

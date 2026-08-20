@@ -50,10 +50,14 @@ static int BtfPoll(BtfPollFd* pfd, unsigned int nfd, int nTimeoutMs)
 //
 // Global state variables
 //
+static const char pchMainnetMessageStart[4] = { 0xbf, 0x20, 0x5c, 0xfd };
+static const char pchTestnetMessageStart[4] = { (char)0xce, (char)0xe2, (char)0xc0, (char)0xff };
+static bool fTestNet = false;
+char pchMessageStart[4] = { 0xbf, 0x20, 0x5c, 0xfd };
 bool fClient = false;
 uint64 nLocalServices = (fClient ? 0 : NODE_NETWORK);
-CAddress addrLocalHost(0, DEFAULT_PORT, nLocalServices);
-unsigned short nListenPort = DEFAULT_PORT; // local P2P port (tunable via /port)
+CAddress addrLocalHost(0, GetDefaultPort(), nLocalServices);
+unsigned short nListenPort = GetDefaultPort(); // local P2P port (tunable via /port)
 CNode nodeLocalHost(INVALID_SOCKET, CAddress("127.0.0.1", nLocalServices));
 CNode* pnodeLocalHost = &nodeLocalHost;
 bool fShutdown = false;
@@ -89,6 +93,29 @@ static int64 nBtfHandshakeNoSend = 0;
 static int64 nBtfHandshakeSilent = 0;
 static string strBtfLastDialFail;
 static string strBtfLastHandshakeTimeout;
+
+bool IsTestNet()
+{
+    return fTestNet;
+}
+
+unsigned short GetDefaultPort()
+{
+    return htons(fTestNet ? TESTNET_PORT : MAINNET_PORT);
+}
+
+void SelectNetworkParams(bool fTestNetIn)
+{
+    if (fTestNet == fTestNetIn)
+        return;
+
+    fTestNet = fTestNetIn;
+    memcpy(pchMessageStart,
+           fTestNet ? pchTestnetMessageStart : pchMainnetMessageStart,
+           sizeof(pchMessageStart));
+    nListenPort = GetDefaultPort();
+    addrLocalHost.port = nListenPort;
+}
 
 void BtfChurnNoteResolveAttempt()
 {
@@ -288,6 +315,7 @@ string GetDiagnosticsText()
     int nMedian = GetPeerMedianHeight();
 
     str += "Bitflash node diagnostics\n";
+    str += strprintf("  network           %s\n", IsTestNet() ? "testnet" : "mainnet");
     str += strprintf("  uptime            %s\n",
                      FormatAge(nNodeStartTime ? nNow - nNodeStartTime : -1).c_str());
     if (nMedian < 0)

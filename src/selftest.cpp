@@ -3076,6 +3076,76 @@ static int RunNetMessageSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static int RunNetworkParamsSelfTest()
+{
+    fflush(stdout);
+    printf("network-params self-test\n");
+
+    int nFail = 0;
+    std::string strOldDataDir = strSetDataDir;
+    try
+    {
+        SelectNetworkParams(false);
+        nFail += Check(!IsTestNet(), "starts on mainnet after explicit selection") ? 0 : 1;
+        nFail += Check(ntohs(GetDefaultPort()) == MAINNET_PORT,
+                       "mainnet default P2P port is 8433") ? 0 : 1;
+        CAddress mainAddr("127.0.0.1");
+        nFail += Check(mainAddr.port == htons(MAINNET_PORT),
+                       "mainnet address parsing uses the mainnet default port") ? 0 : 1;
+        CMessageHeader mainHeader("ping", 0);
+        char mainMagic[4];
+        memcpy(mainMagic, mainHeader.pchMessageStart, sizeof(mainMagic));
+
+        SelectNetworkParams(true);
+        nFail += Check(IsTestNet(), "testnet selection is sticky") ? 0 : 1;
+        nFail += Check(ntohs(GetDefaultPort()) == TESTNET_PORT,
+                       "testnet default P2P port is 18433") ? 0 : 1;
+        CAddress testAddr("127.0.0.1");
+        nFail += Check(testAddr.port == htons(TESTNET_PORT),
+                       "testnet address parsing uses the testnet default port") ? 0 : 1;
+        CMessageHeader testHeader("ping", 0);
+        nFail += Check(memcmp(mainMagic, testHeader.pchMessageStart, sizeof(mainMagic)) != 0,
+                       "testnet message magic differs from mainnet") ? 0 : 1;
+
+        std::string tmp;
+        if (!MakeTempDir(tmp))
+        {
+            nFail += Check(false, "creates a temporary data directory") ? 0 : 1;
+        }
+        else
+        {
+            strSetDataDir = tmp;
+            SelectNetworkParams(false);
+            std::string mainDir = GetAppDir();
+            SelectNetworkParams(true);
+            std::string testDir = GetAppDir();
+            nFail += Check(mainDir == tmp,
+                           "mainnet uses the selected data directory") ? 0 : 1;
+            nFail += Check(testDir == tmp + "/testnet",
+                           "testnet stores data below a testnet subdirectory") ? 0 : 1;
+            RemoveTree(tmp);
+        }
+    }
+    catch (const std::exception& e)
+    {
+        printf("  FAIL exception: %s\n", e.what());
+        nFail++;
+    }
+    catch (...)
+    {
+        printf("  FAIL unknown exception\n");
+        nFail++;
+    }
+
+    strSetDataDir = strOldDataDir;
+    SelectNetworkParams(false);
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static CBlock MakeSizedConsensusBlock(size_t nScriptBytes)
 {
     CTransaction tx;
@@ -3517,6 +3587,8 @@ int RunSelfTest(const std::string& name)
         return RunWalletPortabilitySelfTest();
     if (name == "net-message")
         return RunNetMessageSelfTest();
+    if (name == "network-params")
+        return RunNetworkParamsSelfTest();
     if (name == "consensus-limits")
         return RunConsensusLimitsSelfTest();
     if (name == "pool-stratum")
@@ -3529,6 +3601,6 @@ int RunSelfTest(const std::string& name)
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
     return 1;
 }
