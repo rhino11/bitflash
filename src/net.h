@@ -13,7 +13,8 @@ class CBlockIndex;
 
 
 
-static const unsigned short DEFAULT_PORT = htons(8433);
+static const unsigned short MAINNET_PORT = 8433;
+static const unsigned short TESTNET_PORT = 18433;
 static const unsigned int PUBLISH_HOPS = 5;
 enum
 {
@@ -26,6 +27,9 @@ enum
 
 
 bool GetMyExternalIP(unsigned int& ipRet);
+bool IsTestNet();
+unsigned short GetDefaultPort();
+void SelectNetworkParams(bool fTestNetIn);
 CNode* ConnectNodeBtf(const string& strBtfAddr);
 CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting,
                               const string& strOnion, const unsigned char enc_pub[32],
@@ -219,15 +223,17 @@ void CheckForShutdown(int n);
 // The message start string is designed to be unlikely to occur in normal data.
 // The characters are rarely used upper ascii, not valid as UTF-8, and produce
 // a large 4-byte int at any alignment.
-// Magic bytes unique to the Bitflash network (0xbf = "BF"). Second byte bumped
-// to 0x20 for the 2026 stable relaunch so the old test chain can't interfere.
-static const char pchMessageStart[4] = { 0xbf, 0x20, 0x5c, 0xfd };
+// Magic bytes unique to the selected Bitflash network. Mainnet uses 0xbf =
+// "BF"; testnet swaps the whole sequence so a test node cannot handshake with
+// mainnet before consensus-level testnet activation exists.
+extern char pchMessageStart[4];
 
 class CMessageHeader
 {
 public:
     enum { COMMAND_SIZE=12 };
-    char pchMessageStart[sizeof(::pchMessageStart)];
+    enum { MESSAGE_START_SIZE=4 };
+    char pchMessageStart[MESSAGE_START_SIZE];
     char pchCommand[COMMAND_SIZE];
     unsigned int nMessageSize;
 
@@ -318,7 +324,7 @@ public:
         nServices = 0;
         memcpy(pchReserved, pchIPv4, sizeof(pchReserved));
         ip = 0;
-        port = DEFAULT_PORT;
+        port = GetDefaultPort();
         nTime = GetAdjustedTime();
         nLastFailed = 0;
     }
@@ -348,7 +354,7 @@ public:
         nServices = nServicesIn;
         memcpy(pchReserved, pchIPv4, sizeof(pchReserved));
         ip = 0;
-        port = DEFAULT_PORT;
+        port = GetDefaultPort();
         nTime = GetAdjustedTime();
         nLastFailed = 0;
 

@@ -41,7 +41,8 @@ The resulting executable is src/bitflash.exe.
 
 Command-line options (in addition to the original ones)
 -------------------------------------------------------
-  /port=N        listen on P2P port N (default 8433)
+  /testnet       use isolated test network datadir, port 18433, and message magic
+  /port=N        listen on P2P port N (default 8433; testnet default 18433)
   /socks=HOST:PORT
                  route outbound Nostr, .btf rendezvous, and direct onion peer
                  dials through a SOCKS5 proxy, e.g. /socks=127.0.0.1:9050 for local Tor

@@ -116,6 +116,7 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=wallet-backend-default
 	./bitflash.exe -selftest=wallet-convert
 	./bitflash.exe -selftest=net-message
+	./bitflash.exe -selftest=network-params
 	./bitflash.exe -selftest=consensus-limits
 	./bitflash.exe -selftest=pool-stratum
 	./bitflash.exe -selftest=socks5-proxy

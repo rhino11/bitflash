@@ -2497,11 +2497,21 @@ string GetAppDir()
     {
         return ".";
     }
-    static bool fMkdirDone;
-    if (!fMkdirDone)
+    static string strCreatedBaseDir;
+    if (strCreatedBaseDir != strDir)
     {
-        fMkdirDone = true;
         _mkdir(strDir.c_str());
+        strCreatedBaseDir = strDir;
+    }
+    if (IsTestNet())
+    {
+        strDir += "/testnet";
+        static string strCreatedTestnetDir;
+        if (strCreatedTestnetDir != strDir)
+        {
+            _mkdir(strDir.c_str());
+            strCreatedTestnetDir = strDir;
+        }
     }
     return strDir;
 }
