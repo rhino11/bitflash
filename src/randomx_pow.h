@@ -41,4 +41,11 @@ uint256 RandomXHashWithVM(void* vm, const void* pHeader, size_t nSize);
 // True when the 2 GB dataset is ready (fast mode active).
 bool RandomXFastReady();
 
+// Ask for large (2 MB) pages for the cache, dataset and scratchpads. Set false
+// by -nolargepages. Must be set before the first RandomXInit().
+extern bool fRandomXLargePages;
+
+// Which allocations actually got large pages, for the status display.
+const char* RandomXLargePagesStatus();
+
 #endif

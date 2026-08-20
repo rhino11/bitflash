@@ -23,6 +23,50 @@ static std::mutex      g_csInit;
 static bool            g_fInit    = false;
 static bool            g_fFast    = false;
 
+// RandomX reads a 256 MB cache, a 2 GB dataset and a 2 MB scratchpad per VM
+// at random, so most reads miss the TLB on 4 KB pages. 2 MB pages recover
+// roughly a tenth of the hash rate.
+//
+// The pool must be reserved first (vm.nr_hugepages), and RandomX returns NULL
+// instead of falling back, so each allocation below retries without the flag.
+bool fRandomXLargePages = true;   // cleared by -nolargepages
+static bool g_fLargeCache   = false;
+static bool g_fLargeDataset = false;
+static bool g_fLargeAny     = false;
+
+// How to reserve the large-page pool, for the hint printed when a large-page
+// allocation falls back to normal pages. The mechanism is OS-specific.
+static const char* LargePagesHint()
+{
+#ifdef _WIN32
+    return "enable the \"Lock pages in memory\" privilege and run elevated";
+#else
+    return "reserve them with: sysctl vm.nr_hugepages=1280";
+#endif
+}
+
+static randomx_flags WithLargePages(randomx_flags f)
+{
+    return (randomx_flags)(f | RANDOMX_FLAG_LARGE_PAGES);
+}
+
+// Ask for a cache in large pages, then plain pages. Sets fLargeOut to say
+// which one answered.
+static randomx_cache* AllocCache(randomx_flags flags, bool& fLargeOut)
+{
+    fLargeOut = false;
+    if (fRandomXLargePages)
+    {
+        randomx_cache* c = randomx_alloc_cache(WithLargePages(flags));
+        if (c)
+        {
+            fLargeOut = true;
+            return c;
+        }
+    }
+    return randomx_alloc_cache(flags);
+}
+
 
 bool RandomXInit()
 {
@@ -36,25 +80,53 @@ bool RandomXInit()
     // Detect the best flags for this CPU (JIT, hardware AES, Argon2).
     g_flags = randomx_get_flags();
 
-    g_cache = randomx_alloc_cache(g_flags);
+    g_cache = AllocCache(g_flags, g_fLargeCache);
     if (!g_cache)
     {
         // Try without JIT as a fallback
         g_flags = RANDOMX_FLAG_DEFAULT;
-        g_cache = randomx_alloc_cache(g_flags);
+        g_cache = AllocCache(g_flags, g_fLargeCache);
         if (!g_cache)
             return error("RandomX: failed to allocate cache (256 MB)");
     }
     randomx_init_cache(g_cache, RANDOMX_KEY, strlen(RANDOMX_KEY));
 
-    // Verification VM in light mode (cache only)
-    g_vmVerify = randomx_create_vm(g_flags, g_cache, NULL);
+    // Verification VM in light mode (cache only). The scratchpad is only 2 MB
+    // and this VM is created once, but it hashes every block the node ever
+    // validates, so it gets the same treatment.
+    bool fLargeVerify = false;
+    if (fRandomXLargePages)
+    {
+        g_vmVerify = randomx_create_vm(WithLargePages(g_flags), g_cache, NULL);
+        fLargeVerify = (g_vmVerify != NULL);
+    }
+    if (!g_vmVerify)
+        g_vmVerify = randomx_create_vm(g_flags, g_cache, NULL);
     if (!g_vmVerify)
         return error("RandomX: failed to create verification VM");
 
+    g_fLargeAny = g_fLargeCache || fLargeVerify;
     g_fInit = true;
-    printf("RandomX: initialized (cache 256 MB, flags=%d)\n", (int)g_flags);
+    printf("RandomX: initialized (cache 256 MB, flags=%d, large pages: %s)\n",
+           (int)g_flags, RandomXLargePagesStatus());
+    if (fRandomXLargePages && !g_fLargeCache)
+        printf("RandomX: large pages unavailable for the cache; %s "
+               "for about 10%% more hash rate\n", LargePagesHint());
     return true;
+}
+
+
+const char* RandomXLargePagesStatus()
+{
+    if (!fRandomXLargePages)
+        return "off (-nolargepages)";
+    if (g_fLargeCache && g_fLargeDataset)
+        return "cache + dataset";
+    if (g_fLargeCache)
+        return "cache only";
+    if (g_fLargeDataset)
+        return "dataset only";
+    return g_fLargeAny ? "scratchpad only" : "unavailable";
 }
 
 
@@ -87,8 +159,18 @@ bool RandomXInitDataset(int nThreads)
     if (g_fFast)
         return true;
 
-    randomx_flags fastFlags = (randomx_flags)(g_flags | RANDOMX_FLAG_FULL_MEM);
-    g_dataset = randomx_alloc_dataset(fastFlags);
+    // Only RANDOMX_FLAG_LARGE_PAGES means anything to randomx_alloc_dataset;
+    // the rest of g_flags belongs to the VMs that read it.
+    if (fRandomXLargePages)
+    {
+        g_dataset = randomx_alloc_dataset(WithLargePages(RANDOMX_FLAG_DEFAULT));
+        g_fLargeDataset = (g_dataset != NULL);
+        if (!g_dataset)
+            printf("RandomX: large pages unavailable for the 2 GB dataset; %s "
+                   "for about 10%% more hash rate\n", LargePagesHint());
+    }
+    if (!g_dataset)
+        g_dataset = randomx_alloc_dataset(RANDOMX_FLAG_DEFAULT);
     if (!g_dataset)
     {
         printf("RandomX: not enough memory for the 2 GB dataset, staying in light mode\n");
@@ -142,13 +224,26 @@ void* RandomXCreateMinerVM()
 {
     if (!g_fInit && !RandomXInit())
         return NULL;
+
+    randomx_flags   flags   = g_flags;
+    randomx_cache*  cache   = g_cache;
+    randomx_dataset* dataset = NULL;
     if (g_fFast && g_dataset)
     {
-        randomx_flags fastFlags = (randomx_flags)(g_flags | RANDOMX_FLAG_FULL_MEM);
-        return randomx_create_vm(fastFlags, NULL, g_dataset);
+        flags   = (randomx_flags)(g_flags | RANDOMX_FLAG_FULL_MEM);
+        cache   = NULL;
+        dataset = g_dataset;
     }
-    // Light mode: own VM sharing the cache
-    return randomx_create_vm(g_flags, g_cache, NULL);
+
+    // Each thread gets its own 2 MB scratchpad, so the large-page pool can run
+    // dry partway through a fleet of miners. Threads that miss out still run.
+    if (fRandomXLargePages)
+    {
+        randomx_vm* vm = randomx_create_vm(WithLargePages(flags), cache, dataset);
+        if (vm)
+            return vm;
+    }
+    return randomx_create_vm(flags, cache, dataset);
 }
 
 
