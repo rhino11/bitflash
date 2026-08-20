@@ -34,6 +34,17 @@ static bool g_fLargeCache   = false;
 static bool g_fLargeDataset = false;
 static bool g_fLargeAny     = false;
 
+// How to reserve the large-page pool, for the hint printed when a large-page
+// allocation falls back to normal pages. The mechanism is OS-specific.
+static const char* LargePagesHint()
+{
+#ifdef _WIN32
+    return "enable the \"Lock pages in memory\" privilege and run elevated";
+#else
+    return "reserve them with: sysctl vm.nr_hugepages=1280";
+#endif
+}
+
 static randomx_flags WithLargePages(randomx_flags f)
 {
     return (randomx_flags)(f | RANDOMX_FLAG_LARGE_PAGES);
@@ -99,8 +110,8 @@ bool RandomXInit()
     printf("RandomX: initialized (cache 256 MB, flags=%d, large pages: %s)\n",
            (int)g_flags, RandomXLargePagesStatus());
     if (fRandomXLargePages && !g_fLargeCache)
-        printf("RandomX: large pages unavailable for the cache; "
-               "reserve them with sysctl vm.nr_hugepages=1280 for about 10%% more hash rate\n");
+        printf("RandomX: large pages unavailable for the cache; %s "
+               "for about 10%% more hash rate\n", LargePagesHint());
     return true;
 }
 
@@ -155,8 +166,8 @@ bool RandomXInitDataset(int nThreads)
         g_dataset = randomx_alloc_dataset(WithLargePages(RANDOMX_FLAG_DEFAULT));
         g_fLargeDataset = (g_dataset != NULL);
         if (!g_dataset)
-            printf("RandomX: large pages unavailable for the 2 GB dataset; "
-                   "reserve 1280 with sysctl vm.nr_hugepages for about 10%% more hash rate\n");
+            printf("RandomX: large pages unavailable for the 2 GB dataset; %s "
+                   "for about 10%% more hash rate\n", LargePagesHint());
     }
     if (!g_dataset)
         g_dataset = randomx_alloc_dataset(RANDOMX_FLAG_DEFAULT);
