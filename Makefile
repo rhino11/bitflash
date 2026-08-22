@@ -203,6 +203,13 @@ fuzz-net-message-smoke: deps-linux
 fuzz-script-smoke: deps-linux
 	$(MAKE) -C src -f Makefile fuzz-script-smoke
 
+# Local parity with .github/workflows/ci.yml (Linux job). Run before opening a PR.
+ci: deps-linux
+	$(MAKE) tests
+	python3 tests/scripts/test_bitflash_tools.py
+	$(MAKE) fuzz-net-message-smoke
+	$(MAKE) fuzz-script-smoke
+
 checksums:
 	./scripts/make-release-checksums.sh
 
@@ -213,5 +220,5 @@ verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
 .PHONY: linux windows windows-tor clean appimage \
-        tests fuzz-net-message-smoke fuzz-script-smoke checksums sign-checksums verify-release \
+        tests fuzz-net-message-smoke fuzz-script-smoke ci checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

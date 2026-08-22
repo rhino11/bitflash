@@ -1,0 +1,39 @@
+name: Sync from Forgejo
+
+# Pull source-of-truth commits from git.bitflash.network into this CI mirror.
+# Does not replace Forgejo as the contribution target.
+
+on:
+  schedule:
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: sync-from-forgejo
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Fetch forgejo/main
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out mirror
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Sync from Forgejo
+        run: |
+          chmod +x scripts/sync-from-forgejo.sh
+          ./scripts/sync-from-forgejo.sh
+          git push origin main
+          git push origin --tags
