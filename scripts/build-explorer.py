@@ -108,7 +108,9 @@ def build_explorer(raw_blocks, out_dir):
     out = Path(out_dir)
     (out / "block").mkdir(parents=True, exist_ok=True)
 
+    BLOCK_CHUNK = 1000  # blocks per file; keeps the deploy well under Cloudflare Pages' 20k-file cap
     summaries = []
+    chunks = {}
     for height, block in enumerate(blocks):
         txs = [explorer_tx(tx) for tx in block["transactions"]]
         detail = {
@@ -133,8 +135,11 @@ def build_explorer(raw_blocks, out_dir):
             "cbValue": cb.get("value", 0),
             "cbAddr": cb.get("address", ""),
         })
-        (out / "block" / ("%d.json" % height)).write_text(
-            json.dumps(detail, sort_keys=True, separators=(",", ":")) + "\n",
+        chunks.setdefault(height // BLOCK_CHUNK, {})[str(height)] = detail
+
+    for ci, group in chunks.items():
+        (out / "block" / ("%d.json" % ci)).write_text(
+            json.dumps(group, sort_keys=True, separators=(",", ":")) + "\n",
             encoding="ascii",
         )
 
@@ -311,7 +316,9 @@ function ioSide(title, items, render){
   return side;
 }
 function openBlock(h){
-  fetch('block/'+h+'.json').then(function(r){return r.json();}).then(function(b){
+  fetch('block/'+Math.floor(h/1000)+'.json').then(function(r){return r.json();}).then(function(chunk){
+    var b=chunk[h];
+    if(!b){var dd=document.getElementById('detail');clear(dd);append(dd,E('h2','','Block '+h+' not found'));return;}
     var detail = document.getElementById('detail');
     clear(detail);
     append(detail, E('h2', '', 'Block '+b.height));
