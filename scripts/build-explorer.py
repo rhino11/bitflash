@@ -106,6 +106,9 @@ def build_explorer(raw_blocks, out_dir):
     except chain.ParseError as e:
         raise SystemExit(str(e))
     out = Path(out_dir)
+    # Wipe any previous block files so a change in layout (or a shrinking chain)
+    # never leaves stale files behind and blows past the Pages file cap.
+    shutil.rmtree(out / "block", ignore_errors=True)
     (out / "block").mkdir(parents=True, exist_ok=True)
 
     BLOCK_CHUNK = 1000  # blocks per file; keeps the deploy well under Cloudflare Pages' 20k-file cap
