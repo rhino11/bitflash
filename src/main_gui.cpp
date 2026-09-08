@@ -368,25 +368,51 @@ static void ParseStartupArguments(int argc, char* argv[])
         if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
 
-        // Pluggable-transport bridges (obfs4) for reaching Tor where it is
-        // blocked. -torbridges uses the built-in set; -torbridge=<line> adds one.
+        // Pluggable-transport bridges for reaching Tor where it is blocked,
+        // without our rendezvous relays. -torbridges uses the built-in default
+        // (Snowflake, no infra needed); -torbridge=<line> adds an obfs4 or
+        // snowflake bridge. We resolve a PT binary for each transport present.
         bool fTorBridges = arg(argc, argv, "/torbridges") || arg(argc, argv, "-torbridges");
         string customBridge = argval2(argc, argv, "/torbridge", "-torbridge");
         if (fTorBridges || !customBridge.empty())
         {
-            std::vector<std::string> bridges = BtfDefaultObfs4Bridges();
+            std::vector<std::string> bridges;
+            if (fTorBridges)
+            {
+                std::vector<std::string> def = BtfDefaultBridges();
+                bridges.insert(bridges.end(), def.begin(), def.end());
+            }
             if (!customBridge.empty())
                 bridges.push_back(customBridge);
-            string ptPath;
-            if (bridges.empty())
-                fprintf(stderr, "Warning: -torbridges given but no bridge lines available; use -torbridge=<line>\n");
-            else if (!BtfResolveObfs4Path(ptPath))
-                fprintf(stderr, "Warning: obfs4 pluggable transport not found; bridges disabled\n");
+
+            std::map<std::string, std::string> ptExec;
+            for (size_t i = 0; i < bridges.size(); i++)
+            {
+                string tr = BtfBridgeTransport(bridges[i]);
+                if (tr.empty() || ptExec.count(tr))
+                    continue;
+                string path;
+                bool ok = false;
+                if (tr == "obfs4")          ok = BtfResolveObfs4Path(path);
+                else if (tr == "snowflake") ok = BtfResolveSnowflakePath(path);
+                if (ok)
+                    ptExec[tr] = path;
+                else
+                    fprintf(stderr, "Warning: no pluggable-transport binary for '%s'; those bridges disabled\n",
+                            tr.c_str());
+            }
+
+            if (bridges.empty() || ptExec.empty())
+                fprintf(stderr, "Warning: no usable Tor bridges configured\n");
             else
             {
-                BtfSetTorBridges(ptPath, bridges);
-                fprintf(stderr, "Tor bridges enabled via %s (%d bridge%s)\n",
-                        ptPath.c_str(), (int)bridges.size(), bridges.size() == 1 ? "" : "s");
+                BtfSetTorBridges(bridges, ptExec);
+                fprintf(stderr, "Tor bridges enabled (%d bridge%s;", (int)bridges.size(),
+                        bridges.size() == 1 ? "" : "s");
+                for (std::map<std::string, std::string>::const_iterator it = ptExec.begin();
+                     it != ptExec.end(); ++it)
+                    fprintf(stderr, " %s=%s", it->first.c_str(), it->second.c_str());
+                fprintf(stderr, ")\n");
             }
         }
 

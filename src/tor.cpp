@@ -24,8 +24,8 @@ static std::string g_managedTorDataDir;
 static std::string g_managedTorHiddenServiceDir;
 static std::string g_managedTorOnion;
 static std::string g_managedTorStatus;
-static std::string g_torObfs4Path;                 // pluggable-transport binary
-static std::vector<std::string> g_torBridges;      // obfs4 bridge lines
+static std::vector<std::string> g_torBridges;              // bridge lines
+static std::map<std::string, std::string> g_torPtExec;     // transport -> PT binary
 #ifdef _WIN32
 static PROCESS_INFORMATION g_managedTorProcess;
 #else
@@ -517,43 +517,85 @@ bool BtfBundledTorPath(std::string& torPathOut)
     return true;
 }
 
-void BtfSetTorBridges(const std::string& ptExecPath,
-                      const std::vector<std::string>& bridges)
+void BtfSetTorBridges(const std::vector<std::string>& bridges,
+                      const std::map<std::string, std::string>& ptExecByTransport)
 {
-    g_torObfs4Path = ptExecPath;
     g_torBridges = bridges;
+    g_torPtExec = ptExecByTransport;
 }
 
-bool BtfResolveObfs4Path(std::string& pathOut)
+std::string BtfBridgeTransport(const std::string& bridgeLine)
 {
-    pathOut.clear();
-    std::string exeDir = ExecutableDir();
-    std::vector<std::string> candidates;
-#ifdef _WIN32
-    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
-    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy.exe"));
-    candidates.push_back(PathJoin(exeDir, "pluggable_transports/lyrebird.exe"));
-#else
-    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
-    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy"));
-    candidates.push_back("/usr/bin/lyrebird");
-    candidates.push_back("/usr/bin/obfs4proxy");
-#endif
+    std::string t;
+    for (size_t i = 0; i < bridgeLine.size(); i++)
+    {
+        char c = bridgeLine[i];
+        if (c == ' ' || c == '\t')
+            break;
+        t += c;
+    }
+    return t;
+}
+
+static bool ResolvePtFrom(const std::vector<std::string>& candidates, std::string& out)
+{
+    out.clear();
     for (size_t i = 0; i < candidates.size(); i++)
         if (FileIsExecutableCandidate(candidates[i]))
         {
-            pathOut = candidates[i];
+            out = candidates[i];
             return true;
         }
     return false;
 }
 
-std::vector<std::string> BtfDefaultObfs4Bridges()
+bool BtfResolveObfs4Path(std::string& pathOut)
 {
-    // Curated public obfs4 bridges go here once verified live. Left empty on
-    // purpose: shipping stale bridge lines would give false confidence. Use
-    // -torbridge=<line> to supply one, or refresh from bridges.torproject.org.
-    return std::vector<std::string>();
+    std::string exeDir = ExecutableDir();
+    std::vector<std::string> c;
+#ifdef _WIN32
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy.exe"));
+#else
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy"));
+    c.push_back("/usr/bin/lyrebird");
+    c.push_back("/usr/bin/obfs4proxy");
+#endif
+    return ResolvePtFrom(c, pathOut);
+}
+
+bool BtfResolveSnowflakePath(std::string& pathOut)
+{
+    std::string exeDir = ExecutableDir();
+    std::vector<std::string> c;
+#ifdef _WIN32
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client.exe"));
+#else
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client"));
+    c.push_back("/usr/bin/snowflake-client");
+    c.push_back("/usr/bin/lyrebird");
+#endif
+    return ResolvePtFrom(c, pathOut);
+}
+
+std::vector<std::string> BtfDefaultBridges()
+{
+    std::vector<std::string> b;
+    // Standard Snowflake bridge: reaches Tor through volunteer WebRTC proxies
+    // via Tor's broker, needing no infrastructure of ours and no bridge
+    // curation. The broker fronts/STUN list is the long-standing Tor Browser
+    // default; proven to bootstrap end to end on the bench.
+    b.push_back("snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 "
+                "fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 "
+                "url=https://1098762253.rsc.cdn77.org/ "
+                "fronts=www.cdn77.com,www.phpmyadmin.net "
+                "ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,"
+                "stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478 "
+                "utls-imitate=hellorandomizedalpn");
+    return b;
 }
 
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
@@ -561,8 +603,8 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         unsigned short socksPort,
                                         unsigned short controlPort,
                                         unsigned short p2pPort,
-                                        const std::string& obfs4ExecPath,
-                                        const std::vector<std::string>& bridges)
+                                        const std::vector<std::string>& bridges,
+                                        const std::map<std::string, std::string>& ptExecByTransport)
 {
     std::string torData = NormalizeTorrcPath(dataDir);
     std::string hsDir = NormalizeTorrcPath(hiddenServiceDir);
@@ -577,18 +619,36 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     s += "HiddenServiceVersion 3\n";
     s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
                    (unsigned)p2pPort, (unsigned)p2pPort);
-    // Pluggable transport: only when a PT binary and at least one bridge are
-    // configured. Reaches Tor where plain Tor is blocked, without our relays.
-    if (!obfs4ExecPath.empty() && !bridges.empty())
+    // Pluggable transports for reaching Tor where it is blocked, without our
+    // rendezvous relays. Emit one ClientTransportPlugin per PT binary, listing
+    // every transport it serves that we actually have a bridge for, then the
+    // bridge lines. Tor takes the rest of the exec line verbatim and does NOT
+    // strip quotes, so the path is left bare (keep bundled PTs space-free).
+    if (!bridges.empty())
     {
-        s += "UseBridges 1\n";
-        // Tor takes the rest of the exec line as the command verbatim and does
-        // NOT strip quotes here, so the path must be bare (no surrounding
-        // quotes). Keep the bundled PT under a space-free path.
-        s += "ClientTransportPlugin obfs4 exec " +
-             NormalizeTorrcPath(obfs4ExecPath) + "\n";
+        std::map<std::string, std::string> transportsByExec; // exec -> "obfs4,snowflake"
         for (size_t i = 0; i < bridges.size(); i++)
-            s += "Bridge " + bridges[i] + "\n";
+        {
+            std::string tr = BtfBridgeTransport(bridges[i]);
+            std::map<std::string, std::string>::const_iterator it = ptExecByTransport.find(tr);
+            if (it == ptExecByTransport.end() || it->second.empty())
+                continue; // no binary for this transport -> skip its plugin line
+            std::string exec = NormalizeTorrcPath(it->second);
+            std::string& list = transportsByExec[exec];
+            if (list.empty())
+                list = tr;
+            else if ((list + ",").find(tr + ",") == std::string::npos && list != tr)
+                list += "," + tr;
+        }
+        if (!transportsByExec.empty())
+        {
+            s += "UseBridges 1\n";
+            for (std::map<std::string, std::string>::const_iterator it = transportsByExec.begin();
+                 it != transportsByExec.end(); ++it)
+                s += "ClientTransportPlugin " + it->second + " exec " + it->first + "\n";
+            for (size_t i = 0; i < bridges.size(); i++)
+                s += "Bridge " + bridges[i] + "\n";
+        }
     }
     return s;
 }
@@ -792,7 +852,7 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
     unsigned short p2pPort = ntohs(nListenPort);
     std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort,
                                                    controlPort, p2pPort,
-                                                   g_torObfs4Path, g_torBridges);
+                                                   g_torBridges, g_torPtExec);
     if (!WriteTextFile(torrcPath, torrc, errOut))
         return false;
 
