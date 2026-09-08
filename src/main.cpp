@@ -11,6 +11,8 @@
 #endif
 #include "headers.h"
 #include "sha.h"
+#include "proxy.h"      // BtfConnectSocket: dial the pool over its Tor onion
+#include "sockcount.h"  // SOCK_ONION_PEER
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -3594,47 +3596,50 @@ static bool PoolParticipantMiner()
         return false;
     }
 
-    std::string meetingHostPort;
+    std::string meetingHostPort;   // unused: the pool is reached over its onion
+    std::string onionHostPort;
     unsigned char service_enc_pub[32];
-    if (!BtfResolve(strParticipantPool, meetingHostPort, service_enc_pub)) {
-        LogPrint("worker", "[worker] failed to resolve pool %s"
-                 " (no Nostr descriptor found -- pool may be offline or relays down)\n",
+    if (!BtfResolve(strParticipantPool, meetingHostPort, service_enc_pub, &onionHostPort)
+        || onionHostPort.empty()) {
+        LogPrint("worker", "[worker] failed to resolve pool %s over onion"
+                 " (pool offline, or its descriptor has no hidden service)\n",
                  strParticipantPool.c_str());
         SetParticipantMiningStatus("failed to resolve pool");
         return false;
     }
-    LogPrint("worker", "[worker] pool resolved to meeting node %s\n", meetingHostPort.c_str());
+    (void)target_pubkey; (void)service_enc_pub; // onion authenticates by address
 
-    size_t colon = meetingHostPort.rfind(':');
+    // The pool listens at p2p+1 on the same hidden service as its P2P port, so
+    // derive the pool endpoint from the resolved P2P onion -- no separate
+    // announcement, and nothing routed through a rendezvous relay.
+    size_t colon = onionHostPort.rfind(':');
     if (colon == std::string::npos) {
-        LogPrint("worker", "[worker] bad meeting node format '%s'\n", meetingHostPort.c_str());
+        LogPrint("worker", "[worker] bad pool onion format '%s'\n", onionHostPort.c_str());
         SetParticipantMiningStatus("bad pool endpoint");
         return false;
     }
-    std::string host = meetingHostPort.substr(0, colon);
-    int port = atoi(meetingHostPort.substr(colon + 1).c_str());
-    if (port <= 0 || port > 65535) {
-        LogPrint("worker", "[worker] bad meeting port %d in '%s'\n",
-                 port, meetingHostPort.c_str());
+    std::string host = onionHostPort.substr(0, colon);
+    int p2p = atoi(onionHostPort.substr(colon + 1).c_str());
+    if (p2p <= 0 || p2p >= 65535) {
+        LogPrint("worker", "[worker] bad pool onion port %d in '%s'\n", p2p, onionHostPort.c_str());
         SetParticipantMiningStatus("bad pool port");
         return false;
     }
+    int port = p2p + 1;
 
     // ------------------------------------------------------------------
-    // Step 2: open encrypted tunnel to pool
+    // Step 2: connect to the pool over its Tor hidden service
     // ------------------------------------------------------------------
-    SetParticipantMiningStatus("opening tunnel");
-    btf_socket_t s = btf::BtfClientTunnel(host.c_str(), (unsigned short)port,
-                                           target_pubkey, service_enc_pub);
+    SetParticipantMiningStatus("connecting over onion");
+    btf_socket_t s = BtfConnectSocket(host, (unsigned short)port, SOCK_ONION_PEER, 30);
     if (s == INVALID_SOCKET) {
-        LogPrint("worker", "[worker] tunnel connect FAILED via %s"
-                 " (relay unreachable or pool not listening)\n",
-                 meetingHostPort.c_str());
-        SetParticipantMiningStatus("tunnel connect failed");
+        LogPrint("worker", "[worker] onion connect FAILED to %s:%d"
+                 " (pool not listening, or Tor has no route)\n", host.c_str(), port);
+        SetParticipantMiningStatus("pool connect failed");
         return false;
     }
-    LogPrint("worker", "[worker] tunnel open via %s\n", meetingHostPort.c_str());
-    SetParticipantMiningStatus("tunnel open");
+    LogPrint("worker", "[worker] connected to pool over onion %s:%d\n", host.c_str(), port);
+    SetParticipantMiningStatus("connected over onion");
 
     // ------------------------------------------------------------------
     // Step 3: determine our payout address (mining username)

@@ -619,6 +619,15 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     s += "HiddenServiceVersion 3\n";
     s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
                    (unsigned)p2pPort, (unsigned)p2pPort);
+    // A second virtual port on the same .onion for the cooperative mining pool,
+    // so a pool operator accepts miners over its hidden service instead of a
+    // rendezvous relay. Miners derive it as p2pPort+1 from the operator's
+    // advertised P2P onion, so it needs no separate announcement. Always mapped
+    // (harmless when no pool listens -- the connection is simply refused): the
+    // pool binds this local port only when it runs, needing no Tor reconfig to
+    // toggle. p2pPort is well below 65535 in every real config.
+    s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
+                   (unsigned)(p2pPort + 1), (unsigned)(p2pPort + 1));
     // Pluggable transports for reaching Tor where it is blocked, without our
     // rendezvous relays. Emit one ClientTransportPlugin per PT binary, listing
     // every transport it serves that we actually have a bridge for, then the
