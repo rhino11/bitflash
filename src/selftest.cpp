@@ -3557,6 +3557,23 @@ static int RunManagedTorSelfTest()
                    "requests a v3 onion service") ? 0 : 1;
     nFail += Check(torrc.find("HiddenServicePort 8433 127.0.0.1:8433") != std::string::npos,
                    "maps the onion service to the Bitflash P2P listener") ? 0 : 1;
+    nFail += Check(torrc.find("UseBridges") == std::string::npos,
+                   "no bridge config when none is requested") ? 0 : 1;
+
+    // With a PT binary and a bridge, the torrc must wire obfs4 bridges.
+    std::vector<std::string> testBridges;
+    testBridges.push_back("obfs4 10.0.0.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0");
+    std::string torrcB = BtfBuildManagedTorrcForTest("C:/x/data", "C:/x/hs",
+                                                    19050, 19051, 8433,
+                                                    "C:/x/tor/pluggable_transports/lyrebird.exe",
+                                                    testBridges);
+    nFail += Check(torrcB.find("UseBridges 1") != std::string::npos,
+                   "enables bridges when a PT and bridge are configured") ? 0 : 1;
+    nFail += Check(torrcB.find("ClientTransportPlugin obfs4 exec") != std::string::npos,
+                   "declares the obfs4 client transport plugin") ? 0 : 1;
+    nFail += Check(torrcB.find("Bridge obfs4 10.0.0.1:443") != std::string::npos,
+                   "writes the obfs4 bridge line") ? 0 : 1;
+
     nFail += Check(BtfManagedTorStatus() == "disabled",
                    "managed Tor starts disabled") ? 0 : 1;
 

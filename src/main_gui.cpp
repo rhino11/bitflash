@@ -151,6 +151,8 @@ static void PrintUsage()
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
     printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
+    printf("  /torbridges                (reach Tor via obfs4 bridges where Tor is blocked)\n");
+    printf("  /torbridge=LINE            (add one obfs4 bridge line; repeatable via config)\n");
     printf("  /oniononly                 (do not fall back to rendezvous when a .btf onion dial fails)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
@@ -365,6 +367,28 @@ static void ParseStartupArguments(int argc, char* argv[])
     {
         if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
+
+        // Pluggable-transport bridges (obfs4) for reaching Tor where it is
+        // blocked. -torbridges uses the built-in set; -torbridge=<line> adds one.
+        bool fTorBridges = arg(argc, argv, "/torbridges") || arg(argc, argv, "-torbridges");
+        string customBridge = argval2(argc, argv, "/torbridge", "-torbridge");
+        if (fTorBridges || !customBridge.empty())
+        {
+            std::vector<std::string> bridges = BtfDefaultObfs4Bridges();
+            if (!customBridge.empty())
+                bridges.push_back(customBridge);
+            string ptPath;
+            if (bridges.empty())
+                fprintf(stderr, "Warning: -torbridges given but no bridge lines available; use -torbridge=<line>\n");
+            else if (!BtfResolveObfs4Path(ptPath))
+                fprintf(stderr, "Warning: obfs4 pluggable transport not found; bridges disabled\n");
+            else
+            {
+                BtfSetTorBridges(ptPath, bridges);
+                fprintf(stderr, "Tor bridges enabled via %s (%d bridge%s)\n",
+                        ptPath.c_str(), (int)bridges.size(), bridges.size() == 1 ? "" : "s");
+            }
+        }
 
         string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
         string err;

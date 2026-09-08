@@ -24,6 +24,8 @@ static std::string g_managedTorDataDir;
 static std::string g_managedTorHiddenServiceDir;
 static std::string g_managedTorOnion;
 static std::string g_managedTorStatus;
+static std::string g_torObfs4Path;                 // pluggable-transport binary
+static std::vector<std::string> g_torBridges;      // obfs4 bridge lines
 #ifdef _WIN32
 static PROCESS_INFORMATION g_managedTorProcess;
 #else
@@ -515,11 +517,52 @@ bool BtfBundledTorPath(std::string& torPathOut)
     return true;
 }
 
+void BtfSetTorBridges(const std::string& ptExecPath,
+                      const std::vector<std::string>& bridges)
+{
+    g_torObfs4Path = ptExecPath;
+    g_torBridges = bridges;
+}
+
+bool BtfResolveObfs4Path(std::string& pathOut)
+{
+    pathOut.clear();
+    std::string exeDir = ExecutableDir();
+    std::vector<std::string> candidates;
+#ifdef _WIN32
+    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
+    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy.exe"));
+    candidates.push_back(PathJoin(exeDir, "pluggable_transports/lyrebird.exe"));
+#else
+    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
+    candidates.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy"));
+    candidates.push_back("/usr/bin/lyrebird");
+    candidates.push_back("/usr/bin/obfs4proxy");
+#endif
+    for (size_t i = 0; i < candidates.size(); i++)
+        if (FileIsExecutableCandidate(candidates[i]))
+        {
+            pathOut = candidates[i];
+            return true;
+        }
+    return false;
+}
+
+std::vector<std::string> BtfDefaultObfs4Bridges()
+{
+    // Curated public obfs4 bridges go here once verified live. Left empty on
+    // purpose: shipping stale bridge lines would give false confidence. Use
+    // -torbridge=<line> to supply one, or refresh from bridges.torproject.org.
+    return std::vector<std::string>();
+}
+
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,
                                         unsigned short socksPort,
                                         unsigned short controlPort,
-                                        unsigned short p2pPort)
+                                        unsigned short p2pPort,
+                                        const std::string& obfs4ExecPath,
+                                        const std::vector<std::string>& bridges)
 {
     std::string torData = NormalizeTorrcPath(dataDir);
     std::string hsDir = NormalizeTorrcPath(hiddenServiceDir);
@@ -534,6 +577,19 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     s += "HiddenServiceVersion 3\n";
     s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
                    (unsigned)p2pPort, (unsigned)p2pPort);
+    // Pluggable transport: only when a PT binary and at least one bridge are
+    // configured. Reaches Tor where plain Tor is blocked, without our relays.
+    if (!obfs4ExecPath.empty() && !bridges.empty())
+    {
+        s += "UseBridges 1\n";
+        // Tor takes the rest of the exec line as the command verbatim and does
+        // NOT strip quotes here, so the path must be bare (no surrounding
+        // quotes). Keep the bundled PT under a space-free path.
+        s += "ClientTransportPlugin obfs4 exec " +
+             NormalizeTorrcPath(obfs4ExecPath) + "\n";
+        for (size_t i = 0; i < bridges.size(); i++)
+            s += "Bridge " + bridges[i] + "\n";
+    }
     return s;
 }
 
@@ -735,7 +791,8 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
 
     unsigned short p2pPort = ntohs(nListenPort);
     std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort,
-                                                   controlPort, p2pPort);
+                                                   controlPort, p2pPort,
+                                                   g_torObfs4Path, g_torBridges);
     if (!WriteTextFile(torrcPath, torrc, errOut))
         return false;
 
