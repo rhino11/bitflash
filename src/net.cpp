@@ -866,48 +866,29 @@ vector<pair<string, string> > vBtfExtraSeeds;
 
 static int TryBtfSeeds()
 {
-    vector<pair<string, string> > seeds;
+    vector<string> seeds;
     for (size_t i = 0; i < nBtfSeeds; i++)
-        seeds.push_back(make_pair(string(pszBtfSeeds[i].btfAddr),
-                                  string(pszBtfSeeds[i].encHex)));
+        seeds.push_back(string(pszBtfSeeds[i].btfAddr));
     foreach(const PAIRTYPE(string, string)& s, vBtfExtraSeeds)
-        seeds.push_back(s);
+        seeds.push_back(s.first);
 
     if (seeds.empty())
         return 0;
 
-    vector<string> relays = BtfAllRelays();
-    if (relays.empty())
-        return 0;
+    LogPrint("net", "btfseed: trying %zu seed(s) over onion\n", seeds.size());
 
-    LogPrint("net", "btfseed: trying %zu seed(s) across %zu relay(s)\n",
-             seeds.size(), relays.size());
-
+    // Onion-only: resolve each seed's self-certified descriptor (its signed
+    // .onion endpoint) over Nostr and dial it directly. No relay to walk.
     int nConnected = 0;
-    foreach(const PAIRTYPE(string, string)& s, seeds)
+    foreach(const string& strAddr, seeds)
     {
         if (fShutdown) return nConnected;
-        unsigned char enc[32];
-        if (!HexToBytes(s.second, enc, 32))
+        if (ConnectNodeBtf(strAddr))
         {
-            LogPrint("net", "btfseed: %s has a malformed encryption key, skipped\n",
-                     s.first.c_str());
-            continue;
+            LogPrint("net", "btfseed: reached %s\n", strAddr.c_str());
+            if (++nConnected >= 4)
+                break;      // enough of a foothold; the rest comes from discovery
         }
-        // We do not know which relay this seed is registered at, so walk them.
-        foreach(const string& strRelay, relays)
-        {
-            if (fShutdown) return nConnected;
-            if (ConnectNodeBtfResolved(s.first, strRelay, "", enc))
-            {
-                LogPrint("net", "btfseed: reached %s via %s\n",
-                         s.first.c_str(), strRelay.c_str());
-                nConnected++;
-                break;  // found it; no need to try this seed's other relays
-            }
-        }
-        if (nConnected >= 4)
-            break;      // enough of a foothold; the rest comes from discovery
     }
     LogPrint("net", "btfseed: %d seed(s) answered\n", nConnected);
     return nConnected;
@@ -1103,47 +1084,11 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
         }
     }
 
-    if (fBtfOnionOnly)
-    {
-        if (fDebug)
-            LogPrint("net", "ConnectNodeBtf: onion-only mode refused rendezvous fallback for %s\n",
-                     strBtfAddr.c_str());
-        return NULL;
-    }
-
-    BtfChurnNoteDialAttempt(strBtfAddr, strMeeting);
-    string strHost;
-    unsigned short nPort = 0;
-    if (!SplitHostPort(strMeeting, strHost, nPort))
-    {
-        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
-        return NULL;
-    }
-
-    btf_socket_t hSocket = btf::BtfClientTunnel(strHost.c_str(), (unsigned short)nPort, pk, enc_pub);
-    if (hSocket == INVALID_SOCKET)
-    {
-        if (fDebug)
-            LogPrint("net", "ConnectNodeBtf: tunnel to %s via %s failed\n", strBtfAddr.c_str(), strMeeting.c_str());
-        BtfChurnNoteDialResult(strBtfAddr, strMeeting, false);
-        return NULL;
-    }
-
-    if (fDebug)
-        LogPrint("net", "connected %s via rendezvous %s\n", strBtfAddr.c_str(), strMeeting.c_str());
-    BtfChurnNoteDialResult(strBtfAddr, strMeeting, true);
-
-    // This one answered -- worth trying first next time we start.
-    RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm);
-
-    // Add node
-    pnode = new CNode(hSocket, addr, false);
-    pnode->strBtfAddr = strBtfAddr;
-    pnode->strBtfMeeting = strMeeting;
-    pnode->AddRef();
-    CRITICAL_BLOCK(cs_vNodes)
-        vNodes.push_back(pnode);
-    return pnode;
+    // Onion-only. Bitflash no longer dials a rendezvous meeting node: a peer we
+    // cannot reach at its .onion is simply unreachable from here. Dropping the
+    // relay dial is the whole point -- no VPS chokepoint, no relay code path.
+    (void)enc_pub;
+    return NULL;
 }
 
 // Connect to a peer by its `.btf` address: resolve the self-certified
@@ -2157,24 +2102,10 @@ bool StartNode(string& strError)
     if (_beginthread(ThreadNostrSeed, 0, NULL) == -1)
         printf("Error: _beginthread(ThreadNostrSeed) failed\n");
 
-    // Anonymous inbound: this node's .btf hidden service, reachable through the
-    // meeting relay without exposing our IP or needing a public port.
-    //
-    // Several of these, not one. Each holds its own registration at a
-    // rendezvous, and a registration is consumed the moment a caller is paired
-    // with it -- so with a single thread the node is unreachable for the whole
-    // gap between being paired and registering again. Measured from a node's
-    // own counters: half of all outbound dials failed for exactly that reason,
-    // 15 of 30 in eleven minutes, while descriptors resolved 53 times out of
-    // 54. Spares parked at the relay close that gap.
-    //
-    // Needs a relay that keeps more than one registration per node; against an
-    // older relay the extra threads are harmless, because it drops the previous
-    // registration on each new one and the node ends up where it started.
-    if (!vBtfMeetingRelays.empty())
-        for (int i = 0; i < BTF_ACCEPT_THREADS; i++)
-            if (_beginthread(ThreadBtfAccept, 0, NULL) == -1)
-                printf("Error: _beginthread(ThreadBtfAccept) failed\n");
+    // Anonymous inbound is the Tor hidden service now, not a rendezvous relay:
+    // Tor forwards onion connections to our local listener, which accepts them
+    // like any other inbound peer. No ThreadBtfAccept, no registration at a
+    // meeting relay, no VPS in the path.
 
     // Anonymous outbound: keep a connection to a specific .btf peer, if asked.
     if (!strBtfConnect.empty())

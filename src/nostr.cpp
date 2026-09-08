@@ -389,18 +389,13 @@ std::string BtfLocalDescriptor()
 {
     if (!EnsureNostrKey())
         return "";
-    string meeting;
-    CRITICAL_BLOCK(cs_activeRelay)
-        meeting = strBtfActiveRelay;
+    // Onion-only: we advertise our Tor hidden service and never a rendezvous
+    // meeting node. With no onion yet there is nothing reachable to publish.
     string onion = BtfLocalOnionEndpoint();
-    if (meeting.empty())
-    {
-        if (onion.empty())
-            return "";
-        meeting = "rendezvous-pending";
-    }
+    if (onion.empty())
+        return "";
     return btf::SignDescriptor(g_nostrKey.ctx, g_nostrKey.seckey,
-                               g_nostrKey.EncPubHex(), meeting, (uint64_t)GetTime(),
+                               g_nostrKey.EncPubHex(), "", (uint64_t)GetTime(),
                                onion);
 }
 
@@ -831,23 +826,16 @@ private:
 // key so only the address's owner can publish it (no hijacking).
 static void PublishDescriptor(CWebSocket& ws, CNostrKey& key)
 {
-    // meeting_node is the rendezvous relay this node's hidden service
-    // (ThreadBtfAccept in net.cpp) is registered at -- where clients dial us.
-    string meeting_node = BtfActiveRelay();
+    // Onion-only: we advertise our Tor hidden service, never a rendezvous
+    // meeting node. Until the hidden service is up there is nothing to publish.
     string onion = BtfLocalOnionEndpoint();
-    if (meeting_node.empty())
+    if (onion.empty())
     {
-        if (onion.empty())
-        {
-            // Not registered anywhere yet, and no direct onion endpoint exists.
-            // Publishing now would advertise a meeting node we can't be reached at.
-            LogPrint("nostr", "Nostr: skipping descriptor publish, no rendezvous registered yet\n");
-            return;
-        }
-        meeting_node = "rendezvous-pending";
+        LogPrint("nostr", "Nostr: skipping descriptor publish, no onion endpoint yet\n");
+        return;
     }
     string desc = btf::SignDescriptor(key.ctx, key.seckey, key.EncPubHex(),
-                                      meeting_node, (uint64_t)GetTime(),
+                                      "", (uint64_t)GetTime(),
                                       onion);
     if (desc.empty())
         return;
@@ -1764,11 +1752,9 @@ void ThreadNostrSeed(void* parg)
     LogPrint("nostr", "Nostr: node pubkey = %s\n", key.PubKeyHex().c_str());
     LogPrint("nostr", "Nostr: node .btf address = %s\n", key.BtfAddress().c_str());
 
-    // The self-test below publishes a real descriptor. Rendezvous-only nodes
-    // need ThreadBtfAccept to register first; Tor nodes can publish as soon as
-    // their signed onion endpoint exists, with rendezvous marked pending.
+    // The self-test below publishes a real descriptor. Onion-only: a node can
+    // publish as soon as its signed Tor hidden-service endpoint exists.
     for (int i = 0; i < 60 && !fShutdown &&
-                    BtfActiveRelay().empty() &&
                     BtfLocalOnionEndpoint().empty(); i++)
         Sleep(1000);
 
