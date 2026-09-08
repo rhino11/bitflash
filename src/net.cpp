@@ -1075,12 +1075,9 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
                 return pnode;
             }
             if (fDebug)
-                LogPrint("net", "ConnectNodeBtf: direct onion to %s at %s failed%s\n",
-                         strBtfAddr.c_str(), strOnionNorm.c_str(),
-                         fBtfOnionOnly ? "" : ", falling back to rendezvous");
+                LogPrint("net", "ConnectNodeBtf: direct onion to %s at %s failed\n",
+                         strBtfAddr.c_str(), strOnionNorm.c_str());
             BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, false);
-            if (fBtfOnionOnly)
-                return NULL;
         }
     }
 
