@@ -18,7 +18,7 @@
 #include <thread>
 #include "bip32.h"
 #include "btfaddr.h"
-#include "btftunnel.h"
+#include "btfsock.h"
 #ifndef _WIN32
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -4021,43 +4021,46 @@ static void ThreadStratumBridgeClient(void* arg)
         return;
     }
 
-    std::string meetingHostPort;
+    std::string meetingHostPort;   // unused: the pool is reached over its onion
+    std::string onionHostPort;
     unsigned char service_enc_pub[32];
-    if (!BtfResolve(pool, meetingHostPort, service_enc_pub))
+    if (!BtfResolve(pool, meetingHostPort, service_enc_pub, &onionHostPort) || onionHostPort.empty())
     {
-        LogPrint("worker", "[bridge] failed to resolve pool %s\n", pool.c_str());
+        LogPrint("worker", "[bridge] failed to resolve pool %s over onion\n", pool.c_str());
         BtfCloseSocket(miner);
         return;
     }
+    (void)target_pubkey; (void)service_enc_pub; // onion authenticates by address
 
-    size_t colon = meetingHostPort.rfind(':');
+    // The pool listens at p2p+1 on the same hidden service as its P2P port.
+    size_t colon = onionHostPort.rfind(':');
     if (colon == std::string::npos)
     {
-        LogPrint("worker", "[bridge] bad pool endpoint '%s'\n", meetingHostPort.c_str());
+        LogPrint("worker", "[bridge] bad pool onion '%s'\n", onionHostPort.c_str());
         BtfCloseSocket(miner);
         return;
     }
-    std::string host = meetingHostPort.substr(0, colon);
-    int port = atoi(meetingHostPort.substr(colon + 1).c_str());
-    if (port <= 0 || port > 65535)
+    std::string host = onionHostPort.substr(0, colon);
+    int p2p = atoi(onionHostPort.substr(colon + 1).c_str());
+    if (p2p <= 0 || p2p >= 65535)
     {
-        LogPrint("worker", "[bridge] bad pool port in '%s'\n", meetingHostPort.c_str());
+        LogPrint("worker", "[bridge] bad pool onion port in '%s'\n", onionHostPort.c_str());
         BtfCloseSocket(miner);
         return;
     }
+    int port = p2p + 1;
 
-    SOCKET poolSock = btf::BtfClientTunnel(host.c_str(), (unsigned short)port,
-                                           target_pubkey, service_enc_pub);
+    SOCKET poolSock = BtfConnectSocket(host, (unsigned short)port, SOCK_ONION_PEER, 30);
     if (poolSock == INVALID_SOCKET)
     {
-        LogPrint("worker", "[bridge] tunnel connect failed for pool %s via %s\n",
-                 pool.c_str(), meetingHostPort.c_str());
+        LogPrint("worker", "[bridge] onion connect failed for pool %s at %s:%d\n",
+                 pool.c_str(), host.c_str(), port);
         BtfCloseSocket(miner);
         return;
     }
 
-    LogPrint("worker", "[bridge] miner connected to pool %s via %s\n",
-             pool.c_str(), meetingHostPort.c_str());
+    LogPrint("worker", "[bridge] miner connected to pool %s over onion %s:%d\n",
+             pool.c_str(), host.c_str(), port);
     BridgePump(miner, poolSock);
     BtfCloseSocket(poolSock);
     BtfCloseSocket(miner);

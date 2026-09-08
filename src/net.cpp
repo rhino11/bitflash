@@ -20,7 +20,6 @@
 #include <cerrno>
 #include <cstdlib>
 #include "btfaddr.h"
-#include "btftunnel.h"
 #include "proxy.h"
 #include "tor.h"
 
@@ -1154,122 +1153,6 @@ CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting
     if (BtfLocalAddress() == strBtfAddr)
         return NULL; // ourselves
     return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, strOnion, enc_pub, strDesc);
-}
-
-// Anonymous inbound listener (this node's `.btf` hidden service). Registers at
-// the meeting relay and blocks until a client dials our address; each pairing
-// becomes a normal inbound CNode riding the end-to-end channel, then we
-// register again for the next caller.
-void ThreadBtfAccept(void* parg)
-{
-    printf("ThreadBtfAccept started\n");
-    unsigned char pk[32];
-    unsigned char sk[32];
-    while (!BtfGetIdentity(pk, sk))
-    {
-        if (fShutdown)
-            return;
-        Sleep(5000);
-    }
-    size_t iRelay = 0;
-    bool fPicked = false;
-    loop
-    {
-        if (fShutdown)
-            return;
-        // Curated seeds + relays discovered from Nostr announcements.
-        vector<string> relays = BtfAllRelays();
-        if (relays.empty())
-        {
-            Sleep(10000); // no meeting relay configured
-            continue;
-        }
-        // Random start spreads nodes across all relays (incl. volunteer ones).
-        if (!fPicked)
-        {
-            iRelay = (size_t)GetRand(relays.size());
-            fPicked = true;
-        }
-        // Stick to the current relay while it works; on failure, fail over to
-        // the next one so a DDoS'd/blocked relay IP can't keep us offline.
-        string strMeeting = relays[iRelay % relays.size()];
-        size_t colon = strMeeting.rfind(':');
-        if (colon == string::npos)
-        {
-            iRelay++;
-            Sleep(2000);
-            continue;
-        }
-        string strHost = strMeeting.substr(0, colon);
-        int nPort = atoi(strMeeting.substr(colon + 1).c_str());
-
-        // Returns as soon as the relay has us listed -- it does not wait for a
-        // dial. That distinction is the whole point: we have to be advertised
-        // before anyone can dial us, so registering and waiting cannot be the
-        // same call.
-        btf::RvSocket rv = btf::RvServiceRegister(strHost.c_str(), (unsigned short)nPort, pk);
-        if (fShutdown)
-        {
-            if (rv != btf::RV_INVALID)
-                btf::RvClose(rv);
-            return;
-        }
-        if (rv == btf::RV_INVALID)
-        {
-            BtfChurnNoteRegisterResult(strMeeting, false);
-            LogPrint("net", "rendezvous: could not register at %s, trying another\n",
-                     strMeeting.c_str());
-            iRelay++;       // this relay is down/attacked -> try the next one
-            Sleep(3000);
-            continue;
-        }
-        BtfChurnNoteRegisterResult(strMeeting, true);
-
-        // Registered. Advertise THIS relay now, while we are listed and before
-        // anybody dials -- a descriptor naming it is what makes a dial possible
-        // at all. Keep using it (iRelay unchanged) until it fails.
-        BtfSetActiveRelay(strMeeting);
-        LogPrint("net", "rendezvous: registered at %s, waiting for a dial\n",
-                 strMeeting.c_str());
-
-        // Now wait for someone to arrive -- but not forever. This used to have
-        // no bound, and a registration whose path died quietly left the thread
-        // parked in recv() with nothing to wake it: the loop never came back
-        // here, the node stopped being reachable, and nothing in the log said
-        // so. Re-registering every few minutes when nobody has dialled costs
-        // one reconnect and removes the whole failure mode.
-        bool fPaired = btf::RvServiceWaitPaired(rv, BTF_RENDEZVOUS_WAIT_SECS);
-        BtfChurnNotePairResult(strMeeting, fPaired);
-        if (!fPaired)
-        {
-            btf::RvClose(rv);
-            LogPrint("net", "rendezvous: no dial at %s within %ds (or it dropped us), "
-                     "re-registering\n", strMeeting.c_str(), BTF_RENDEZVOUS_WAIT_SECS);
-            continue;
-        }
-
-        btf_socket_t hSocket = btf::BtfServiceWrap(rv, sk);
-        if (hSocket == INVALID_SOCKET)
-        {
-            LogPrint("net", "rendezvous: paired at %s but channel setup failed\n",
-                     strMeeting.c_str());
-            continue;
-        }
-
-        // The dialer is anonymous (its pubkey never reaches us), so tag the
-        // connection with a random marker address.
-        unsigned char rnd[5];
-        RAND_bytes(rnd, sizeof(rnd));
-        CAddress addr = BtfMarkerAddr(rnd);
-
-        LogPrint("net", "accepted .btf connection via rendezvous %s\n", strMeeting.c_str());
-        CNode* pnode = new CNode(hSocket, addr, true);
-        pnode->strBtfAddr = "inbound";
-        pnode->strBtfMeeting = strMeeting;
-        pnode->AddRef();
-        CRITICAL_BLOCK(cs_vNodes)
-            vNodes.push_back(pnode);
-    }
 }
 
 // Keep an outbound connection to a specific `.btf` peer (from /connectbtf) --

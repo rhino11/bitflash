@@ -23,7 +23,7 @@
 #ifdef snprintf
 #undef snprintf
 #endif
-#include "btftunnel.h"
+#include "btfsock.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
