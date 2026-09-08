@@ -1,6 +1,7 @@
 # Bitflash — top-level build
 #
 #   make linux    build Bitflash-*-x86_64.AppImage
+#   make appimage-tor build the AppImage with managed Tor + transports bundled
 #   make windows  build Bitflash-*-windows.zip (from MSYS2 UCRT64)
 #   make windows-tor build Bitflash-*-windows-with-tor.zip
 #   make tests    build and run standalone unit tests
@@ -119,9 +120,19 @@ import shutil; shutil.copy('/tmp/bitflash.AppDir/bitflash.png', \
 	  [ -z "$$path" ] && path=$$(find /usr/lib /lib -name "$$lib" 2>/dev/null | head -1); \
 	  [ -n "$$path" ] && cp -L "$$path" /tmp/bitflash.AppDir/usr/lib/ && echo "  bundled $$lib" || echo "  missing $$lib"; \
 	done
+	@if [ -n "$(WITH_TOR)" ]; then \
+	  echo "==> bundling Tor into the AppImage"; \
+	  ./scripts/bundle-tor-linux.sh /tmp/bitflash.AppDir/usr/bin; \
+	fi
 	@ARCH=x86_64 /tmp/appimagetool --no-appstream /tmp/bitflash.AppDir \
 	  $(ROOT)/Bitflash-$(VERSION)-x86_64.AppImage 2>&1 | grep -E "^Built|^Error" || true
 	@echo "Built: Bitflash-$(VERSION)-x86_64.AppImage"
+
+# Release AppImage: same as `appimage` but with managed Tor and the obfs4 /
+# snowflake pluggable transports bundled in, so it reaches Tor with no system
+# Tor install. This is the artifact that ships.
+appimage-tor: src/bitflash
+	$(MAKE) -f Makefile appimage WITH_TOR=1
 
 # ---- Windows (MSYS2 UCRT64) -----------------------------------------------
 
@@ -212,6 +223,6 @@ sign-checksums:
 verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
-.PHONY: linux windows windows-tor clean appimage \
+.PHONY: linux windows windows-tor clean appimage appimage-tor \
         tests fuzz-net-message-smoke fuzz-script-smoke checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx
