@@ -847,9 +847,9 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
 struct BtfSeed
 {
     const char* btfAddr;
-    // No encryption key: onion-only seeds are resolved (address -> signed
-    // .onion) over Nostr like any peer, and a direct onion connection is
-    // authenticated by the address itself, so nothing here needs the x25519 key.
+    const char* onion;    // pinned host.onion:port -- dialled directly, no Nostr
+    // No encryption key: a direct onion connection is authenticated by the
+    // address itself, so nothing here needs the x25519 key.
 };
 
 static const BtfSeed pszBtfSeeds[] =
@@ -857,9 +857,12 @@ static const BtfSeed pszBtfSeeds[] =
     // Dedicated bootstrap node reachable at its Tor hidden service. Holds no
     // wallet balance and does not mine -- it exists only to answer a first dial.
     // Trusted for nothing: it serves the same signed, self-certifying descriptors
-    // any peer does. (The old Almaty rendezvous seed is retired: this release
-    // reaches peers only over onion.)
-    { "fd5gieenz3oep42siocc7z7ldealvt6iztu3nkekzphc6prwwcs45xi.btf" },
+    // any peer does. The .onion is pinned so a cold start dials it WITHOUT a
+    // Nostr resolve -- discovery over Nostr routes through Tor, which often has
+    // no exit to reach the Nostr relays, and would leave a fresh node with no way
+    // in. (The old Almaty rendezvous seed is retired: this release is onion-only.)
+    { "fd5gieenz3oep42siocc7z7ldealvt6iztu3nkekzphc6prwwcs45xi.btf",
+      "btjui62nrnc4ysmqkfxkkastvn65mecgf4j6qn2fxll3ayc7lb2vkuid.onion:8443" },
 };
 static const size_t nBtfSeeds = ARRAYLEN(pszBtfSeeds);
 
@@ -868,28 +871,39 @@ vector<pair<string, string> > vBtfExtraSeeds;
 
 static int TryBtfSeeds()
 {
-    vector<string> seeds;
-    for (size_t i = 0; i < nBtfSeeds; i++)
-        seeds.push_back(string(pszBtfSeeds[i].btfAddr));
-    foreach(const PAIRTYPE(string, string)& s, vBtfExtraSeeds)
-        seeds.push_back(s.first);
-
-    if (seeds.empty())
-        return 0;
-
-    LogPrint("net", "btfseed: trying %zu seed(s) over onion\n", seeds.size());
-
-    // Onion-only: resolve each seed's self-certified descriptor (its signed
-    // .onion endpoint) over Nostr and dial it directly. No relay to walk.
     int nConnected = 0;
-    foreach(const string& strAddr, seeds)
+    // A direct onion connection is authenticated by the .btf address itself, so
+    // the encryption key is unused on this path; pass a zeroed placeholder.
+    unsigned char dummyEnc[32] = { 0 };
+
+    LogPrint("net", "btfseed: trying %zu baked seed(s) over onion\n", (size_t)nBtfSeeds);
+
+    // Baked seeds carry a pinned .onion, so dial it directly -- no Nostr resolve.
+    // That is the whole point of a cold-start floor: Nostr discovery routes over
+    // Tor, which frequently has no exit to reach the Nostr relays, so a fresh
+    // node with an empty peer cache must be able to reach the seed without it.
+    for (size_t i = 0; i < nBtfSeeds; i++)
     {
         if (fShutdown) return nConnected;
-        if (ConnectNodeBtf(strAddr))
+        if (ConnectNodeBtfResolved(pszBtfSeeds[i].btfAddr, "", pszBtfSeeds[i].onion, dummyEnc))
         {
-            LogPrint("net", "btfseed: reached %s\n", strAddr.c_str());
+            LogPrint("net", "btfseed: reached %s over onion %s\n",
+                     pszBtfSeeds[i].btfAddr, pszBtfSeeds[i].onion);
             if (++nConnected >= 4)
-                break;      // enough of a foothold; the rest comes from discovery
+                return nConnected;  // enough; the rest comes from peer exchange
+        }
+    }
+
+    // Extra seeds from the command line carry only an address, so resolve them
+    // over Nostr (best effort -- depends on a working exit).
+    foreach(const PAIRTYPE(string, string)& s, vBtfExtraSeeds)
+    {
+        if (fShutdown) return nConnected;
+        if (ConnectNodeBtf(s.first))
+        {
+            LogPrint("net", "btfseed: reached %s\n", s.first.c_str());
+            if (++nConnected >= 4)
+                break;
         }
     }
     LogPrint("net", "btfseed: %d seed(s) answered\n", nConnected);
