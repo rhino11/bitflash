@@ -847,17 +847,19 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
 struct BtfSeed
 {
     const char* btfAddr;
-    const char* encHex;   // 64 hex chars, the peer's x25519 public key
+    // No encryption key: onion-only seeds are resolved (address -> signed
+    // .onion) over Nostr like any peer, and a direct onion connection is
+    // authenticated by the address itself, so nothing here needs the x25519 key.
 };
 
 static const BtfSeed pszBtfSeeds[] =
 {
-    // Dedicated bootstrap node, Almaty. Runs beside a rendezvous relay on the
-    // same host, holds no wallet balance and does not mine -- it exists only to
-    // answer a first dial. It is trusted for nothing: it serves the same signed
-    // descriptors any peer does.
-    { "ygffz37jczlmrkzicxok6chobauyratdexc7hfgwzjdabzvb2nkngqy.btf",
-      "de8284b9d4effa2132e7981b566c1a297c39c1857d9c128e8ae093ef511d3200" },
+    // Dedicated bootstrap node reachable at its Tor hidden service. Holds no
+    // wallet balance and does not mine -- it exists only to answer a first dial.
+    // Trusted for nothing: it serves the same signed, self-certifying descriptors
+    // any peer does. (The old Almaty rendezvous seed is retired: this release
+    // reaches peers only over onion.)
+    { "fd5gieenz3oep42siocc7z7ldealvt6iztu3nkekzphc6prwwcs45xi.btf" },
 };
 static const size_t nBtfSeeds = ARRAYLEN(pszBtfSeeds);
 
