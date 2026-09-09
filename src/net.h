@@ -42,6 +42,14 @@ extern string strBtfConnect;
 // Bootstrap seeds added at runtime with /btfseed=ADDRESS:ENCHEX (repeatable).
 // The compiled-in list lives in net.cpp; these are appended to it.
 extern std::vector<std::pair<std::string, std::string> > vBtfExtraSeeds;
+// Explicit IPv4 address for the P2P listener (-bindaddr). Empty means: loopback
+// only when managed Tor is running, every interface otherwise. Needed when Tor
+// runs on a different machine and has to reach this one over the network.
+void BtfSetListenBindAddress(const string& strAddr);
+string BtfListenBindAddress();
+// The name this chain answers to outside the magic bytes: pool handshakes and
+// dashboards. One spelling, so the two networks cannot be confused by a typo.
+inline const char* BtfNetworkName() { return IsTestNet() ? "bitflash-testnet" : "bitflash"; }
 
 // --- .btf peer exchange ---------------------------------------------------
 // Peers gossip signed descriptors so discovery survives a relay outage. Both
