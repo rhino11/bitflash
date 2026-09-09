@@ -867,7 +867,7 @@ struct BtfSeed
     // address itself, so nothing here needs the x25519 key.
 };
 
-static const BtfSeed pszBtfSeeds[] =
+static const BtfSeed pszBtfSeedsMainnet[] =
 {
     // Dedicated bootstrap node reachable at its Tor hidden service. Holds no
     // wallet balance and does not mine -- it exists only to answer a first dial.
@@ -879,7 +879,23 @@ static const BtfSeed pszBtfSeeds[] =
     { "fd5gieenz3oep42siocc7z7ldealvt6iztu3nkekzphc6prwwcs45xi.btf",
       "btjui62nrnc4ysmqkfxkkastvn65mecgf4j6qn2fxll3ayc7lb2vkuid.onion:8443" },
 };
-static const size_t nBtfSeeds = ARRAYLEN(pszBtfSeeds);
+
+static const BtfSeed pszBtfSeedsTestnet[] =
+{
+    // Testnet bootstrap node. It runs its own genesis and magic bytes, so a
+    // mainnet seed would just fail the handshake -- each network pins its own.
+    // Same trustless, onion-dialled role as the mainnet seed above.
+    { "g27psluzpzwjtrhbdvqmjujffxob5uzbdch6gsf5fitdtb56hswzkpa.btf",
+      "jx7aprn2n4amrodshliw7yqlr75yn5i4d45b4fyt4i5qqm3wqtvd4jid.onion:18433" },
+};
+
+// Seeds for the active network: a mainnet seed cannot bootstrap a testnet node
+// (different genesis/magic) and vice versa, so pick the list by network.
+static const BtfSeed* BtfActiveSeeds(size_t& nOut)
+{
+    if (IsTestNet()) { nOut = ARRAYLEN(pszBtfSeedsTestnet); return pszBtfSeedsTestnet; }
+    nOut = ARRAYLEN(pszBtfSeedsMainnet); return pszBtfSeedsMainnet;
+}
 
 // Extra seeds from the command line (/btfseed=ADDRESS:ENCHEX, repeatable).
 vector<pair<string, string> > vBtfExtraSeeds;
@@ -891,19 +907,22 @@ static int TryBtfSeeds()
     // the encryption key is unused on this path; pass a zeroed placeholder.
     unsigned char dummyEnc[32] = { 0 };
 
-    LogPrint("net", "btfseed: trying %zu baked seed(s) over onion\n", (size_t)nBtfSeeds);
+    size_t nSeeds = 0;
+    const BtfSeed* seeds = BtfActiveSeeds(nSeeds);
+    LogPrint("net", "btfseed: trying %zu baked %s seed(s) over onion\n",
+             nSeeds, IsTestNet() ? "testnet" : "mainnet");
 
     // Baked seeds carry a pinned .onion, so dial it directly -- no Nostr resolve.
     // That is the whole point of a cold-start floor: Nostr discovery routes over
     // Tor, which frequently has no exit to reach the Nostr relays, so a fresh
     // node with an empty peer cache must be able to reach the seed without it.
-    for (size_t i = 0; i < nBtfSeeds; i++)
+    for (size_t i = 0; i < nSeeds; i++)
     {
         if (fShutdown) return nConnected;
-        if (ConnectNodeBtfResolved(pszBtfSeeds[i].btfAddr, "", pszBtfSeeds[i].onion, dummyEnc))
+        if (ConnectNodeBtfResolved(seeds[i].btfAddr, "", seeds[i].onion, dummyEnc))
         {
             LogPrint("net", "btfseed: reached %s over onion %s\n",
-                     pszBtfSeeds[i].btfAddr, pszBtfSeeds[i].onion);
+                     seeds[i].btfAddr, seeds[i].onion);
             if (++nConnected >= 4)
                 return nConnected;  // enough; the rest comes from peer exchange
         }
