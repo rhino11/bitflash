@@ -145,6 +145,9 @@ static void PrintUsage()
     printf("Network:\n");
     printf("  /testnet                   (isolated test network genesis, datadir, port, and magic)\n");
     printf("  /port=N                    (P2P listen port, default 8433; testnet 18433)\n");
+    printf("  /bindaddr=IP               (listen on this address instead of loopback;\n");
+    printf("                              only for a Tor running on another machine --\n");
+    printf("                              a reachable plain port exposes this node's onion)\n");
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
@@ -201,6 +204,20 @@ static void PrintUsage()
 }
 
 #define printf OutputDebugStringF
+
+// A privacy option the operator asked for and did not get is worse than no
+// option at all: the node comes up looking protected while doing exactly the
+// thing the operator was trying to avoid. Where such a request cannot be
+// honoured we stop here instead of falling back.
+static void StartupRefuse(const string& strWhat, const string& strFix)
+{
+    AttachTerminal();
+    fprintf(stderr, "\nRefusing to start: %s\n", strWhat.c_str());
+    if (!strFix.empty())
+        fprintf(stderr, "%s\n", strFix.c_str());
+    fflush(stderr);
+    exit(1);
+}
 
 static void ParseStartupArguments(int argc, char* argv[])
 {
@@ -341,6 +358,10 @@ static void ParseStartupArguments(int argc, char* argv[])
                     BtfLocalOnionEndpoint().c_str());
     }
 
+    string strBindAddr = argval2(argc, argv, "/bindaddr", "-bindaddr");
+    if (!strBindAddr.empty())
+        BtfSetListenBindAddress(strBindAddr);
+
     bool fManagedTor = arg(argc, argv, "/managedtor") || arg(argc, argv, "-managedtor");
     bool fNoManagedTor = arg(argc, argv, "/nomanagedtor") || arg(argc, argv, "-nomanagedtor");
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
@@ -383,12 +404,24 @@ static void ParseStartupArguments(int argc, char* argv[])
                 if (ok)
                     ptExec[tr] = path;
                 else
-                    fprintf(stderr, "Warning: no pluggable-transport binary for '%s'; those bridges disabled\n",
-                            tr.c_str());
+                {
+                    // Not a warning. Bridges are asked for by somebody on a
+                    // network that blocks Tor; carrying on without them means
+                    // dialling the directory authorities in the clear, which is
+                    // the observable act they were avoiding.
+                    StartupRefuse(
+                        strprintf("no pluggable-transport binary for '%s', so the bridges you asked for cannot be used",
+                                  tr.c_str()),
+                        "Install the transport (the release packages ship it under tor/pluggable_transports/),\n"
+                        "or drop the bridge options to reach Tor directly -- but only if direct Tor is safe where you are.");
+                }
             }
 
             if (bridges.empty() || ptExec.empty())
-                fprintf(stderr, "Warning: no usable Tor bridges configured\n");
+                StartupRefuse(
+                    "Tor bridges were requested but none could be configured",
+                    "Check the bridge line passed to -torbridge, or drop the bridge options to reach\n"
+                    "Tor directly -- but only if direct Tor is safe where you are.");
             else
             {
                 BtfSetTorBridges(bridges, ptExec);
@@ -405,10 +438,15 @@ static void ParseStartupArguments(int argc, char* argv[])
         string err;
         if (!BtfStartManagedTor(torPath, err))
         {
+            // Asked for explicitly: the node has no business coming up without
+            // it, because every dial would then leave over the clear network.
+            // Picked up automatically: say so and let the other transports try.
             if (fAutoManagedTor)
                 fprintf(stderr, "Bundled Tor not enabled automatically: %s\n", err.c_str());
             else
-                fprintf(stderr, "Ignoring /managedtor=%s: %s\n", torPath.c_str(), err.c_str());
+                StartupRefuse(strprintf("managed Tor was requested but did not start: %s", err.c_str()),
+                              "Fix the Tor binary path given to -managedtor, or start without it only if\n"
+                              "reaching peers over the clear network is acceptable here.");
         }
         else
             fprintf(stderr, "Managed Tor enabled%s: %s\n",

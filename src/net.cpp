@@ -900,6 +900,11 @@ static const BtfSeed* BtfActiveSeeds(size_t& nOut)
 // Extra seeds from the command line (/btfseed=ADDRESS:ENCHEX, repeatable).
 vector<pair<string, string> > vBtfExtraSeeds;
 
+// Explicit listener address (-bindaddr); see the bind site in BindListenPort.
+static string g_strBtfBindAddr;
+void BtfSetListenBindAddress(const string& strAddr) { g_strBtfBindAddr = strAddr; }
+string BtfListenBindAddress() { return g_strBtfBindAddr; }
+
 static int TryBtfSeeds()
 {
     int nConnected = 0;
@@ -944,37 +949,153 @@ static int TryBtfSeeds()
     return nConnected;
 }
 
-// Dial everything we reached last time, before the relays have said anything.
-void ThreadReconnectCachedBtfPeers(void* parg)
+//
+// The .btf connection scheduler.
+//
+// This used to run once at startup: try the cache, or the seeds if the cache
+// was empty, and return. Two failures came out of that shape and both were seen
+// on real hardware before they were read in the code.
+//
+// The first is that a fresh hidden service usually loses its opening dial --
+// the service is not published yet and the circuits are cold -- so the one
+// attempt the node ever made failed and it sat there with no peers, mining a
+// chain nobody else saw, until somebody restarted it.
+//
+// The second is subtler. Peer exchange verifies a descriptor and hands it to
+// RememberBtfPeer, which writes it to the on-disk cache. But the cache was read
+// exactly once, at startup, so nothing learned while running was ever dialled;
+// the only discovery that worked continuously was Nostr, over a Tor that
+// frequently has no exit to reach the relays. A node could learn about a
+// hundred peers and connect to none of them.
+//
+// So the cache is re-read every round, which is what puts peer exchange into
+// the scheduler, and seeds are retried whenever the peer count is on the floor
+// rather than only when the cache happens to be empty. Every candidate carries
+// its own exponential backoff so a dead address costs one dial and then goes
+// quiet, and a transient failure is retried instead of being final.
+//
+
+static const int   BTF_TARGET_PEERS    = 8;   // stop dialling once we hold this many
+static const int   BTF_SEED_FLOOR      = 2;   // below this, seeds are fair game again
+static const int   BTF_DIALS_PER_ROUND = 4;   // bounds a round against a big stale cache
+static const int64 BTF_ROUND_SECONDS   = 20;
+static const int64 BTF_BACKOFF_BASE    = 30;
+static const int64 BTF_BACKOFF_MAX     = 15 * 60;
+
+static CCriticalSection cs_btfDialSched;
+static map<string, int64> g_btfNextDial;   // address -> earliest next attempt
+static map<string, int>   g_btfDialFails;  // address -> consecutive failures
+
+static int CountBtfPeersConnected()
+{
+    int n = 0;
+    CRITICAL_BLOCK(cs_vNodes)
+        foreach(CNode* pnode, vNodes)
+            if (!pnode->strBtfAddr.empty())
+                n++;
+    return n;
+}
+
+static bool BtfAlreadyConnected(const string& strBtfAddr)
+{
+    CRITICAL_BLOCK(cs_vNodes)
+        foreach(CNode* pnode, vNodes)
+            if (pnode->strBtfAddr == strBtfAddr)
+                return true;
+    return false;
+}
+
+static bool BtfDialDue(const string& strBtfAddr)
+{
+    CRITICAL_BLOCK(cs_btfDialSched)
+    {
+        map<string, int64>::iterator it = g_btfNextDial.find(strBtfAddr);
+        if (it != g_btfNextDial.end() && GetTime() < it->second)
+            return false;
+    }
+    return true;
+}
+
+static void BtfNoteDialResult(const string& strBtfAddr, bool fOk)
+{
+    CRITICAL_BLOCK(cs_btfDialSched)
+    {
+        if (fOk)
+        {
+            g_btfDialFails.erase(strBtfAddr);
+            g_btfNextDial.erase(strBtfAddr);
+            return;
+        }
+        int nFails = ++g_btfDialFails[strBtfAddr];
+        // Doubling, capped. Jitter keeps a set of nodes that all lost the same
+        // peer from coming back at it in lockstep afterwards.
+        int64 nWait = BTF_BACKOFF_BASE << min(nFails - 1, 8);
+        if (nWait > BTF_BACKOFF_MAX)
+            nWait = BTF_BACKOFF_MAX;
+        nWait += GetRand(nWait / 4 + 1);
+        g_btfNextDial[strBtfAddr] = GetTime() + nWait;
+    }
+}
+
+// One pass over the remembered peers. Returns how many answered.
+static int DialRememberedBtfPeers(int nBudget)
 {
     vector<CachedBtfPeer> peers;
-    LoadCachedBtfPeers(peers);
+    LoadCachedBtfPeers(peers);   // re-read every round: this is the PEX path
     if (peers.empty())
-    {
-        // First run, or the cache aged out. Seeds are the only way in that does
-        // not depend on a relay answering.
-        LogPrint("net", "btfpeers: no cache yet, falling back to seeds\n");
-        if (TryBtfSeeds() == 0)
-            LogPrint("net", "btfpeers: no seed answered, waiting on relay discovery\n");
-        return;
-    }
-    LogPrint("net", "btfpeers: trying %zu remembered peer(s) before discovery\n",
-             peers.size());
+        return 0;
 
-    int nConnected = 0;
+    int nConnected = 0, nTried = 0;
     foreach(const CachedBtfPeer& p, peers)
     {
-        if (fShutdown) return;
+        if (fShutdown || nTried >= nBudget)
+            break;
+        if (p.btfAddr == BtfLocalAddress())
+            continue;                       // never dial ourselves
+        if (BtfAlreadyConnected(p.btfAddr) || !BtfDialDue(p.btfAddr))
+            continue;
         unsigned char enc[32];
-        if (!HexToBytes(p.encHex, enc, 32)) continue;
-        if (ConnectNodeBtfResolved(p.btfAddr, p.meeting, p.onion, enc))
-        {
+        if (!HexToBytes(p.encHex, enc, 32))
+            continue;
+        nTried++;
+        bool fOk = ConnectNodeBtfResolved(p.btfAddr, p.meeting, p.onion, enc) != NULL;
+        BtfNoteDialResult(p.btfAddr, fOk);
+        if (fOk)
             nConnected++;
-            if (nConnected >= 8) break; // enough to bootstrap; the rest can wait
-        }
     }
-    LogPrint("net", "btfpeers: %d of %zu remembered peer(s) answered\n",
-             nConnected, peers.size());
+    if (nTried)
+        LogPrint("net", "btfpeers: %d of %d remembered peer(s) answered this round\n",
+                 nConnected, nTried);
+    return nConnected;
+}
+
+void ThreadReconnectCachedBtfPeers(void* parg)
+{
+    LogPrint("net", "btfpeers: connection scheduler started\n");
+    while (!fShutdown)
+    {
+        int nHave = CountBtfPeersConnected();
+        if (nHave < BTF_TARGET_PEERS)
+        {
+            int nBudget = BTF_DIALS_PER_ROUND;
+            nHave += DialRememberedBtfPeers(nBudget);
+
+            // Seeds are not just a cold-start crutch. If the cache is empty, or
+            // everything in it is gone, they are the only way back that does not
+            // need a Nostr relay to answer.
+            if (!fShutdown && nHave < BTF_SEED_FLOOR && BtfDialDue("__seeds__"))
+            {
+                int nSeeded = TryBtfSeeds();
+                BtfNoteDialResult("__seeds__", nSeeded > 0);
+                if (nSeeded == 0)
+                    LogPrint("net", "btfpeers: no seed answered; will retry with backoff\n");
+            }
+        }
+
+        for (int64 i = 0; i < BTF_ROUND_SECONDS && !fShutdown; i++)
+            Sleep(1000);
+    }
+    LogPrint("net", "btfpeers: connection scheduler stopped\n");
 }
 
 //
@@ -1982,11 +2103,40 @@ bool StartNode(string& strError)
     // IP address, and port for the socket that is being bound
     int nRetryLimit = 15;
     struct sockaddr_in sockaddr = addrLocalHost.GetSockAddr();
-    // Keep addrLocalHost as this node's advertised address, but listen on all
-    // local interfaces. Managed Tor forwards hidden-service traffic to
-    // 127.0.0.1:<port>, and binding only to the LAN address made that onion
-    // endpoint unreachable even though the P2P listener was running.
-    sockaddr.sin_addr.s_addr = INADDR_ANY;
+    // Where to listen. Managed Tor forwards hidden-service traffic to
+    // 127.0.0.1:<port>, so loopback is all an onion-only node ever needs -- and
+    // binding wider than that is not merely untidy, it deanonymises the node.
+    // Anything that can reach the plain TCP port completes the same handshake a
+    // Tor peer does, and peer exchange then hands it this node's signed
+    // descriptor, onion included. Whoever dialled the IP now knows which onion
+    // it is. So under managed Tor the listener stays on loopback.
+    //
+    // Tor running on another machine still needs a reachable bind, so -bindaddr
+    // takes an explicit address for that case. It has to be asked for by name:
+    // the wide bind is exactly the mistake, and it should not be the default
+    // anyone gets without choosing it.
+    string strBindAddr = BtfListenBindAddress();
+    if (!strBindAddr.empty())
+    {
+        unsigned long nAddr = inet_addr(strBindAddr.c_str());
+        if (nAddr == INADDR_NONE)
+        {
+            strError = strprintf("Error: -bindaddr=%s is not a usable IPv4 address", strBindAddr.c_str());
+            printf("%s\n", strError.c_str());
+            return false;
+        }
+        sockaddr.sin_addr.s_addr = nAddr;
+        printf("Listening on %s as requested by -bindaddr\n", strBindAddr.c_str());
+    }
+    else if (BtfManagedTorEnabled())
+    {
+        sockaddr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        printf("Onion-only: P2P listener bound to 127.0.0.1; reachable through the hidden service\n");
+    }
+    else
+    {
+        sockaddr.sin_addr.s_addr = INADDR_ANY;
+    }
     if (bind(hListenSocket, (struct sockaddr*)&sockaddr, sizeof(sockaddr)) == SOCKET_ERROR)
     {
         int nErr = WSAGetLastError();
