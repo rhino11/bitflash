@@ -4,7 +4,7 @@
 
 # Bitflash `BTF`
 
-CPU-only cryptocurrency. A revival of Bitcoin 0.1.0 with RandomX proof of work and anonymous `.btf` addressing over Nostr.
+CPU-only cryptocurrency. A revival of Bitcoin 0.1.0 with RandomX proof of work and anonymous `.btf` addressing over Tor onion services.
 
 ![PoW](https://img.shields.io/badge/PoW-RandomX%20(CPU)-2ea44f?style=for-the-badge)
 ![Privacy](https://img.shields.io/badge/addresses-.btf%20anonymous-2ea44f?style=for-the-badge)
@@ -12,7 +12,7 @@ CPU-only cryptocurrency. A revival of Bitcoin 0.1.0 with RandomX proof of work a
 ![Fair Launch](https://img.shields.io/badge/premine-none-2ea44f?style=for-the-badge)
 [![Discord](https://img.shields.io/badge/discord-join-5865F2?style=for-the-badge)](https://discord.gg/n7B2Eamn3)
 
-**[Download](https://releases.bitflash.network/)** · **[Discord](https://discord.gg/n7B2Eamn3)**
+**[Download](https://releases.bitflash.network/)** · **[Testnet faucet](https://faucet.bitflash.network/)** · **[Discord](https://discord.gg/n7B2Eamn3)**
 
 </div>
 
@@ -24,7 +24,7 @@ Bitflash keeps Satoshi's original consensus rules and replaces two things:
 
 **RandomX proof of work.** Memory-hard algorithm used by Monero. A laptop competes equally with a server. ASICs and GPUs have no advantage.
 
-**Anonymous addressing.** Every node has a `.btf` address derived from its public key, similar to a Tor `.onion`. Nodes reach each other through encrypted rendezvous tunnels by default, and can advertise a signed direct `.onion` endpoint for Tor peers.
+**Anonymous addressing.** Every node has a `.btf` address derived from its public key, similar to a Tor `.onion`. Nodes reach each other only through Tor hidden services: a peer is dialled at the `.onion` its own signed descriptor names, and the address it decodes to is what authenticates it. There is no clearnet transport to fall back to.
 
 No premine. No ICO. 50 BTF per block, halving on schedule, 21M cap, ~2 minute blocks.
 
@@ -32,11 +32,11 @@ No premine. No ICO. 50 BTF per block, halving on schedule, 21M cap, ~2 minute bl
 
 Worth being precise, because the difference matters if you are relying on it.
 
-**A peer you reach over `.btf` does not learn your IP.** Outbound peer discovery uses rendezvous tunnels by default. If both sides use Tor and the peer advertises a signed `.onion` endpoint, the node connects directly to that hidden service instead. In both cases the peer does not see your clearnet IP.
+**A peer you reach over `.btf` does not learn your IP.** Every dial goes out through Tor to the peer's hidden service, and every inbound connection arrives through your own. Neither side sees the other's clearnet address, and there is no third party in the middle: the relays that used to pair nodes are gone from the code.
 
-**The rendezvous relay sees your IP unless you use Tor.** It has to — it is the thing your TCP connection terminates on. With `-tor`, the relay sees Tor instead. With a signed direct `.onion` peer endpoint, the relay is not on that connection path at all.
+**Nothing terminates your connection but the peer.** Earlier versions routed through a rendezvous relay, which by construction saw your IP unless you also used Tor. That transport was removed, not merely discouraged.
 
-**The node still listens on 8433.** Nothing dials by IP any more, but the listener is still there, so anyone who already knows your address and can reach that port may connect directly. If that matters to you, firewall it.
+**Your listener no longer gives you away.** It used to bind every interface, so anything that could reach the plain port completed a handshake and was handed your signed descriptor — onion included. Under managed Tor it binds loopback only, which is all the hidden service needs. If your Tor runs on another machine and has to reach this one over the network, `-bindaddr=IP` says so explicitly.
 
 This is unlinkability between peers, not anonymity against a network observer.
 For Tor routing and direct onion peer endpoints, start the node with `-tor`;
@@ -291,7 +291,7 @@ Open **Options** from the menu bar. Under Mining Mode:
 
 **Solo** — mine directly to your wallet. Default.
 
-**Operator** — run a pool. The pool server uses `.btf` rendezvous only. The window shows the pool's `.btf` address, discovered pools, and owed payouts.
+**Operator** — run a pool. The pool listens on a second port on the same hidden service, so workers reach it over Tor like any other peer. The window shows the pool's `.btf` address, discovered pools, and owed payouts. A worker announces which chain it is mining when it subscribes, and a pool on the other network refuses it rather than handing out work whose shares could never be paid.
 
 Pool announcements are published on Nostr with live status fields, so external tools can query the latest pool state by `.btf` address.
 
@@ -357,7 +357,8 @@ Other options worth knowing:
 -datadir=PATH    # wallet and chain data elsewhere
 -testnet         # isolated test network genesis, datadir, port 18433, and magic
 -port=N          # P2P listen port, default 8433; testnet default 18433
--socks=HOST:PORT # SOCKS5 for outbound Nostr, .btf relay, and onion peer dials
+-socks=HOST:PORT # SOCKS5 for outbound Nostr and onion peer dials
+-bindaddr=IP     # listen here instead of loopback (only for Tor on another machine)
 -tor[=HOST:PORT] # Tor mode; default local Tor SOCKS5 proxy is 127.0.0.1:9050
 -managedtor[=PATH] # start Tor, create a hidden service, advertise its onion
 -nomanagedtor    # disable the automatic bundled-Tor startup
@@ -370,16 +371,22 @@ Other options worth knowing:
 needed — the data directory takes an exclusive lock, so a second node pointed at
 the same one will refuse to start.
 
-`-socks=127.0.0.1:9050` routes outbound Nostr discovery, `.btf` rendezvous
-dials, and direct `.onion` peer dials through a local SOCKS5 proxy such as Tor.
+`-socks=127.0.0.1:9050` routes outbound Nostr discovery and `.onion` peer
+dials through a local SOCKS5 proxy such as Tor.
 When it is set, the node skips
 plain HTTP external-IP probes instead of leaking a direct request outside the
 proxy. IPv6 proxy endpoints use brackets, for example `-socks=[::1]:9050`.
 
 `-tor` is a privacy shorthand for the usual local Tor SOCKS5 listener at
-`127.0.0.1:9050`. It routes outbound Nostr discovery, `.btf` rendezvous dials,
-and signed direct `.onion` peer dials through Tor, and keeps external-IP probes
-disabled. Use `-tor=HOST:PORT` when Tor listens somewhere else.
+`127.0.0.1:9050`. It routes outbound Nostr discovery and signed `.onion` peer
+dials through Tor, and keeps external-IP probes disabled. Use `-tor=HOST:PORT`
+when Tor listens somewhere else.
+
+Bridges are for networks that block Tor itself: `-torbridges` uses the built-in
+Snowflake set, `-torbridge=LINE` adds an obfs4 or snowflake bridge of your own.
+If you ask for bridges and the pluggable-transport binary is missing, the node
+refuses to start rather than quietly reaching Tor directly — that fallback would
+be the exact thing you were avoiding.
 
 The desktop app starts a managed Tor automatically when no other Tor option is
 set, so onion transport works out of the box; `-nomanagedtor` turns that off.
@@ -428,38 +435,71 @@ WantedBy=multi-user.target
 ## How nodes find each other
 
 A node publishes a **self-certifying descriptor**: its `.btf` address, an
-encryption key, and the rendezvous relay where it is currently reachable, signed
-with the key the address decodes to. Nobody can publish a descriptor for an
-address they do not own, so a hostile relay can withhold descriptors but cannot
-forge one.
+encryption key, and the `.onion` where it is currently reachable, signed with the
+key the address decodes to. Nobody can publish a descriptor for an address they
+do not own, so whoever passes one on is trusted for nothing — forging an entry
+would need somebody else's secret key.
 
-Discovery runs on four layers, so no single failure takes the network down:
+Discovery runs on three layers, and none of them is required for the others to
+work:
 
 | | |
 |---|---|
-| **Nostr relays** | where descriptors are published and looked up |
-| **Rendezvous relays** | the tunnel itself, where two nodes are paired |
-| **Peer cache** | peers that answered last time, saved to `btfpeers.json` and dialled on start before any relay is contacted |
-| **Peer exchange** | connected nodes hand each other signed descriptors, so discovery keeps working while relays are down |
+| **Baked seed** | a pinned `.onion` compiled into the binary, dialled directly, so a cold start needs no relay to answer |
+| **Peer cache** | peers that answered before, kept in `btfpeers.json` |
+| **Peer exchange** | connected nodes hand each other signed descriptors, so the network grows and heals on its own |
 
-Peer exchange carries the same signed descriptors, verified the same way, so a
-peer passing one on is trusted for nothing.
+Nostr is used to look up a descriptor when nothing else has one, and that is all
+it is used for. Tor frequently has no exit to reach the Nostr relays, so nothing
+load-bearing may depend on it.
 
-The cache is what makes a restart fast: on a clean install the first peer takes
-about 36 seconds, and on the next start about 2.
+A single connection scheduler works through all three, re-reading the cache each
+round — which is what puts peer exchange to use — with exponential backoff and
+jitter per address. A dead peer costs one dial and then goes quiet; a peer that
+was merely unreachable for a moment gets tried again. Seeds are retried whenever
+the peer count is on the floor, not only on the first run.
 
 ---
 
-## Running a relay
+## Running a bootstrap seed
 
-Relays are the meeting points that let nodes behind NAT connect to each other. More relays make the network more resilient.
+Relays are gone. A node behind NAT needs nothing forwarded, because its hidden
+service is its address. What still helps a stranger is somebody answering the
+very first dial, and any node with a stable onion can be that:
 
 ```bash
-sudo bash relay/install-bitflash-relay.sh 8434
-./bitflash -nogui -announcerelay=YOUR_PUBLIC_IP:8434
+./bitflash-node -nogui -managedtor -port=8433
 ```
 
-Relays forward encrypted bytes and cannot read or modify traffic.
+Publish the `.btf` address it prints and people can pass it with `-btfseed=`. A
+seed holds no balance, does not mine, and is trusted for nothing: it serves the
+same signed descriptors any peer does.
+
+---
+
+## Testnet
+
+There is a test network with its own genesis, magic bytes, port and data
+directory, so a testnet node and a mainnet node cannot see or corrupt each
+other. It is where to try a wallet change, a pool, or a patch before it touches
+coins that matter.
+
+```bash
+./bitflash-node -nogui -testnet -datadir=<a folder of its own>
+```
+
+Pass `-datadir` explicitly. Without it both networks land in the same
+application directory and fight over the same hidden service, which fails in
+ways that look like a network problem.
+
+Coins are free from the faucet at **<https://faucet.bitflash.network>**, 10 BTF
+at a time, one per address and per IP every six hours. Get an address to give it
+with `-newaddress`. You can also just mine: the difficulty floor makes the first
+blocks trivial, so `-testnet -gen` fills a wallet quickly.
+
+Testnet and mainnet addresses are indistinguishable — same version byte — so
+nothing can tell them apart for you. Coins sent to a mainnet address on testnet
+land on an output nobody can ever spend on mainnet.
 
 ---
 
@@ -503,12 +543,12 @@ windows-tor` to require the extra signature check.
 | Block reward | 50 BTF, halving every 210,000 blocks |
 | Halving interval | **~292 days** at target block time |
 | Max supply | 21,000,000 BTF |
-| Coinbase maturity | 100 blocks (~3.3 hours) before mined coins can be spent |
+| Coinbase maturity | 120 blocks (~4 hours) before mined coins can be spent |
 | Max signature ops | 20,000 per block |
-| P2P port | 8433 |
-| Addressing | `.btf` rendezvous — see the caveats above |
+| P2P port | 8433 (testnet 18433) |
+| Addressing | `.btf` over Tor onion services — see the caveats above |
 | Premine | None |
-| Pool server | Built-in — `.btf` rendezvous only |
+| Pool server | Built-in — second port on the node's own onion |
 | Wallet recovery | Twelve-word phrase (BIP39 + BIP32 + BIP44, coin type 4346950), plus file backup |
 | Wallet storage | SQLite `wallet.sqlite` by default, or Berkeley DB `wallet.dat` |
 
