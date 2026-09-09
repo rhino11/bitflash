@@ -138,10 +138,8 @@ static void PrintUsage()
     printf("  /poolstatusfile=PATH       (write pool status JSON for dashboards)\n");
     printf("  /poolroundsfile=PATH       (write public pool round proofs JSON)\n");
     printf("\n");
-    printf(".btf and rendezvous:\n");
-    printf("  /connectbtf=PEER_BTF_ADDRESS\n");
-    printf("  /rvrelay=HOST:PORT\n");
-    printf("  /announcerelay=HOST:PORT\n");
+    printf(".btf (Tor onion services):\n");
+    printf("  /connectbtf=PEER_BTF_ADDRESS   (keep an outbound connection to this .btf peer)\n");
     printf("  /onionservice=HOST.onion:PORT  (advertise this node's Tor hidden service)\n");
     printf("\n");
     printf("Network:\n");
@@ -153,7 +151,6 @@ static void PrintUsage()
     printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
     printf("  /torbridges                (reach Tor via obfs4 bridges where Tor is blocked)\n");
     printf("  /torbridge=LINE            (add one obfs4 bridge line; repeatable via config)\n");
-    printf("  /oniononly                 (do not fall back to rendezvous when a .btf onion dial fails)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -314,14 +311,6 @@ static void ParseStartupArguments(int argc, char* argv[])
     string btfConnect = argval2(argc, argv, "/connectbtf", "-connectbtf");
     if (!btfConnect.empty())
         strBtfConnect = btfConnect;
-    fBtfOnionOnly = arg(argc, argv, "/oniononly") || arg(argc, argv, "-oniononly");
-
-    string rvRelay = argval2(argc, argv, "/rvrelay", "-rvrelay");
-    if (!rvRelay.empty())
-    {
-        vBtfMeetingRelays.clear();
-        vBtfMeetingRelays.push_back(rvRelay);
-    }
 
     // net.cpp has described nListenPort as "tunable via /port" since it was
     // written, but nothing ever read the option, so the port was fixed at 8433
@@ -340,10 +329,6 @@ static void ParseStartupArguments(int argc, char* argv[])
             addrLocalHost.port = nListenPort;
         }
     }
-
-    string announceRelay = argval2(argc, argv, "/announcerelay", "-announcerelay");
-    if (!announceRelay.empty())
-        strBtfAnnounceRelay = announceRelay;
 
     string onionService = argval2(argc, argv, "/onionservice", "-onionservice");
     if (!onionService.empty())
@@ -456,8 +441,6 @@ static void ParseStartupArguments(int argc, char* argv[])
                         BtfSocks5ProxyName().c_str());
         }
     }
-    if (fBtfOnionOnly && !BtfSocks5ProxyEnabled())
-        fprintf(stderr, "Warning: /oniononly without /tor, /managedtor, or /socks cannot dial .onion peers\n");
 
     // /btfseed=ADDRESS:ENCHEX -- extra bootstrap peers, repeatable. Useful for
     // testing the seed path and for private networks that ship no compiled list.

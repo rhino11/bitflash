@@ -3596,18 +3596,25 @@ static bool PoolParticipantMiner()
         return false;
     }
 
-    std::string meetingHostPort;   // unused: the pool is reached over its onion
+    (void)target_pubkey; // onion authenticates by address; no echan key needed
+
+    // Prefer a peer we have already reached (its onion is cached): a direct
+    // lookup, no Nostr. Nostr over Tor often has no exit, so the cache is the
+    // reliable path when the pool is a peer we have seen. Fall back to a Nostr
+    // resolve of the pool's signed descriptor otherwise.
     std::string onionHostPort;
-    unsigned char service_enc_pub[32];
-    if (!BtfResolve(strParticipantPool, meetingHostPort, service_enc_pub, &onionHostPort)
-        || onionHostPort.empty()) {
-        LogPrint("worker", "[worker] failed to resolve pool %s over onion"
-                 " (pool offline, or its descriptor has no hidden service)\n",
-                 strParticipantPool.c_str());
-        SetParticipantMiningStatus("failed to resolve pool");
-        return false;
+    if (!BtfCachedPeerOnion(strParticipantPool, onionHostPort)) {
+        std::string meetingHostPort;   // unused: the pool is reached over its onion
+        unsigned char service_enc_pub[32];
+        if (!BtfResolve(strParticipantPool, meetingHostPort, service_enc_pub, &onionHostPort)
+            || onionHostPort.empty()) {
+            LogPrint("worker", "[worker] failed to resolve pool %s over onion"
+                     " (pool offline, or its descriptor has no hidden service)\n",
+                     strParticipantPool.c_str());
+            SetParticipantMiningStatus("failed to resolve pool");
+            return false;
+        }
     }
-    (void)target_pubkey; (void)service_enc_pub; // onion authenticates by address
 
     // The pool listens at p2p+1 on the same hidden service as its P2P port, so
     // derive the pool endpoint from the resolved P2P onion -- no separate
@@ -4021,16 +4028,21 @@ static void ThreadStratumBridgeClient(void* arg)
         return;
     }
 
-    std::string meetingHostPort;   // unused: the pool is reached over its onion
+    (void)target_pubkey; // onion authenticates by address; no echan key needed
+
+    // Cache first (a peer we have reached), then a Nostr descriptor resolve.
     std::string onionHostPort;
-    unsigned char service_enc_pub[32];
-    if (!BtfResolve(pool, meetingHostPort, service_enc_pub, &onionHostPort) || onionHostPort.empty())
+    if (!BtfCachedPeerOnion(pool, onionHostPort))
     {
-        LogPrint("worker", "[bridge] failed to resolve pool %s over onion\n", pool.c_str());
-        BtfCloseSocket(miner);
-        return;
+        std::string meetingHostPort;   // unused: the pool is reached over its onion
+        unsigned char service_enc_pub[32];
+        if (!BtfResolve(pool, meetingHostPort, service_enc_pub, &onionHostPort) || onionHostPort.empty())
+        {
+            LogPrint("worker", "[bridge] failed to resolve pool %s over onion\n", pool.c_str());
+            BtfCloseSocket(miner);
+            return;
+        }
     }
-    (void)target_pubkey; (void)service_enc_pub; // onion authenticates by address
 
     // The pool listens at p2p+1 on the same hidden service as its P2P port.
     size_t colon = onionHostPort.rfind(':');
