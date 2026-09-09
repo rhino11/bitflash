@@ -23,7 +23,7 @@
 #ifdef snprintf
 #undef snprintf
 #endif
-#include "btftunnel.h"
+#include "btfsock.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -1938,107 +1938,73 @@ static void PoolEventLoop()
 }
 
 // ---------------------------------------------------------------------------
-// Accept threads
+// Accept miners over the Tor hidden service
 // ---------------------------------------------------------------------------
-struct AcceptCtx { unsigned char pk[32]; unsigned char sk[32]; std::string relay; };
-
-// One persistent thread per relay. Loops: register -> wrap -> push -> repeat.
-static void AcceptOneFn(void* arg)
-{
-    AcceptCtx* ctx = (AcceptCtx*)arg;
-    unsigned char pk[32], sk[32];
-    memcpy(pk, ctx->pk, 32); memcpy(sk, ctx->sk, 32);
-    std::string relay = ctx->relay;
-    delete ctx;
-
-    size_t colon = relay.rfind(':');
-    if (colon == std::string::npos) {
-        LogPrint("pool", "[pool] AcceptOneFn: bad relay address '%s'\n", relay.c_str());
-        return;
-    }
-    std::string host = relay.substr(0, colon);
-    int         port = atoi(relay.substr(colon + 1).c_str());
-
-    LogPrint("pool", "[pool] accept thread started for relay %s\n", relay.c_str());
-
-    while (!fShutdown && gPoolRunning) {
-        // Blocks until a miner connects to us at this relay
-        btf::RvSocket rv = btf::RvServiceRegister(host.c_str(), (unsigned short)port, pk);
-
-        if (fShutdown || !gPoolRunning) {
-            if (rv != btf::RV_INVALID) btf::RvClose(rv);
-            break;
-        }
-        if (rv == btf::RV_INVALID) {
-            LogPrint("pool", "[pool] relay %s: RvServiceRegister failed"
-                     " -- backing off 30s before retry\n", relay.c_str());
-            for (int i = 0; i < 30 && !fShutdown && gPoolRunning; i++) Sleep(1000);
-            continue;
-        }
-
-        // Echan handshake -- blocking but fast (local + relay round-trip)
-        btf_socket_t fd = btf::BtfServiceWrap(rv, sk);
-        if (fd == INVALID_SOCKET) {
-            LogPrint("pool", "[pool] relay %s: BtfServiceWrap failed (echan handshake)"
-                     " -- miner dropped, will accept next\n", relay.c_str());
-            continue;
-        }
-
-        LogPrint("worker", "[pool] miner arrived via relay %s -- pushing to event loop\n",
-                 relay.c_str());
-        PushReady(fd);
-        // Loop immediately: register again so the next miner can connect
-    }
-
-    LogPrint("pool", "[pool] accept thread stopped for relay %s\n", relay.c_str());
-}
-
-// Spawns one AcceptOneFn per relay. Re-polls relay list every 60s to pick up
-// newly discovered relays. Uses a set to avoid spawning duplicate threads.
+// The pool no longer registers at a rendezvous relay. Tor forwards
+// <onion>:(p2p+1) to the loopback listener below, so a miner reaches the pool
+// the same way it reaches any .btf node -- over its .onion, with no VPS relay
+// in the path. The onion address is the pool's key, so the link is
+// authenticated end to end and needs no echan handshake on top.
 static void AcceptLoopFn(void*)
 {
-    LogPrint("pool", "[pool] AcceptLoopFn started -- miners can connect via %s\n",
-             BtfLocalAddress().c_str());
-
-    // Wait for our identity to be ready
+    // The pool shares the node's .btf identity; wait for it (so the log can name
+    // the pool) and for the P2P listener (so we know which port to offset from).
     unsigned char pk[32], sk[32];
-    int waitSecs = 0;
     while (!BtfGetIdentity(pk, sk)) {
         if (fShutdown || !gPoolRunning) return;
-        if (waitSecs == 0)
-            LogPrint("pool", "[pool] waiting for .btf identity...\n");
-        waitSecs++;
         Sleep(2000);
     }
-    LogPrint("pool", "[pool] .btf identity ready after %ds\n", waitSecs * 2);
+    int waited = 0;
+    while (nListenPort == 0) {
+        if (fShutdown || !gPoolRunning) return;
+        if (++waited > 120) {
+            LogPrint("pool", "[pool] P2P port never came up -- pool listener aborting\n");
+            return;
+        }
+        Sleep(1000);
+    }
+    unsigned short poolPort = (unsigned short)(ntohs(nListenPort) + 1);
 
-    std::set<std::string> spawned; // relays we've already started a thread for
+    btf_socket_t lsock = (btf_socket_t)socket(AF_INET, SOCK_STREAM, 0);
+    if (lsock == INVALID_SOCKET) {
+        LogPrint("pool", "[pool] could not create pool listener socket\n");
+        return;
+    }
+    int one = 1;
+    setsockopt(lsock, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK); // loopback only -- reached via Tor
+    addr.sin_port = htons(poolPort);
+    if (bind(lsock, (struct sockaddr*)&addr, sizeof(addr)) != 0) {
+        LogPrint("pool", "[pool] could not bind pool listener 127.0.0.1:%u\n", (unsigned)poolPort);
+        sock_close(lsock);
+        return;
+    }
+    if (listen(lsock, SOMAXCONN) != 0) {
+        LogPrint("pool", "[pool] could not listen on pool port %u\n", (unsigned)poolPort);
+        sock_close(lsock);
+        return;
+    }
+    LogPrint("pool", "[pool] miners connect at %s (pool port %u) over onion\n",
+             BtfLocalAddress().c_str(), (unsigned)poolPort);
 
     while (!fShutdown && gPoolRunning) {
-        vector<string> relays = BtfAllRelays();
-        if (relays.empty()) {
-            LogPrint("pool", "[pool] no relays available -- miners cannot connect yet\n");
-        } else {
-            for (const string& relay : relays) {
-                if (spawned.count(relay)) continue; // already running
-                AcceptCtx* ctx = new AcceptCtx();
-                memcpy(ctx->pk, pk, 32); memcpy(ctx->sk, sk, 32);
-                ctx->relay = relay;
-                uintptr_t tid = _beginthread(AcceptOneFn, 0, ctx);
-                if (tid == (uintptr_t)-1) {
-                    delete ctx;
-                    LogPrint("pool", "[pool] failed to spawn accept thread for %s\n",
-                             relay.c_str());
-                } else {
-                    spawned.insert(relay);
-                    LogPrint("pool", "[pool] accept thread spawned for relay %s"
-                             " (%zu total)\n", relay.c_str(), spawned.size());
-                }
-            }
-        }
-        // Re-poll every 60s -- newly discovered relays get picked up
-        for (int i = 0; i < 60 && !fShutdown && gPoolRunning; i++) Sleep(1000);
+        fd_set rs;
+        FD_ZERO(&rs);
+        FD_SET(lsock, &rs);
+        struct timeval tv;
+        tv.tv_sec = 1; tv.tv_usec = 0;
+        int r = select((int)lsock + 1, &rs, NULL, NULL, &tv);
+        if (r <= 0) continue;           // timeout or interrupt -> re-check shutdown
+        btf_socket_t c = (btf_socket_t)accept(lsock, NULL, NULL);
+        if (c == INVALID_SOCKET) continue;
+        LogPrint("worker", "[pool] miner connected over onion -- pushing to event loop\n");
+        PushReady(c);
     }
+    sock_close(lsock);
+    LogPrint("pool", "[pool] pool listener stopped\n");
 }
 
 // ---------------------------------------------------------------------------

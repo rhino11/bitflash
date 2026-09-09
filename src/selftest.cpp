@@ -3557,6 +3557,8 @@ static int RunManagedTorSelfTest()
                    "requests a v3 onion service") ? 0 : 1;
     nFail += Check(torrc.find("HiddenServicePort 8433 127.0.0.1:8433") != std::string::npos,
                    "maps the onion service to the Bitflash P2P listener") ? 0 : 1;
+    nFail += Check(torrc.find("HiddenServicePort 8434 127.0.0.1:8434") != std::string::npos,
+                   "maps a second port (p2p+1) for the mining pool over onion") ? 0 : 1;
     nFail += Check(torrc.find("UseBridges") == std::string::npos,
                    "no bridge config when none is requested") ? 0 : 1;
 
