@@ -362,14 +362,39 @@ static void ParseStartupArguments(int argc, char* argv[])
     if (!strBindAddr.empty())
         BtfSetListenBindAddress(strBindAddr);
 
+    // Commands that do their work and exit have no use for Tor, and starting it
+    // for them costs more than the wasted seconds: the child outlives the parent
+    // that spawned it, so a selftest or a -newaddress leaves a Tor holding its
+    // control port and its data directory, and the next run trips over both.
+    // The release packages made this visible -- with tor/ sitting beside the
+    // exe, Tor auto-started even for -selftest, which is why the shipped 1.2.20
+    // package fails its own managed-tor suite.
+    static const char* kShortCommands[] = {
+        "selftest", "newaddress", "sendto", "backupwallet", "dumpwallet",
+        "importwallet", "encryptwallet", "walletstoragecheck", "walletstorageaudit",
+        "newphrase", "restorephrase", "showderived", "recoveryaudit", "rescan",
+        "help",
+    };
+    bool fShortCommand = false;
+    for (size_t i = 0; i < ARRAYLEN(kShortCommands); i++)
+    {
+        string slash = string("/") + kShortCommands[i];
+        string dash  = string("-") + kShortCommands[i];
+        if (arg(argc, argv, slash.c_str()) || arg(argc, argv, dash.c_str()))
+        {
+            fShortCommand = true;
+            break;
+        }
+    }
+
     bool fManagedTor = arg(argc, argv, "/managedtor") || arg(argc, argv, "-managedtor");
     bool fNoManagedTor = arg(argc, argv, "/nomanagedtor") || arg(argc, argv, "-nomanagedtor");
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
     string socksProxy = argval2(argc, argv, "/socks", "-socks");
     string bundledTorPath;
-    bool fAutoManagedTor = !fManagedTor && !fNoManagedTor && !fTorMode &&
+    bool fAutoManagedTor = !fShortCommand && !fManagedTor && !fNoManagedTor && !fTorMode &&
                             socksProxy.empty() && BtfBundledTorPath(bundledTorPath);
-    if (fManagedTor || fAutoManagedTor)
+    if (!fShortCommand && (fManagedTor || fAutoManagedTor))
     {
         if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
