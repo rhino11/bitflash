@@ -595,6 +595,17 @@ std::vector<std::string> BtfDefaultBridges()
                 "ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,"
                 "stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478 "
                 "utls-imitate=hellorandomizedalpn");
+    // A second Snowflake bridge with the current Tor Browser domain fronts
+    // (datapacket): more resilience -- Tor warns with a single bridge -- and a
+    // live fallback for when the cdn77 fronts above stop resolving.
+    b.push_back("snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA "
+                "fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA "
+                "url=https://1098762253.rsc.cdn77.org/ "
+                "fronts=app.datapacket.com,www.datapacket.com "
+                "ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,"
+                "stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,"
+                "stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478 "
+                "utls-imitate=hellorandomizedalpn");
     return b;
 }
 

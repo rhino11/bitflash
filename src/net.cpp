@@ -68,7 +68,6 @@ deque<pair<int64, CInv> > vRelayExpiration;
 CCriticalSection cs_mapRelay;
 map<CInv, int64> mapAlreadyAskedFor;
 string strBtfConnect; // .btf peer to keep connected to (from /connectbtf)
-bool fBtfOnionOnly = false; // require direct onion transport for .btf peers
 static const int BTF_ONION_CONNECT_TIMEOUT_SECS = 120;
 
 int   nPeersWatched        = 0;
@@ -342,9 +341,7 @@ string GetDiagnosticsText()
     else if (BtfSocks5ProxyEnabled())
         strTorMode = "socks5";
     string strOnion = BtfLocalOnionEndpoint();
-    str += strprintf("  Tor mode          %s%s\n",
-                     strTorMode.c_str(),
-                     fBtfOnionOnly ? " (onion-only)" : "");
+    str += strprintf("  Tor mode          %s\n", strTorMode.c_str());
     str += strprintf("  onion endpoint    %s\n",
                      strOnion.empty() ? "none" : strOnion.c_str());
     str += strprintf("  .btf peers         %d direct onion, %d rendezvous\n",
@@ -760,6 +757,25 @@ void LoadCachedBtfPeers(vector<CachedBtfPeer>& out)
 }
 
 static CCriticalSection cs_btfPeerCache;
+
+// Look up a peer's cached direct-onion endpoint (host.onion:port) by .btf
+// address, from the peers we have actually reached and remembered. Lets a
+// caller reach a node it has already seen without a Nostr round-trip -- Nostr
+// over Tor often has no exit node, so a cache hit is the reliable path.
+bool BtfCachedPeerOnion(const string& strBtfAddr, string& strOnionOut)
+{
+    strOnionOut.clear();
+    vector<CachedBtfPeer> peers;
+    CRITICAL_BLOCK(cs_btfPeerCache)
+        LoadCachedBtfPeers(peers);
+    foreach(const CachedBtfPeer& p, peers)
+        if (p.btfAddr == strBtfAddr && !p.onion.empty())
+        {
+            strOnionOut = p.onion;
+            return true;
+        }
+    return false;
+}
 
 // strDesc is the peer's own signed descriptor when we have it (it announced
 // itself over peer exchange), "" when we only resolved it through Nostr. An
