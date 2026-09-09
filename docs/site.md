@@ -29,7 +29,7 @@ The docs index should expose these source files:
 | Key derivation and address format | `docs/derivation.md` | independent wallet recovery |
 | Release verification | `docs/release-verification.md` | pinned signing-key flow |
 | Dependencies | `docs/dependencies.md` | pinned secp256k1/RandomX supply chain |
-| Rendezvous and .btf addressing | `docs/rendezvous.md` | network design and caveats |
+| How nodes reach each other | `docs/rendezvous.md` | network design and caveats |
 | Tor mode | `docs/tor.md` | `-tor`, `-socks`, onion relay operation |
 | Fair launch verifier | `docs/fair-launch.md` | no-premine launch audit |
 | UTXO set commitment | `docs/utxo-commitment.md` | deterministic supply/root audit |
