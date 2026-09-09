@@ -100,16 +100,9 @@ const char* pszNostrRelays[] = {
 };
 const int nNostrRelays = ARRAYLEN(pszNostrRelays);
 
-// Rendezvous meeting relay this node registers at (ThreadBtfAccept in net.cpp)
-// and advertises in its .btf descriptor. Seed default; /rvrelay overrides.
-// Seed rendezvous relays. More entries = more resilience: the node fails over
-// between them (see ThreadBtfAccept), so DDoSing one relay IP can't take the
-// network down. /rvrelay overrides this list with a single entry.
-vector<string> vBtfMeetingRelays = {
-    "92.246.128.180:8434",  // Sao Paulo, BR
-    "31.44.4.249:8434",     // New Jersey, US
-    "90.156.222.107:8434",  // Almaty, KZ
-};
+// Kept only so old call sites still link; the network is onion-only and no
+// longer uses rendezvous meeting relays, so there are no baked relay IPs.
+vector<string> vBtfMeetingRelays;
 string strBtfActiveRelay;
 static CCriticalSection cs_activeRelay;
 static string strBtfOnionEndpoint;
@@ -1300,11 +1293,8 @@ static bool SeedFromRelay(CNostrKey& key, const string& relay)
     if (lease.fJustConnected)
         LogPrint("nostr", "Nostr: connected to %s\n", relay.c_str());
 
-    // Publish our self-certifying .btf descriptor (rendezvous discovery)
+    // Publish our self-certifying .btf descriptor (onion discovery)
     PublishDescriptor(ws, key);
-
-    // If we run a relay, announce it so others discover it automatically
-    PublishRelayAnnouncement(ws, key);
 
     // Discover other nodes' .btf descriptors so we can auto-connect anonymously
     // (no manual /connectbtf). Each node publishes one addressable descriptor
@@ -1357,48 +1347,9 @@ static bool SeedFromRelay(CNostrKey& key, const string& relay)
         }
     }
 
-    // Discover volunteer relays announced by other operators (kind 38502). Nodes
-    // add these to their failover list automatically, so anyone can strengthen
-    // the network without a maintainer editing the seed list. Bad/dead relays
-    // just fail to pair and get skipped -- and a relay is trustless anyway (it
-    // only forwards echan ciphertext and can't read or MITM the traffic).
+    // Onion-only: there are no rendezvous relays to discover. Just close the
+    // descriptor subscription opened above.
     ws.SendText(json::array({ "CLOSE", "btf-disc" }).dump());
-    {
-        json rfilter = json::object();
-        rfilter["kinds"] = json::array({ BTF_RELAY_KIND });
-        rfilter["#d"]    = json::array({ BTF_RELAY_DTAG });
-        rfilter["limit"] = 200;
-        json rreq = json::array({ "REQ", "btf-relays", rfilter });
-        if (ws.SendText(rreq.dump()))
-        {
-            for (;;)
-            {
-                string msg;
-                if (!ws.RecvText(msg))
-                    break;
-                json j;
-                try { j = json::parse(msg); } catch (...) { continue; }
-                if (!j.is_array() || j.empty() || !j[0].is_string()) continue;
-                string type = j[0].get<string>();
-                if (type == "EVENT" && j.size() >= 3)
-                {
-                    const json& ev = j[2];
-                    if (!ev.contains("content") || !ev.contains("kind")) continue;
-                    if (ev["kind"].get<int>() != BTF_RELAY_KIND) continue;
-                    string r = ev["content"].get<string>();
-                    if (!LooksLikeRelay(r)) continue;
-                    bool fNew = false;
-                    CRITICAL_BLOCK(cs_discoveredRelays)
-                        if (g_discoveredRelays.size() < BTF_MAX_DISCOVERED_RELAYS)
-                            fNew = g_discoveredRelays.insert(r).second;
-                    if (fNew && fDebug)
-                        LogPrint("nostr", "Nostr: discovered relay %s\n", r.c_str());
-                }
-                else if (type == "EOSE")
-                    break;
-            }
-        }
-    }
 
     // Discover live pool announcements. These are expiring status beacons, not
     // permanent directory entries, so the GUI can show only fresh pools.
