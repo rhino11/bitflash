@@ -138,10 +138,8 @@ static void PrintUsage()
     printf("  /poolstatusfile=PATH       (write pool status JSON for dashboards)\n");
     printf("  /poolroundsfile=PATH       (write public pool round proofs JSON)\n");
     printf("\n");
-    printf(".btf and rendezvous:\n");
-    printf("  /connectbtf=PEER_BTF_ADDRESS\n");
-    printf("  /rvrelay=HOST:PORT\n");
-    printf("  /announcerelay=HOST:PORT\n");
+    printf(".btf (Tor onion services):\n");
+    printf("  /connectbtf=PEER_BTF_ADDRESS   (keep an outbound connection to this .btf peer)\n");
     printf("  /onionservice=HOST.onion:PORT  (advertise this node's Tor hidden service)\n");
     printf("\n");
     printf("Network:\n");
@@ -151,7 +149,8 @@ static void PrintUsage()
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
     printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
-    printf("  /oniononly                 (do not fall back to rendezvous when a .btf onion dial fails)\n");
+    printf("  /torbridges                (reach Tor via obfs4 bridges where Tor is blocked)\n");
+    printf("  /torbridge=LINE            (add one obfs4 bridge line; repeatable via config)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -312,14 +311,6 @@ static void ParseStartupArguments(int argc, char* argv[])
     string btfConnect = argval2(argc, argv, "/connectbtf", "-connectbtf");
     if (!btfConnect.empty())
         strBtfConnect = btfConnect;
-    fBtfOnionOnly = arg(argc, argv, "/oniononly") || arg(argc, argv, "-oniononly");
-
-    string rvRelay = argval2(argc, argv, "/rvrelay", "-rvrelay");
-    if (!rvRelay.empty())
-    {
-        vBtfMeetingRelays.clear();
-        vBtfMeetingRelays.push_back(rvRelay);
-    }
 
     // net.cpp has described nListenPort as "tunable via /port" since it was
     // written, but nothing ever read the option, so the port was fixed at 8433
@@ -338,10 +329,6 @@ static void ParseStartupArguments(int argc, char* argv[])
             addrLocalHost.port = nListenPort;
         }
     }
-
-    string announceRelay = argval2(argc, argv, "/announcerelay", "-announcerelay");
-    if (!announceRelay.empty())
-        strBtfAnnounceRelay = announceRelay;
 
     string onionService = argval2(argc, argv, "/onionservice", "-onionservice");
     if (!onionService.empty())
@@ -365,6 +352,54 @@ static void ParseStartupArguments(int argc, char* argv[])
     {
         if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
+
+        // Pluggable-transport bridges for reaching Tor where it is blocked,
+        // without our rendezvous relays. -torbridges uses the built-in default
+        // (Snowflake, no infra needed); -torbridge=<line> adds an obfs4 or
+        // snowflake bridge. We resolve a PT binary for each transport present.
+        bool fTorBridges = arg(argc, argv, "/torbridges") || arg(argc, argv, "-torbridges");
+        string customBridge = argval2(argc, argv, "/torbridge", "-torbridge");
+        if (fTorBridges || !customBridge.empty())
+        {
+            std::vector<std::string> bridges;
+            if (fTorBridges)
+            {
+                std::vector<std::string> def = BtfDefaultBridges();
+                bridges.insert(bridges.end(), def.begin(), def.end());
+            }
+            if (!customBridge.empty())
+                bridges.push_back(customBridge);
+
+            std::map<std::string, std::string> ptExec;
+            for (size_t i = 0; i < bridges.size(); i++)
+            {
+                string tr = BtfBridgeTransport(bridges[i]);
+                if (tr.empty() || ptExec.count(tr))
+                    continue;
+                string path;
+                bool ok = false;
+                if (tr == "obfs4")          ok = BtfResolveObfs4Path(path);
+                else if (tr == "snowflake") ok = BtfResolveSnowflakePath(path);
+                if (ok)
+                    ptExec[tr] = path;
+                else
+                    fprintf(stderr, "Warning: no pluggable-transport binary for '%s'; those bridges disabled\n",
+                            tr.c_str());
+            }
+
+            if (bridges.empty() || ptExec.empty())
+                fprintf(stderr, "Warning: no usable Tor bridges configured\n");
+            else
+            {
+                BtfSetTorBridges(bridges, ptExec);
+                fprintf(stderr, "Tor bridges enabled (%d bridge%s;", (int)bridges.size(),
+                        bridges.size() == 1 ? "" : "s");
+                for (std::map<std::string, std::string>::const_iterator it = ptExec.begin();
+                     it != ptExec.end(); ++it)
+                    fprintf(stderr, " %s=%s", it->first.c_str(), it->second.c_str());
+                fprintf(stderr, ")\n");
+            }
+        }
 
         string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
         string err;
@@ -406,8 +441,6 @@ static void ParseStartupArguments(int argc, char* argv[])
                         BtfSocks5ProxyName().c_str());
         }
     }
-    if (fBtfOnionOnly && !BtfSocks5ProxyEnabled())
-        fprintf(stderr, "Warning: /oniononly without /tor, /managedtor, or /socks cannot dial .onion peers\n");
 
     // /btfseed=ADDRESS:ENCHEX -- extra bootstrap peers, repeatable. Useful for
     // testing the seed path and for private networks that ship no compiled list.

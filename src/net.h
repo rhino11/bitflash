@@ -34,10 +34,11 @@ CNode* ConnectNodeBtf(const string& strBtfAddr);
 CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting,
                               const string& strOnion, const unsigned char enc_pub[32],
                               const string& strDesc=string());
-void ThreadBtfAccept(void* parg);
 void ThreadBtfConnect(void* parg);
+// Cached direct-onion endpoint (host.onion:port) for a .btf address, from peers
+// we have reached before. True on a hit -- lets callers skip a Nostr resolve.
+bool BtfCachedPeerOnion(const string& strBtfAddr, string& strOnionOut);
 extern string strBtfConnect;
-extern bool fBtfOnionOnly;
 // Bootstrap seeds added at runtime with /btfseed=ADDRESS:ENCHEX (repeatable).
 // The compiled-in list lives in net.cpp; these are appended to it.
 extern std::vector<std::pair<std::string, std::string> > vBtfExtraSeeds;

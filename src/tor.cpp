@@ -24,6 +24,8 @@ static std::string g_managedTorDataDir;
 static std::string g_managedTorHiddenServiceDir;
 static std::string g_managedTorOnion;
 static std::string g_managedTorStatus;
+static std::vector<std::string> g_torBridges;              // bridge lines
+static std::map<std::string, std::string> g_torPtExec;     // transport -> PT binary
 #ifdef _WIN32
 static PROCESS_INFORMATION g_managedTorProcess;
 #else
@@ -515,11 +517,105 @@ bool BtfBundledTorPath(std::string& torPathOut)
     return true;
 }
 
+void BtfSetTorBridges(const std::vector<std::string>& bridges,
+                      const std::map<std::string, std::string>& ptExecByTransport)
+{
+    g_torBridges = bridges;
+    g_torPtExec = ptExecByTransport;
+}
+
+std::string BtfBridgeTransport(const std::string& bridgeLine)
+{
+    std::string t;
+    for (size_t i = 0; i < bridgeLine.size(); i++)
+    {
+        char c = bridgeLine[i];
+        if (c == ' ' || c == '\t')
+            break;
+        t += c;
+    }
+    return t;
+}
+
+static bool ResolvePtFrom(const std::vector<std::string>& candidates, std::string& out)
+{
+    out.clear();
+    for (size_t i = 0; i < candidates.size(); i++)
+        if (FileIsExecutableCandidate(candidates[i]))
+        {
+            out = candidates[i];
+            return true;
+        }
+    return false;
+}
+
+bool BtfResolveObfs4Path(std::string& pathOut)
+{
+    std::string exeDir = ExecutableDir();
+    std::vector<std::string> c;
+#ifdef _WIN32
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy.exe"));
+#else
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy"));
+    c.push_back("/usr/bin/lyrebird");
+    c.push_back("/usr/bin/obfs4proxy");
+#endif
+    return ResolvePtFrom(c, pathOut);
+}
+
+bool BtfResolveSnowflakePath(std::string& pathOut)
+{
+    std::string exeDir = ExecutableDir();
+    std::vector<std::string> c;
+#ifdef _WIN32
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client.exe"));
+#else
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
+    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client"));
+    c.push_back("/usr/bin/snowflake-client");
+    c.push_back("/usr/bin/lyrebird");
+#endif
+    return ResolvePtFrom(c, pathOut);
+}
+
+std::vector<std::string> BtfDefaultBridges()
+{
+    std::vector<std::string> b;
+    // Standard Snowflake bridge: reaches Tor through volunteer WebRTC proxies
+    // via Tor's broker, needing no infrastructure of ours and no bridge
+    // curation. The broker fronts/STUN list is the long-standing Tor Browser
+    // default; proven to bootstrap end to end on the bench.
+    b.push_back("snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 "
+                "fingerprint=2B280B23E1107BB62ABFC40DDCC8824814F80A72 "
+                "url=https://1098762253.rsc.cdn77.org/ "
+                "fronts=www.cdn77.com,www.phpmyadmin.net "
+                "ice=stun:stun.l.google.com:19302,stun:stun.antisip.com:3478,"
+                "stun:stun.bluesip.net:3478,stun:stun.dus.net:3478,stun:stun.epygi.com:3478 "
+                "utls-imitate=hellorandomizedalpn");
+    // A second Snowflake bridge with the current Tor Browser domain fronts
+    // (datapacket): more resilience -- Tor warns with a single bridge -- and a
+    // live fallback for when the cdn77 fronts above stop resolving.
+    b.push_back("snowflake 192.0.2.4:80 8838024498816A039FCBBAB14E6F40A0843051FA "
+                "fingerprint=8838024498816A039FCBBAB14E6F40A0843051FA "
+                "url=https://1098762253.rsc.cdn77.org/ "
+                "fronts=app.datapacket.com,www.datapacket.com "
+                "ice=stun:stun.epygi.com:3478,stun:stun.uls.co.za:3478,"
+                "stun:stun.voipgate.com:3478,stun:stun.mixvoip.com:3478,"
+                "stun:stun.telnyx.com:3478,stun:stun.hot-chilli.net:3478 "
+                "utls-imitate=hellorandomizedalpn");
+    return b;
+}
+
 std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
                                         const std::string& hiddenServiceDir,
                                         unsigned short socksPort,
                                         unsigned short controlPort,
-                                        unsigned short p2pPort)
+                                        unsigned short p2pPort,
+                                        const std::vector<std::string>& bridges,
+                                        const std::map<std::string, std::string>& ptExecByTransport)
 {
     std::string torData = NormalizeTorrcPath(dataDir);
     std::string hsDir = NormalizeTorrcPath(hiddenServiceDir);
@@ -534,6 +630,48 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     s += "HiddenServiceVersion 3\n";
     s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
                    (unsigned)p2pPort, (unsigned)p2pPort);
+    // A second virtual port on the same .onion for the cooperative mining pool,
+    // so a pool operator accepts miners over its hidden service instead of a
+    // rendezvous relay. Miners derive it as p2pPort+1 from the operator's
+    // advertised P2P onion, so it needs no separate announcement. Always mapped
+    // (harmless when no pool listens -- the connection is simply refused): the
+    // pool binds this local port only when it runs, needing no Tor reconfig to
+    // toggle. Guard the +1 so a p2p port of 65535 (absurd but possible) does
+    // not map an out-of-range pool port -- the arithmetic must not wrap.
+    if (p2pPort < 65535)
+        s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
+                       (unsigned)(p2pPort + 1), (unsigned)(p2pPort + 1));
+    // Pluggable transports for reaching Tor where it is blocked, without our
+    // rendezvous relays. Emit one ClientTransportPlugin per PT binary, listing
+    // every transport it serves that we actually have a bridge for, then the
+    // bridge lines. Tor takes the rest of the exec line verbatim and does NOT
+    // strip quotes, so the path is left bare (keep bundled PTs space-free).
+    if (!bridges.empty())
+    {
+        std::map<std::string, std::string> transportsByExec; // exec -> "obfs4,snowflake"
+        for (size_t i = 0; i < bridges.size(); i++)
+        {
+            std::string tr = BtfBridgeTransport(bridges[i]);
+            std::map<std::string, std::string>::const_iterator it = ptExecByTransport.find(tr);
+            if (it == ptExecByTransport.end() || it->second.empty())
+                continue; // no binary for this transport -> skip its plugin line
+            std::string exec = NormalizeTorrcPath(it->second);
+            std::string& list = transportsByExec[exec];
+            if (list.empty())
+                list = tr;
+            else if ((list + ",").find(tr + ",") == std::string::npos && list != tr)
+                list += "," + tr;
+        }
+        if (!transportsByExec.empty())
+        {
+            s += "UseBridges 1\n";
+            for (std::map<std::string, std::string>::const_iterator it = transportsByExec.begin();
+                 it != transportsByExec.end(); ++it)
+                s += "ClientTransportPlugin " + it->second + " exec " + it->first + "\n";
+            for (size_t i = 0; i < bridges.size(); i++)
+                s += "Bridge " + bridges[i] + "\n";
+        }
+    }
     return s;
 }
 
@@ -735,7 +873,8 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
 
     unsigned short p2pPort = ntohs(nListenPort);
     std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort,
-                                                   controlPort, p2pPort);
+                                                   controlPort, p2pPort,
+                                                   g_torBridges, g_torPtExec);
     if (!WriteTextFile(torrcPath, torrc, errOut))
         return false;
 

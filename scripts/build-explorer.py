@@ -196,6 +196,7 @@ INDEX_HTML = r"""<!doctype html>
     <a href="https://releases.bitflash.network/">downloads</a>
     <a href="https://explorer.bitflash.network/" aria-current="page">explorer</a>
     <a href="https://status.bitflash.network/">status</a>
+    <a href="https://faucet.bitflash.network/">faucet</a>
   </nav>
   <span class="meta" id="tip"></span>
 </header>

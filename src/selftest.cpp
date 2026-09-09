@@ -3557,6 +3557,37 @@ static int RunManagedTorSelfTest()
                    "requests a v3 onion service") ? 0 : 1;
     nFail += Check(torrc.find("HiddenServicePort 8433 127.0.0.1:8433") != std::string::npos,
                    "maps the onion service to the Bitflash P2P listener") ? 0 : 1;
+    nFail += Check(torrc.find("HiddenServicePort 8434 127.0.0.1:8434") != std::string::npos,
+                   "maps a second port (p2p+1) for the mining pool over onion") ? 0 : 1;
+    nFail += Check(torrc.find("UseBridges") == std::string::npos,
+                   "no bridge config when none is requested") ? 0 : 1;
+
+    // With PT binaries and bridges, the torrc must wire both transports: one
+    // ClientTransportPlugin per binary, then every Bridge line.
+    std::vector<std::string> testBridges;
+    testBridges.push_back("obfs4 10.0.0.1:443 0123456789ABCDEF0123456789ABCDEF01234567 cert=AAAA iat-mode=0");
+    testBridges.push_back("snowflake 192.0.2.3:80 2B280B23E1107BB62ABFC40DDCC8824814F80A72 url=https://x/ fronts=a ice=stun:s:1 utls-imitate=x");
+    std::map<std::string, std::string> testPt;
+    testPt["obfs4"] = "/x/pt/obfs4proxy";
+    testPt["snowflake"] = "/x/pt/snowflake-client";
+    std::string torrcB = BtfBuildManagedTorrcForTest("C:/x/data", "C:/x/hs",
+                                                    19050, 19051, 8433,
+                                                    testBridges, testPt);
+    nFail += Check(torrcB.find("UseBridges 1") != std::string::npos,
+                   "enables bridges when a PT and bridge are configured") ? 0 : 1;
+    nFail += Check(torrcB.find("ClientTransportPlugin obfs4 exec /x/pt/obfs4proxy") != std::string::npos,
+                   "declares the obfs4 client transport plugin, unquoted path") ? 0 : 1;
+    nFail += Check(torrcB.find("ClientTransportPlugin snowflake exec /x/pt/snowflake-client") != std::string::npos,
+                   "declares the snowflake client transport plugin") ? 0 : 1;
+    nFail += Check(torrcB.find("Bridge obfs4 10.0.0.1:443") != std::string::npos &&
+                   torrcB.find("Bridge snowflake 192.0.2.3:80") != std::string::npos,
+                   "writes both bridge lines") ? 0 : 1;
+    nFail += Check(BtfBridgeTransport("snowflake 1.2.3.4:1 ABCD") == "snowflake",
+                   "parses the transport name from a bridge line") ? 0 : 1;
+    nFail += Check(!BtfDefaultBridges().empty() &&
+                   BtfBridgeTransport(BtfDefaultBridges()[0]) == "snowflake",
+                   "default bridge set ships a Snowflake bridge") ? 0 : 1;
+
     nFail += Check(BtfManagedTorStatus() == "disabled",
                    "managed Tor starts disabled") ? 0 : 1;
 
