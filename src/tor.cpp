@@ -636,9 +636,11 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     // advertised P2P onion, so it needs no separate announcement. Always mapped
     // (harmless when no pool listens -- the connection is simply refused): the
     // pool binds this local port only when it runs, needing no Tor reconfig to
-    // toggle. p2pPort is well below 65535 in every real config.
-    s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
-                   (unsigned)(p2pPort + 1), (unsigned)(p2pPort + 1));
+    // toggle. Guard the +1 so a p2p port of 65535 (absurd but possible) does
+    // not map an out-of-range pool port -- the arithmetic must not wrap.
+    if (p2pPort < 65535)
+        s += strprintf("HiddenServicePort %u 127.0.0.1:%u\n",
+                       (unsigned)(p2pPort + 1), (unsigned)(p2pPort + 1));
     // Pluggable transports for reaching Tor where it is blocked, without our
     // rendezvous relays. Emit one ClientTransportPlugin per PT binary, listing
     // every transport it serves that we actually have a bridge for, then the

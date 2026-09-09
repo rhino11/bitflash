@@ -1963,7 +1963,13 @@ static void AcceptLoopFn(void*)
         }
         Sleep(1000);
     }
-    unsigned short poolPort = (unsigned short)(ntohs(nListenPort) + 1);
+    unsigned short p2p = ntohs(nListenPort);
+    if (p2p >= 65535) {
+        LogPrint("pool", "[pool] P2P port %u leaves no room for the pool port (p2p+1) -- pool listener aborting\n",
+                 (unsigned)p2p);
+        return;
+    }
+    unsigned short poolPort = (unsigned short)(p2p + 1);
 
     btf_socket_t lsock = (btf_socket_t)socket(AF_INET, SOCK_STREAM, 0);
     if (lsock == INVALID_SOCKET) {
