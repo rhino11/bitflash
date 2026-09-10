@@ -1358,6 +1358,20 @@ CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting
     }
     if (BtfLocalAddress() == strBtfAddr)
         return NULL; // ourselves
+
+    // The last place to catch a peer from the other network, and the one that
+    // covers every way it got here: a cache written by an older build, a Nostr
+    // descriptor published under the shared tag before the announcements were
+    // namespaced, a peer exchange from a node still running 1.2.20. Dialling it
+    // spends a Tor circuit and an outbound slot on a handshake the magic bytes
+    // will reject, and the connection sits there at height -1 until it is
+    // reaped.
+    if (!strOnion.empty() && !BtfEndpointFitsThisNetwork(strOnion))
+    {
+        LogPrint("net", "ConnectNodeBtf: skipping %s at %s -- other network\n",
+                 strBtfAddr.c_str(), strOnion.c_str());
+        return NULL;
+    }
     return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, strOnion, enc_pub, strDesc);
 }
 
