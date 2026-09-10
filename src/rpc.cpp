@@ -881,7 +881,9 @@ static void WritePoolStatusJsonLocked()
 {
     nlohmann::json j;
     j["schema"] = "bitflash-pool-status-1";
-    j["network"] = "bitflash";
+    // Which chain this pool pays on. It said "bitflash" on both networks, so a
+    // dashboard had no way to tell a test pool from a real one.
+    j["network"] = IsTestNet() ? "bitflash-testnet" : "bitflash";
     j["updatedAt"] = GetTime();
 
     j["operator"] = {
@@ -1242,9 +1244,25 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
 
     // ------------------------------------------------------------------
     if (method == "mining.subscribe") {
+        // Which chain the worker thinks it is mining. Discovery is namespaced
+        // per network now, but a worker can also be pointed at a pool by hand,
+        // and hashing a testnet template for a mainnet payout address is a
+        // silent waste of somebody's electricity. Refuse before sending work.
+        // Workers built before this send no params; those are still accepted.
+        auto& ps = req["params"];
+        if (ps.is_array() && ps.size() > 0 && ps[0].is_string()) {
+            std::string strTheirs = ps[0].get<std::string>();
+            if (strTheirs != BtfNetworkName()) {
+                LogPrint("worker", "[pool] refusing fd=%d: worker is on '%s', this pool is on '%s'\n",
+                         (int)m->fd, strTheirs.c_str(), BtfNetworkName());
+                reply(json{{"error", strprintf("this pool mines %s, not %s",
+                                               BtfNetworkName(), strTheirs.c_str())}});
+                return false;
+            }
+        }
         std::string sid = ToHex(&m->fd, 4);
-        LogPrint("worker", "[worker->pool] subscribe from fd=%d sid=%s\n",
-                 (int)m->fd, sid.c_str());
+        LogPrint("worker", "[worker->pool] subscribe from fd=%d sid=%s network=%s\n",
+                 (int)m->fd, sid.c_str(), BtfNetworkName());
         reply(json::array({json::array({json::array({"mining.notify",sid})}),sid,4}));
         return true;
     }

@@ -145,6 +145,9 @@ static void PrintUsage()
     printf("Network:\n");
     printf("  /testnet                   (isolated test network genesis, datadir, port, and magic)\n");
     printf("  /port=N                    (P2P listen port, default 8433; testnet 18433)\n");
+    printf("  /bindaddr=IP               (listen on this address instead of loopback;\n");
+    printf("                              only for a Tor running on another machine --\n");
+    printf("                              a reachable plain port exposes this node's onion)\n");
     printf("  /socks=HOST:PORT           (SOCKS5 proxy for Nostr, .btf relay, and onion dials)\n");
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
@@ -201,6 +204,20 @@ static void PrintUsage()
 }
 
 #define printf OutputDebugStringF
+
+// A privacy option the operator asked for and did not get is worse than no
+// option at all: the node comes up looking protected while doing exactly the
+// thing the operator was trying to avoid. Where such a request cannot be
+// honoured we stop here instead of falling back.
+static void StartupRefuse(const string& strWhat, const string& strFix)
+{
+    AttachTerminal();
+    fprintf(stderr, "\nRefusing to start: %s\n", strWhat.c_str());
+    if (!strFix.empty())
+        fprintf(stderr, "%s\n", strFix.c_str());
+    fflush(stderr);
+    exit(1);
+}
 
 static void ParseStartupArguments(int argc, char* argv[])
 {
@@ -341,14 +358,43 @@ static void ParseStartupArguments(int argc, char* argv[])
                     BtfLocalOnionEndpoint().c_str());
     }
 
+    string strBindAddr = argval2(argc, argv, "/bindaddr", "-bindaddr");
+    if (!strBindAddr.empty())
+        BtfSetListenBindAddress(strBindAddr);
+
+    // Commands that do their work and exit have no use for Tor, and starting it
+    // for them costs more than the wasted seconds: the child outlives the parent
+    // that spawned it, so a selftest or a -newaddress leaves a Tor holding its
+    // control port and its data directory, and the next run trips over both.
+    // The release packages made this visible -- with tor/ sitting beside the
+    // exe, Tor auto-started even for -selftest, which is why the shipped 1.2.20
+    // package fails its own managed-tor suite.
+    static const char* kShortCommands[] = {
+        "selftest", "newaddress", "sendto", "backupwallet", "dumpwallet",
+        "importwallet", "encryptwallet", "walletstoragecheck", "walletstorageaudit",
+        "newphrase", "restorephrase", "showderived", "recoveryaudit", "rescan",
+        "help",
+    };
+    bool fShortCommand = false;
+    for (size_t i = 0; i < ARRAYLEN(kShortCommands); i++)
+    {
+        string slash = string("/") + kShortCommands[i];
+        string dash  = string("-") + kShortCommands[i];
+        if (arg(argc, argv, slash.c_str()) || arg(argc, argv, dash.c_str()))
+        {
+            fShortCommand = true;
+            break;
+        }
+    }
+
     bool fManagedTor = arg(argc, argv, "/managedtor") || arg(argc, argv, "-managedtor");
     bool fNoManagedTor = arg(argc, argv, "/nomanagedtor") || arg(argc, argv, "-nomanagedtor");
     bool fTorMode = arg(argc, argv, "/tor") || arg(argc, argv, "-tor");
     string socksProxy = argval2(argc, argv, "/socks", "-socks");
     string bundledTorPath;
-    bool fAutoManagedTor = !fManagedTor && !fNoManagedTor && !fTorMode &&
+    bool fAutoManagedTor = !fShortCommand && !fManagedTor && !fNoManagedTor && !fTorMode &&
                             socksProxy.empty() && BtfBundledTorPath(bundledTorPath);
-    if (fManagedTor || fAutoManagedTor)
+    if (!fShortCommand && (fManagedTor || fAutoManagedTor))
     {
         if (fManagedTor && (fTorMode || !socksProxy.empty()))
             fprintf(stderr, "Warning: /managedtor takes precedence over /tor and /socks\n");
@@ -383,12 +429,24 @@ static void ParseStartupArguments(int argc, char* argv[])
                 if (ok)
                     ptExec[tr] = path;
                 else
-                    fprintf(stderr, "Warning: no pluggable-transport binary for '%s'; those bridges disabled\n",
-                            tr.c_str());
+                {
+                    // Not a warning. Bridges are asked for by somebody on a
+                    // network that blocks Tor; carrying on without them means
+                    // dialling the directory authorities in the clear, which is
+                    // the observable act they were avoiding.
+                    StartupRefuse(
+                        strprintf("no pluggable-transport binary for '%s', so the bridges you asked for cannot be used",
+                                  tr.c_str()),
+                        "Install the transport (the release packages ship it under tor/pluggable_transports/),\n"
+                        "or drop the bridge options to reach Tor directly -- but only if direct Tor is safe where you are.");
+                }
             }
 
             if (bridges.empty() || ptExec.empty())
-                fprintf(stderr, "Warning: no usable Tor bridges configured\n");
+                StartupRefuse(
+                    "Tor bridges were requested but none could be configured",
+                    "Check the bridge line passed to -torbridge, or drop the bridge options to reach\n"
+                    "Tor directly -- but only if direct Tor is safe where you are.");
             else
             {
                 BtfSetTorBridges(bridges, ptExec);
@@ -405,10 +463,15 @@ static void ParseStartupArguments(int argc, char* argv[])
         string err;
         if (!BtfStartManagedTor(torPath, err))
         {
+            // Asked for explicitly: the node has no business coming up without
+            // it, because every dial would then leave over the clear network.
+            // Picked up automatically: say so and let the other transports try.
             if (fAutoManagedTor)
                 fprintf(stderr, "Bundled Tor not enabled automatically: %s\n", err.c_str());
             else
-                fprintf(stderr, "Ignoring /managedtor=%s: %s\n", torPath.c_str(), err.c_str());
+                StartupRefuse(strprintf("managed Tor was requested but did not start: %s", err.c_str()),
+                              "Fix the Tor binary path given to -managedtor, or start without it only if\n"
+                              "reaching peers over the clear network is acceptable here.");
         }
         else
             fprintf(stderr, "Managed Tor enabled%s: %s\n",

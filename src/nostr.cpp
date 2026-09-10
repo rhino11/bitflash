@@ -52,6 +52,25 @@ static const int   BTF_POOL_KIND = 38503;
 static const char* BTF_POOL_DTAG  = "btf-pool-2";
 static const int64 BTF_POOL_MAX_AGE = 3 * 60; // seconds
 
+// Discovery is per network, or it is not discovery.
+//
+// Both networks published and subscribed under the same d-tags, so a testnet
+// node learned mainnet peers, dialled them, and spent its outbound slots on
+// handshakes the magic bytes were always going to reject -- while testnet pool
+// announcements sat in the same list as the real ones. Chain separation held
+// throughout: what leaked was everyone's time and the operator's attention.
+//
+// Mainnet keeps the exact tags it publishes today, so nothing already announced
+// has to be re-announced. Testnet takes a suffix and the two stop seeing each
+// other.
+static string BtfNetTag(const char* pszBase)
+{
+    string s(pszBase);
+    if (IsTestNet())
+        s += "-testnet";
+    return s;
+}
+
 // Anonymous auto-discovery: how many peers to keep connected via .btf rendezvous
 // before we stop dialing more, and how many new dials to attempt per cycle.
 // Target outbound peer count. With ~100 known .btf peers on the network,
@@ -832,7 +851,7 @@ static void PublishDescriptor(CWebSocket& ws, CNostrKey& key)
                                       onion);
     if (desc.empty())
         return;
-    json tags = json::array({ json::array({ "d", BTF_DESC_DTAG }) });
+    json tags = json::array({ json::array({ "d", BtfNetTag(BTF_DESC_DTAG) }) });
     json ev;
     if (BuildSignedEvent(key, BTF_DESC_KIND, tags, desc, ev))
     {
@@ -847,7 +866,7 @@ static void PublishRelayAnnouncement(CWebSocket& ws, CNostrKey& key)
 {
     if (strBtfAnnounceRelay.empty())
         return;
-    json tags = json::array({ json::array({ "d", BTF_RELAY_DTAG }) });
+    json tags = json::array({ json::array({ "d", BtfNetTag(BTF_RELAY_DTAG) }) });
     json ev;
     if (BuildSignedEvent(key, BTF_RELAY_KIND, tags, strBtfAnnounceRelay, ev))
     {
@@ -873,8 +892,8 @@ static bool PublishPoolAnnouncementOnRelay(CWebSocket& ws, CNostrKey& key,
     content["hashrate"] = ann.hashRate;
 
     json tags = json::array({
-        json::array({ "d", BTF_POOL_DTAG }),
-        json::array({ "t", BTF_POOL_DTAG })
+        json::array({ "d", BtfNetTag(BTF_POOL_DTAG) }),
+        json::array({ "t", BtfNetTag(BTF_POOL_DTAG) })
     });
     json ev;
     if (!BuildSignedEvent(key, BTF_POOL_KIND, tags, content.dump(), ev))
@@ -927,7 +946,7 @@ bool BtfQueryPoolAnnouncement(const std::string& poolBtfAddr, BtfPoolAnnouncemen
             json filter = json::object();
             filter["authors"] = json::array({ HexEncode(pk, 32) });
             filter["kinds"] = json::array({ BTF_POOL_KIND });
-            filter["#d"] = json::array({ BTF_POOL_DTAG });
+            filter["#d"] = json::array({ BtfNetTag(BTF_POOL_DTAG) });
             filter["limit"] = 1;
             json req = json::array({ "REQ", "btf-pool-query", filter });
             if (!ws.SendText(req.dump()))
@@ -1039,7 +1058,7 @@ static bool ResolveDescriptor(CWebSocket& ws, void* ctx, const string& btfAddr,
     json filter = json::object();
     filter["authors"] = json::array({ HexEncode(pk, 32) });
     filter["kinds"]   = json::array({ BTF_DESC_KIND });
-    filter["#d"]      = json::array({ BTF_DESC_DTAG });
+    filter["#d"]      = json::array({ BtfNetTag(BTF_DESC_DTAG) });
     filter["limit"]   = 1;
     json req = json::array({ "REQ", "btf-resolve", filter });
     if (!ws.SendText(req.dump()))
@@ -1161,7 +1180,7 @@ bool BtfResolveMany(const std::vector<std::string>& btfAddrs,
             json filter = json::object();
             filter["authors"] = authors;
             filter["kinds"]   = json::array({ BTF_DESC_KIND });
-            filter["#d"]      = json::array({ BTF_DESC_DTAG });
+            filter["#d"]      = json::array({ BtfNetTag(BTF_DESC_DTAG) });
             filter["limit"]   = (int)authors.size();
             json req = json::array({ "REQ", "btf-resolve-many", filter });
             if (!ws.SendText(req.dump()))
@@ -1305,7 +1324,7 @@ static bool SeedFromRelay(CNostrKey& key, const string& relay)
     {
         json dfilter = json::object();
         dfilter["kinds"] = json::array({ BTF_DESC_KIND });
-        dfilter["#d"]    = json::array({ BTF_DESC_DTAG });
+        dfilter["#d"]    = json::array({ BtfNetTag(BTF_DESC_DTAG) });
         dfilter["limit"] = 200;
         json dreq = json::array({ "REQ", "btf-disc", dfilter });
         int nPeers = 0;
@@ -1357,7 +1376,7 @@ static bool SeedFromRelay(CNostrKey& key, const string& relay)
     {
         json pfilter = json::object();
         pfilter["kinds"] = json::array({ BTF_POOL_KIND });
-        pfilter["#d"]    = json::array({ BTF_POOL_DTAG });
+        pfilter["#d"]    = json::array({ BtfNetTag(BTF_POOL_DTAG) });
         pfilter["limit"]  = 200;
         json preq = json::array({ "REQ", "btf-pools", pfilter });
         if (ws.SendText(preq.dump()))

@@ -3711,9 +3711,11 @@ static bool PoolParticipantMiner()
     std::set<int> pendingSubmitIds;
 
     SetParticipantMiningStatus("subscribing");
-    LogPrint("worker", "[worker->pool] sending mining.subscribe\n");
+    // Say which chain we are mining. A pool on the other network refuses here
+    // instead of handing out work we would hash for a payout that cannot land.
+    LogPrint("worker", "[worker->pool] sending mining.subscribe (network=%s)\n", BtfNetworkName());
     if (!StratumSendLine(s, json{{"id",msgId++},{"method","mining.subscribe"},
-                                 {"params",json::array()}})) {
+                                 {"params",json::array({BtfNetworkName()})}})) {
         LogPrint("worker", "[worker] subscribe send FAILED -- pool dropped connection\n");
         SetParticipantMiningStatus("subscribe send failed");
         RandomXDestroyMinerVM(rxvm);

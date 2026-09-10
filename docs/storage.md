@@ -143,7 +143,7 @@ conversion path.
 | `market.dat` | `CMarketDB` | No explicit typed records in current wrappers. | Legacy market storage shell. |
 
 The old IP address database (`addr.dat`) has been removed. Peer discovery is
-handled by Nostr, `.btf`, rendezvous relays, and direct onion peers.
+handled by Nostr, `.btf`, and direct onion peers.
 
 ## Migration Order (shipped in v1.2.20)
 

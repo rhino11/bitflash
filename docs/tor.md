@@ -1,231 +1,156 @@
 # Tor mode
 
-Bitflash can route outbound discovery traffic through a local Tor SOCKS5 proxy.
-This is transport plumbing only: it does not change consensus, wallet keys,
-mining, `.btf` addresses, or the encrypted rendezvous protocol.
+Tor is not an option on this network, it is the network. Since 1.2.21 a peer is
+reached only at the `.onion` its signed descriptor names, and the rendezvous
+relays that used to pair nodes have been removed from the code. What the options
+below choose is *which* Tor a node uses — one it starts itself, one you already
+run, or one reached through bridges — not whether it uses one.
 
-## Client mode
+None of this touches consensus, wallet keys, mining, or `.btf` addresses.
 
-Start Tor locally, then start Bitflash with:
+## Managed Tor: the default
+
+The desktop app and the release packages ship Tor and start it themselves when no
+other Tor option is given. The node creates a v3 hidden service, points it at its
+own P2P port, and publishes that onion in its descriptor. There is nothing to
+install and nothing to configure.
 
 ```bash
-bitflash -tor
+bitflash-node -nogui                    # bundled Tor starts on its own
+bitflash-node -nogui -managedtor        # ask for it explicitly
+bitflash-node -nogui -managedtor=/path/to/tor
+bitflash-node -nogui -nomanagedtor      # turn it off
 ```
 
-`-tor` is shorthand for:
+The hidden service lives under `<datadir>/managed-tor`. **Always pass `-datadir`
+explicitly when running more than one node on a machine.** Without it both land
+in the same application directory and fight over the same hidden service, which
+fails in ways that look like a network problem.
+
+If `-managedtor` is asked for and Tor does not start, the node refuses to start
+too. A node that came up without the Tor you asked for would dial peers over the
+clear network while looking like it was protected.
+
+## A Tor you already run
 
 ```bash
-bitflash -socks=127.0.0.1:9050
-```
-
-If Tor listens somewhere else:
-
-```bash
-bitflash -tor=127.0.0.1:9150
+bitflash -tor                  # shorthand for the usual 127.0.0.1:9050
+bitflash -tor=127.0.0.1:9150   # Tor Browser's listener
 bitflash -tor=[::1]:9050
 ```
 
-For a SOCKS5 proxy that is not Tor, use `-socks` directly:
+For a SOCKS5 proxy that is not Tor, use `-socks=HOST:PORT` directly. Either way
+the node stops probing for its external IP, so nothing leaks outside the proxy.
+
+When Tor runs on another machine it has to be able to reach this one, which means
+the P2P listener cannot stay on loopback:
 
 ```bash
-bitflash -socks=127.0.0.1:9050
-bitflash -socks=[::1]:9050
+bitflash-node -nogui -socks=10.0.0.5:9050 -bindaddr=10.0.0.9
 ```
 
-If both `-tor` and `-socks` are present, Tor mode wins and the node prints a
-warning. That keeps a command line with `-tor` from silently becoming a custom
-proxy route.
+`-bindaddr` has to be asked for by name, and for a reason. The listener used to
+bind every interface by default, so anything that could reach the plain TCP port
+completed the same handshake a Tor peer does and was handed the node's signed
+descriptor — onion included. Whoever dialled the IP then knew which onion it was.
 
-## Managed Tor mode
-
-`-managedtor` starts a Tor process for this node, writes a local `torrc`, creates
-a v3 hidden service for the normal Bitflash P2P listener, routes outbound
-discovery through that Tor instance, and signs the generated `.onion:8433`
-endpoint into the node's `.btf` descriptor.
+## Bridges, where Tor itself is blocked
 
 ```bash
-bitflash -managedtor
+bitflash -torbridges          # built-in Snowflake set, no infrastructure needed
+bitflash -torbridge="obfs4 1.2.3.4:1234 CERT=... iat-mode=0"
 ```
 
-Without a value, Bitflash looks for Tor in this order:
-
-1. `tor/tor.exe` or `tor/tor` beside the Bitflash binary;
-2. `tor.exe` or `tor` beside the Bitflash binary;
-3. `tor.exe` or `tor` on `PATH`.
-
-Windows releases can also be built as `Bitflash-*-windows-with-tor.zip`. That
-package includes the official Tor Expert Bundle under `tor/`, so the first path
-above exists immediately after extraction and `bitflash -managedtor` needs no
-separate Tor install.
-
-The bundled-Tor package is created by:
-
-```bash
-make windows-tor
-```
-
-The packaging script verifies a pinned SHA256 for the downloaded Tor Expert
-Bundle before copying it into the release directory. When `gpg` is available it
-also verifies the matching `.asc` signature against the pinned Tor Browser
-Developers signing-key fingerprint. Release builds should use
-`TOR_VERIFY_GPG=required make windows-tor` to make that second check mandatory.
-The Tor binary is bundled; the runtime data directory, hidden-service key, and
-control cookie are still created under the user's Bitflash data directory.
-
-To point at a specific Tor executable:
-
-```bash
-bitflash -managedtor=/opt/tor/bin/tor
-bitflash -managedtor=C:\Tor Browser\Browser\TorBrowser\Tor\tor.exe
-```
-
-Managed Tor writes its state under the Bitflash data directory:
-
-```text
-managed-tor/
-  torrc
-  data/
-  onion-service/
-```
-
-The private key for the onion address lives in `managed-tor/onion-service/`.
-Back up that directory if you want the same onion address after moving the node.
-Delete it only if you intentionally want a fresh onion endpoint.
-
-`-managedtor` takes precedence over `-tor` and `-socks`, because it must choose
-the local SOCKS port it starts. Diagnostics report the current managed Tor
-state, including the SOCKS port and onion endpoint once Tor has generated it.
-
-When Tor mode is enabled:
-
-- outbound Nostr relay dials use Tor;
-- outbound `.btf` rendezvous relay dials use Tor;
-- outbound direct peer dials prefer signed `.onion` endpoints when a peer
-  advertises one;
-- destination names are sent to Tor as SOCKS5 domain-name CONNECT requests, so
-  the local DNS resolver does not see them;
-- direct `.onion` dials are refused unless a SOCKS5/Tor proxy is enabled;
-- plain HTTP external-IP probes are skipped.
-
-Tor mode affects outbound discovery and relay dials. It does not encrypt
-`wallet.dat`, hide mining rewards on-chain, or change the `.btf` identity. A
-relay still sees the TCP client that connected to it; with Tor mode that client
-is the Tor exit or onion circuit endpoint instead of the user's direct IP.
+The transport binaries ship in the release packages under
+`tor/pluggable_transports/`. If you ask for bridges and the binary for that
+transport is missing, **the node refuses to start** rather than reaching Tor
+directly — that fallback would perform the exact observable act you were trying
+to avoid, while reporting success.
 
 ## What to test
 
 Use the public status page only as a rough health check. To prove the local node
-is using Tor/SOCKS, test from the node machine:
+is really using Tor, test on the node itself:
 
 ```bash
-bitflash -tor -debug
+bitflash-node -nogui -debug -datadir=<a folder of its own>
 ```
 
-Then confirm in `debug.log` that Nostr and rendezvous dials report the proxy
-path. A DNS leak test should show no local resolver lookup for relay hostnames:
-the SOCKS5 request uses the domain-name form and asks the proxy to resolve it.
-
-## Onion rendezvous relay
-
-An operator can expose a Bitflash rendezvous relay as a Tor hidden service. The
-node does not create hidden services itself; Tor owns that configuration.
-
-Example `torrc`:
+Then look in `debug.log` for:
 
 ```text
-HiddenServiceDir /var/lib/tor/bitflash-rendezvous/
-HiddenServicePort 8434 127.0.0.1:8434
+Managed Tor hidden service ready: <host>.onion:8433
+[net] btfpeers: connection scheduler started
+[net] btfseed: reached <address>.btf over onion <host>.onion:8443
+[net] connected <address>.btf via direct onion <host>.onion:8443
+Onion-only: P2P listener bound to 127.0.0.1; reachable through the hidden service
 ```
 
-After restarting Tor, read the generated onion name:
+The `btfseed` lines need `-debug`: they are category logs, and without them a
+healthy cold start looks identical to a dead one.
+
+A DNS leak test should show no local resolver lookup for `.onion` hostnames. The
+SOCKS5 request uses the domain-name form and asks the proxy to resolve it.
+
+## Running a bootstrap seed
+
+There is no relay to run any more. A node behind NAT needs nothing forwarded,
+because its hidden service is its address. What still helps a stranger is
+somebody answering the very first dial, and any node with a stable onion can be
+that:
 
 ```bash
-sudo cat /var/lib/tor/bitflash-rendezvous/hostname
+bitflash-node -nogui -managedtor -port=8433
 ```
 
-Then run the relay on localhost/VPS as usual and announce the onion endpoint from
-nodes that use Tor:
+Publish the `.btf` address it prints and others can pass it with
+`-btfseed=ADDRESS:ENCHEX`. A seed holds no balance, does not mine, and is trusted
+for nothing: it serves the same signed descriptors any peer does.
 
-```bash
-bitflash -tor -rvrelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434
-bitflash -tor -announcerelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434
-```
+A fresh hidden service usually loses its opening dial — it has not finished
+publishing and the circuits are cold. That is expected, and the connection
+scheduler retries with backoff. Before 1.2.21 it did not, which is why a node
+that lost its first dial would sit with no peers until somebody restarted it.
 
-For a pool operator that wants the pool descriptor to point at an onion
-rendezvous relay, use both:
+## A hidden service you manage yourself
 
-```bash
-bitflash -operator -tor \
-  -rvrelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434 \
-  -announcerelay=exampleexampleexampleexampleexampleexampleexampleexample.onion:8434
-```
-
-## Manual direct full-node hidden service
-
-Managed Tor is the preferred path for ordinary nodes. Operators can still expose
-the P2P listener through a separately managed Tor service:
+Managed Tor is the path for ordinary nodes. If you would rather own the
+configuration, point a hidden service at the P2P port yourself:
 
 ```text
 HiddenServiceDir /var/lib/tor/bitflash-node/
 HiddenServicePort 8433 127.0.0.1:8433
 ```
 
-After restarting Tor, read the generated onion name:
+Restart Tor, read `/var/lib/tor/bitflash-node/hostname`, and advertise it:
 
 ```bash
-sudo cat /var/lib/tor/bitflash-node/hostname
+bitflash-node -nogui -nomanagedtor -socks=127.0.0.1:9050 \
+  -onionservice=<host>.onion:8433
 ```
 
-Then start Bitflash with Tor outbound enabled and advertise that hidden service:
+## Pools over Tor
+
+A pool operator's node listens on a second port on the same hidden service, at
+`p2p + 1`. Workers resolve the pool's `.btf` address and dial that port over Tor
+like any other peer, so a pool needs no public IP and no port forwarding.
 
 ```bash
-bitflash -tor \
-  -onionservice=exampleexampleexampleexampleexampleexampleexampleexample.onion:8433
+bitflash-node -nogui -gen -operator -managedtor
 ```
 
-That onion endpoint is signed into this node's self-certifying `.btf`
-descriptor. New peers that resolve the descriptor and also run with `-tor` try
-the `.onion:8433` P2P connection first. If it fails, they fall back to the
-ordinary encrypted rendezvous path. Older nodes ignore the onion field and still
-use the rendezvous relay because the descriptor keeps the legacy signature too.
+Workers name the chain they are mining when they subscribe, so a pool on the
+other network refuses them rather than handing out work whose shares could never
+be paid.
 
-If the node has `-onionservice` but has not registered at any rendezvous relay
-yet, it can still publish an onion-capable descriptor with
-`meeting_node = rendezvous-pending`. Tor-capable peers can dial the hidden
-service directly from that descriptor. Rendezvous becomes a fallback, not a
-precondition for being discoverable.
+## Testnet
 
-This means rendezvous relays stop being the only way to reach a node that has
-published a hidden service. They remain useful bootstrap/fallback infrastructure,
-but an already-discovered onion-capable peer can be reached directly over Tor.
+Testnet uses the same machinery with its own genesis, magic bytes, port 18433 and
+its own baked seed. Descriptor and pool announcements are namespaced per network,
+so a testnet node does not learn mainnet peers.
 
-Tor owns the private key under `HiddenServiceDir`; back it up if you want the
-onion name to stay stable.
-
-## Release smoke test
-
-After building a Windows binary with managed Tor support, run the two-node smoke
-test before cutting a release:
-
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\smoke-managed-tor-onion.ps1 `
-  -Bitflash .\src\bitflash.exe `
-  -Tor C:\path\to\tor.exe
+```bash
+bitflash-node -nogui -testnet -datadir=<a folder of its own> -managedtor
 ```
 
-The script creates two temporary datadirs, starts node A with `-managedtor`,
-waits for it to publish its `.btf` identity and generated `.onion` endpoint,
-then starts node B with its own `-managedtor`, `-oniononly`, and
-`-connectbtf=<node-a>`. It passes only when node B logs that it connected to
-node A `via direct onion`; rendezvous fallback cannot satisfy the test.
-
-By default the script waits 120 seconds after node A's descriptor self-resolves
-before it starts node B. Tor can create the local `hostname` before the hidden
-service descriptor is visible enough for client circuits, and early dials often
-fail with SOCKS5 reply `0x01`. Override this with `-OnionWarmupSec N` when
-testing a slow or already-warmed Tor environment.
-
-This test still uses Nostr for descriptor discovery, because that is how nodes
-learn each other's signed `.btf` descriptors. It does not require a Bitflash
-rendezvous relay to carry the P2P connection: once the descriptor includes the
-signed onion endpoint, the actual node connection goes directly through Tor.
+Free coins for testing: <https://faucet.bitflash.network>
