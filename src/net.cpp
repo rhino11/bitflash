@@ -690,6 +690,11 @@ struct CachedBtfPeer
     // before peer exchange existed, or resolved through Nostr -- those are
     // still dialable, just not relayable.
     string desc;
+    // True once a connection to this peer actually succeeded. Only these are
+    // handed on to other nodes: a cache entry is otherwise just something we
+    // were told, and passing hearsay along is how one node's mixed cache
+    // becomes everybody's.
+    bool fVerified;
 };
 
 static string BtfPeerCachePath() { return GetAppDir() + "/btfpeers.json"; }
@@ -745,6 +750,7 @@ void LoadCachedBtfPeers(vector<CachedBtfPeer>& out)
             p.lastSeen = o.value("seen", (int64)0);
             if (o.contains("desc") && o["desc"].is_string())
                 p.desc = o["desc"].get<string>();
+            p.fVerified = o.value("ok", false);
             if (nNow - p.lastSeen > CACHED_BTF_PEER_TTL) continue; // long gone
             out.push_back(p);
         }
@@ -784,7 +790,8 @@ bool BtfCachedPeerOnion(const string& strBtfAddr, string& strOnionOut)
 static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
                             const unsigned char enc_pub[32],
                             const string& strDesc = string(),
-                            const string& strOnion = string())
+                            const string& strOnion = string(),
+                            bool fVerified = false)
 {
     CRITICAL_BLOCK(cs_btfPeerCache)
     {
@@ -801,6 +808,10 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
                     strKeepDesc = peers[i].desc;
                 if (strKeepOnion.empty())
                     strKeepOnion = peers[i].onion;
+                // Verified is sticky: a peer that answered once does not become
+                // hearsay again because somebody mentioned it afterwards.
+                if (peers[i].fVerified)
+                    fVerified = true;
                 peers.erase(peers.begin() + i);
                 break;
             }
@@ -812,6 +823,7 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
         p.encHex   = BytesToHex(enc_pub, 32);
         p.lastSeen = GetTime();
         p.desc     = strKeepDesc;
+        p.fVerified = fVerified;
         peers.insert(peers.begin(), p); // most recent first
 
         if (peers.size() > MAX_CACHED_BTF_PEERS)
@@ -829,6 +841,8 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
             o["seen"]    = q.lastSeen;
             if (!q.desc.empty())
                 o["desc"] = q.desc;
+            if (q.fVerified)
+                o["ok"] = true;
             arr.push_back(o);
         }
         FILE* f = fopen(BtfPeerCachePath().c_str(), "w");
@@ -1114,6 +1128,28 @@ void ThreadReconnectCachedBtfPeers(void* parg)
 // peers that actually answered, so a flood costs a Sybil more than it costs us.
 //
 
+// Does this endpoint plausibly belong to the network this node is on?
+//
+// Belt and braces beside the namespaced announcements: a node still running an
+// older build will keep handing over whatever its cache holds, and the ports are
+// the one thing already in the descriptor that says which network a peer meant.
+// Mainnet's defaults sit in 8433..8443 (p2p, its pool port, the seed), testnet's
+// in 18433..18443. Anything outside both bands is somebody's custom port and is
+// left alone -- this rejects what is provably the other network, not everything
+// unfamiliar.
+static bool BtfEndpointFitsThisNetwork(const string& strOnion)
+{
+    string::size_type colon = strOnion.rfind(':');
+    if (colon == string::npos)
+        return true;                       // no port to judge
+    int nPort = atoi(strOnion.substr(colon + 1).c_str());
+    bool fMainnetBand = (nPort >= 8433 && nPort <= 8443);
+    bool fTestnetBand = (nPort >= 18433 && nPort <= 18443);
+    if (!fMainnetBand && !fTestnetBand)
+        return true;                       // custom port, not ours to judge
+    return IsTestNet() ? fTestnetBand : fMainnetBand;
+}
+
 void BtfPexCollect(vector<string>& vDescOut)
 {
     vDescOut.clear();
@@ -1127,11 +1163,18 @@ void BtfPexCollect(vector<string>& vDescOut)
     CRITICAL_BLOCK(cs_btfPeerCache)
         LoadCachedBtfPeers(peers);
 
-    // Most recently seen first: these answered us, they are not names copied
-    // off a relay listing.
+    // Most recently seen first, and only peers this node actually reached.
+    //
+    // This used to forward the whole cache, including entries that were only
+    // ever heard about. One node with a mixed cache then handed that mix to
+    // everyone it met, and the mix spread faster than any of it could be
+    // verified: a testnet node's cache filled with mainnet peers it could never
+    // handshake, and the reverse. Gossiping only what answered keeps a node's
+    // own experience as the thing it vouches for.
     foreach(const CachedBtfPeer& p, peers)
     {
         if (vDescOut.size() >= MAX_PEX_DESCRIPTORS) break;
+        if (!p.fVerified) continue;                            // heard about, never reached
         if (p.desc.empty()) continue;                          // nothing provable to pass on
         if (p.desc.size() > MAX_PEX_DESCRIPTOR_BYTES) continue;
         vDescOut.push_back(p.desc);
@@ -1178,6 +1221,13 @@ int BtfPexAccept(const vector<string>& vDesc)
         unsigned char enc[32];
         if (!HexToBytes(d.enc, enc, 32))
             continue;
+
+        if (!BtfEndpointFitsThisNetwork(d.onion))
+        {
+            LogPrint("net", "btfpeers: dropping %s at %s -- other network\n",
+                     strAddr.c_str(), d.onion.c_str());
+            continue;
+        }
 
         RememberBtfPeer(strAddr, d.meeting_node, enc, strDesc, d.onion);
         nKept++;
@@ -1235,7 +1285,7 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
                     LogPrint("net", "connected %s via direct onion %s\n",
                              strBtfAddr.c_str(), strOnionNorm.c_str());
                 BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, true);
-                RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm);
+                RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm, true);
 
                 pnode = new CNode(hOnionSocket, addr, false);
                 pnode->strBtfAddr = strBtfAddr;
