@@ -209,7 +209,12 @@ static json WalletTxToJson(const CWalletTx& wtx)
             d["vout"]     = (int)i;
             details.push_back(d);
         }
-        if (fMine)
+        // An output of ours in a transaction we funded is change, not a
+        // receipt. It must not be listed as one: an exchange that sums the
+        // "receive" entries to credit deposits would credit its own change
+        // every time it paid a withdrawal. Coinbase has no inputs of ours, so
+        // it is never mistaken for change.
+        if (fMine && (nDebit == 0 || wtx.IsCoinBase()))
         {
             json d;
             d["category"] = wtx.IsCoinBase()
@@ -261,7 +266,10 @@ static json rpc_getinfo(const json&)
     j["version"]         = BITFLASH_VERSION_STRING;
     j["protocolversion"] = VERSION;
     j["blocks"]          = nBestHeight;
-    j["connections"]     = (int)vNodes.size();
+    int nConnections = 0;
+    CRITICAL_BLOCK(cs_vNodes)
+        nConnections = (int)vNodes.size();
+    j["connections"]     = nConnections;
     j["testnet"]         = IsTestNet();
     j["balance"]         = ValueFromAmount(GetBalance());
     j["walletlocked"]    = IsWalletLocked();
@@ -300,9 +308,22 @@ static json rpc_getblock(const json& p)
 
 static json rpc_getnewaddress(const json&)
 {
-    // One fresh key per call. That is what an exchange wants from this: a
-    // unique deposit address for each of its users.
-    return PubKeyToAddress(GenerateNewKey());
+    // One fresh address per call: what an exchange wants is a unique deposit
+    // address for each of its users.
+    //
+    // From the key pool, not GenerateNewKey(). The pool is derived from the HD
+    // seed, so an address handed out here is covered by the recovery phrase;
+    // GenerateNewKey() makes a random key outside the seed, and an exchange
+    // that lost its wallet file would restore from the phrase and find every
+    // deposit address it ever gave out missing. That is the difference between
+    // an outage and a loss, and it is exactly what -newaddress already gets
+    // right on the command line.
+    if (IsWalletLocked())
+        throw runtime_error("wallet is locked");
+    vector<unsigned char> vchPubKey = GetKeyFromPool();
+    if (vchPubKey.empty())
+        throw runtime_error("could not draw a key from the wallet");
+    return PubKeyToAddress(vchPubKey);
 }
 
 static json rpc_validateaddress(const json& p)
@@ -460,7 +481,16 @@ static json Dispatch(const json& req)
         if (!req.contains("method") || !req["method"].is_string())
             throw runtime_error("missing method");
         string method = req["method"].get<string>();
-        json params = req.contains("params") && req["params"].is_array() ? req["params"] : json::array();
+        json params = json::array();
+        if (req.contains("params"))
+        {
+            // Positional only. Silently treating an object as "no params"
+            // would turn a caller's typo into a call with defaults -- for
+            // sendtoaddress, that is the wrong kind of forgiving.
+            if (!req["params"].is_array())
+                throw runtime_error("params must be an array");
+            params = req["params"];
+        }
 
         RpcMethod fn = NULL;
         for (size_t i = 0; i < ARRAYLEN(kMethods); i++)
@@ -586,7 +616,12 @@ static void HandleConnection(btf_socket_t s)
         json parsed = json::parse(body);
         if (parsed.is_array())
         {
-            // Batch: one reply per request, in order.
+            // Batch: one reply per request, in order. Capped, because every
+            // entry takes the chain lock in turn and a single request with
+            // thousands of them would hold the node's main lock for as long
+            // as it liked.
+            if (parsed.size() > 100)
+                throw runtime_error("batch too large (max 100)");
             reply = json::array();
             foreach(const json& r, parsed)
                 reply.push_back(Dispatch(r));
@@ -594,9 +629,13 @@ static void HandleConnection(btf_socket_t s)
         else
             reply = Dispatch(parsed);
     }
-    catch (const std::exception& e)
+    catch (const json::parse_error&)
     {
         reply = json{{"result", nullptr}, {"error", json{{"code", -32700}, {"message", "parse error"}}}, {"id", nullptr}};
+    }
+    catch (const std::exception& e)
+    {
+        reply = json{{"result", nullptr}, {"error", json{{"code", -32600}, {"message", e.what()}}}, {"id", nullptr}};
     }
     SendHttp(s, 200, reply.dump());
     rpc_close(s);

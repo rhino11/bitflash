@@ -368,8 +368,24 @@ static void ParseStartupArguments(int argc, char* argv[])
     if (!strBindAddr.empty())
         BtfSetListenBindAddress(strBindAddr);
 
+    // -rpcpassword=@FILE reads the secret from a file, the same shape the
+    // wallet passphrase options already use, so it never shows up in the
+    // process list of a machine other people can log into -- which is what an
+    // exchange's box is. A literal still works, because every RPC client ever
+    // written expects it to, but it is the form the docs steer away from.
+    string strRpcPassword = argval2(argc, argv, "/rpcpassword", "-rpcpassword");
+    if (!strRpcPassword.empty() && strRpcPassword[0] == '@')
+    {
+        // Separate in and out: ReadPassphraseArgument clears its output before
+        // it looks at its input, so handing it one string for both empties
+        // the "@FILE" and it falls through to reading stdin.
+        string strFromFile, strErr;
+        if (!ReadPassphraseArgument(strRpcPassword, strFromFile, strErr))
+            StartupRefuse("could not read -rpcpassword file: " + strErr, "");
+        strRpcPassword = strFromFile;
+    }
     fJsonRpc = JsonRpcConfigure(argval2(argc, argv, "/rpcuser", "-rpcuser"),
-                                argval2(argc, argv, "/rpcpassword", "-rpcpassword"),
+                                strRpcPassword,
                                 argval2(argc, argv, "/rpcport", "-rpcport"));
 
     // Commands that do their work and exit have no use for Tor, and starting it
