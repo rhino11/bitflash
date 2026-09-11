@@ -78,6 +78,19 @@ show("gettransaction (desconhecida)", *call("gettransaction", ["00" * 32]))
 
 show("sendtoaddress (saldo 0)", *call("sendtoaddress", [mine, 1.0]))
 show("sendtoaddress (endereco lixo)", *call("sendtoaddress", ["lixo", 1.0]))
+
+# Auditoria: numa transacao que ESTA carteira financiou, o troco e nosso mas
+# nao e um recebimento. Se aparecer como "receive", uma exchange credita o
+# proprio troco como deposito a cada saque.
+s, d = call("listtransactions", [200])
+sends = [t for t in d["result"] if t["amount"] < 0]
+if sends:
+    bad = [x for t in sends for x in t["details"] if x["category"] == "receive"]
+    print("%-34s %d envio(s), troco listado como receive: %d %s"
+          % ("troco nao e receive", len(sends), len(bad), "OK" if not bad else "FALHA"))
+else:
+    print("%-34s (nenhum envio na carteira para checar)" % "troco nao e receive")
+show("params como objeto (deve recusar)", *call(None, raw=b'{"id":1,"method":"getbalance","params":{"a":1}}'))
 show("metodo inexistente", *call("nope"))
 
 print()

@@ -26,6 +26,8 @@ bitflash-node -nogui -datadir=/var/lib/bitflash \
 - Every request needs HTTP Basic credentials. A wrong password gets `401` and a
   quarter-second pause, and the comparison is constant-time.
 - `-rpcpassword` shorter than sixteen characters is refused.
+- `-rpcpassword=@FILE` reads the secret from a file, so it never appears in
+  the process list. Prefer it on any machine other people can log into.
 
 ## Calling it
 
@@ -75,6 +77,15 @@ amount as a number or as a string.
 `details[].category` tells the kinds apart: `receive`, `send`, and for mining
 rewards `immature` until they can be spent and `generate` after. An exchange
 should not credit `immature`.
+
+Change is never listed. In a transaction this wallet funded, its own outputs
+are change, not receipts, and they do not appear under `receive` -- so summing
+the `receive` entries to credit deposits is safe. The transaction's `amount` is
+still the wallet's net, change included.
+
+Addresses from `getnewaddress` come from the HD key pool and are covered by the
+wallet's recovery phrase. A wallet restored from its phrase gets every deposit
+address it ever handed out.
 
 ## Confirmations to trust
 
