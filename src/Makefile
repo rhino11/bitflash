@@ -62,7 +62,7 @@ NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/rpc.o \
             obj/selftest.o obj/bip32.o obj/walletcmd.o obj/wallet_sqlite.o \
-            obj/proxy.o obj/tor.o
+            obj/proxy.o obj/tor.o obj/jsonrpc.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o
 
