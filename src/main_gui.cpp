@@ -6,6 +6,7 @@
 #include "selftest.h"
 #include "tor.h"
 #include "walletcmd.h"
+#include "jsonrpc.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
 #include <csignal>
@@ -145,6 +146,9 @@ static void PrintUsage()
     printf("Network:\n");
     printf("  /testnet                   (isolated test network genesis, datadir, port, and magic)\n");
     printf("  /port=N                    (P2P listen port, default 8433; testnet 18433)\n");
+    printf("  /rpcuser=U /rpcpassword=P  (start JSON-RPC on 127.0.0.1 -- both required;\n");
+    printf("                              this is what an exchange integrates against)\n");
+    printf("  /rpcport=N                 (JSON-RPC port, default 8432; testnet 18432)\n");
     printf("  /bindaddr=IP               (listen on this address instead of loopback;\n");
     printf("                              only for a Tor running on another machine --\n");
     printf("                              a reachable plain port exposes this node's onion)\n");
@@ -218,6 +222,8 @@ static void StartupRefuse(const string& strWhat, const string& strFix)
     fflush(stderr);
     exit(1);
 }
+
+static bool fJsonRpc = false;
 
 static void ParseStartupArguments(int argc, char* argv[])
 {
@@ -361,6 +367,10 @@ static void ParseStartupArguments(int argc, char* argv[])
     string strBindAddr = argval2(argc, argv, "/bindaddr", "-bindaddr");
     if (!strBindAddr.empty())
         BtfSetListenBindAddress(strBindAddr);
+
+    fJsonRpc = JsonRpcConfigure(argval2(argc, argv, "/rpcuser", "-rpcuser"),
+                                argval2(argc, argv, "/rpcpassword", "-rpcpassword"),
+                                argval2(argc, argv, "/rpcport", "-rpcport"));
 
     // Commands that do their work and exit have no use for Tor, and starting it
     // for them costs more than the wasted seconds: the child outlives the parent
@@ -1153,6 +1163,10 @@ int main(int argc, char* argv[])
     if (fStratumBridge) {
         if (_beginthread(ThreadStratumBridge, 0, NULL) == (uintptr_t)-1)
             printf("Error: _beginthread(ThreadStratumBridge) failed\n");
+    }
+    if (fJsonRpc) {
+        if (_beginthread(ThreadJsonRpcServer, 0, NULL) == (uintptr_t)-1)
+            printf("Error: _beginthread(ThreadJsonRpcServer) failed\n");
     }
     if (fGenerateBitcoins)
         StartMinerThreads();
