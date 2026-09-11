@@ -305,14 +305,34 @@ See [public pool directory](docs/pool-directory.md) for the website/API shape.
 
 **Participant** — mine to someone else's pool. Enter or select the pool's `.btf` address and enable Start Mining.
 
-The built-in participant miner connects to operator pools through the `.btf`
-path. External miners can use Bitflash as a local Stratum bridge:
+### Mining with ordinary software
+
+You do not need Bitflash installed to mine it. There is a public pool, and any
+RandomX miner reaches it the way it reaches any other pool:
+
+```bash
+xmrig -a rx/0 -o pool.bitflash.network:3333 -u YOUR_BTF_ADDRESS -p x
+SRBMiner-MULTI --algorithm randomx --pool pool.bitflash.network:3333 --wallet YOUR_BTF_ADDRESS --password x
+```
+
+`YOUR_BTF_ADDRESS` is a Bitflash payment address, the kind `-newaddress` prints
+— not a `.btf` node address. The pool pays out to it. Fee 1%.
+
+What is on the other end of that port is a **stratum bridge**: a small node on a
+public host that forwards your connection over Tor to the pool, which itself
+lives behind a hidden service. The bridge holds no wallet and no key. It is the
+one deliberately clearnet-facing piece of the network, and it exists so that
+miners who have never heard of Tor can still take part.
+
+Run your own bridge to reach any pool, including your own:
 
 ```bash
 ./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS -stratumbridgeport=3333
-SRBMiner-MULTI --algorithm randomx --pool 127.0.0.1:3333 --wallet YOUR_BTF_ADDRESS --password x
 xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ```
+
+`-stratumbridgebind=0.0.0.0` opens it to the network; it stays on loopback
+unless asked.
 
 Estimate rewards and electricity cost locally:
 
