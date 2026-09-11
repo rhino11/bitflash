@@ -93,6 +93,7 @@ extern string strPoolRoundsFile;   // operator: optional public round proof path
 extern double dPoolFeePercent;     // operator: announced fee percent
 extern bool   fStratumBridge;      // participant helper: local Stratum bridge
 extern int    nStratumBridgePort;  // local bridge listen port, default 3333
+extern string strStratumBridgeBind; // bridge listen address, default 127.0.0.1
 extern bool fSoloMineTest; // /solomine: mine without requiring a peer (local test)
 // Threads to hash with; 0 = decide from the hardware. Set by /genproclimit.
 extern int nMinerThreads;
