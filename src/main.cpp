@@ -129,6 +129,7 @@ string strPoolRoundsFile;
 double dPoolFeePercent   = 0.0;
 bool   fStratumBridge    = false;
 int    nStratumBridgePort = 3333;
+string strStratumBridgeBind = "127.0.0.1";
 
 static std::atomic<uint64> gParticipantSharesSent{0};
 static std::atomic<uint64> gParticipantSharesAccepted{0};
@@ -4103,19 +4104,33 @@ void ThreadStratumBridge(void*)
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(0x7f000001);
+    // Loopback unless told otherwise. The bridge is the one piece of this node
+    // meant to face the clear network -- a public stratum door so ordinary
+    // miners can reach a pool that itself lives behind Tor -- but it still has
+    // to be asked for. A bridge that opened up on its own would hand every
+    // user a listening port they did not know they had.
+    unsigned long nBind = inet_addr(strStratumBridgeBind.c_str());
+    if (nBind == INADDR_NONE)
+    {
+        printf("Stratum bridge: -stratumbridgebind=%s is not a usable IPv4 address\n",
+               strStratumBridgeBind.c_str());
+        BtfCloseSocket(listener);
+        return;
+    }
+    addr.sin_addr.s_addr = nBind;
     addr.sin_port = htons((unsigned short)nStratumBridgePort);
 
     if (bind(listener, (sockaddr*)&addr, sizeof(addr)) != 0 ||
         listen(listener, 16) != 0)
     {
-        printf("Stratum bridge: could not listen on 127.0.0.1:%d\n",
-               nStratumBridgePort);
+        printf("Stratum bridge: could not listen on %s:%d\n",
+               strStratumBridgeBind.c_str(), nStratumBridgePort);
         BtfCloseSocket(listener);
         return;
     }
 
-    printf("Stratum bridge: listening on 127.0.0.1:%d for pool %s\n",
+    printf("Stratum bridge: listening on %s:%d for pool %s\n",
+           strStratumBridgeBind.c_str(),
            nStratumBridgePort, strParticipantPool.c_str());
 
     while (!fShutdown)

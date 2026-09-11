@@ -125,7 +125,9 @@ static void PrintUsage()
     printf("  /operator\n");
     printf("  /participant=POOL_BTF_ADDRESS\n");
     printf("  /stratumbridge=POOL_BTF_ADDRESS\n");
-    printf("  /stratumbridgeport=N       (default 3333; listen on 127.0.0.1)\n");
+    printf("  /stratumbridgeport=N       (default 3333)\n");
+    printf("  /stratumbridgebind=IP      (bridge listen address, default 127.0.0.1;\n");
+    printf("                              0.0.0.0 to offer a public stratum door)\n");
     printf("  /solomine\n");
     printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
     printf("  /nolargepages              (do not ask for 2 MB pages for the RandomX\n");
@@ -308,6 +310,9 @@ static void ParseStartupArguments(int argc, char* argv[])
         if (nPort > 0 && nPort <= 65535)
             nStratumBridgePort = nPort;
     }
+    string bridgeBind = argval2(argc, argv, "/stratumbridgebind", "-stratumbridgebind");
+    if (!bridgeBind.empty())
+        strStratumBridgeBind = bridgeBind;
 
     string poolName = argval2(argc, argv, "/poolname", "-poolname");
     if (!poolName.empty())
