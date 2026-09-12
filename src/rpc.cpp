@@ -1255,8 +1255,8 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
         if (nNet >= 0 && nBestHeight < nNet - 3) {
             LogPrint("worker", "[pool] refusing fd=%d: pool is %d blocks behind the network (%d vs %d)\n",
                      (int)m->fd, nNet - nBestHeight, nBestHeight, nNet);
-            reply(json{{"error", strprintf("pool is syncing (%d blocks behind); try again in a few minutes",
-                                           nNet - nBestHeight)}});
+            reply(nullptr, strprintf("pool is syncing (%d blocks behind); try again in a few minutes",
+                                     nNet - nBestHeight));
             return false;
         }
 
@@ -1271,8 +1271,8 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
             if (strTheirs != BtfNetworkName()) {
                 LogPrint("worker", "[pool] refusing fd=%d: worker is on '%s', this pool is on '%s'\n",
                          (int)m->fd, strTheirs.c_str(), BtfNetworkName());
-                reply(json{{"error", strprintf("this pool mines %s, not %s",
-                                               BtfNetworkName(), strTheirs.c_str())}});
+                reply(nullptr, strprintf("this pool mines %s, not %s",
+                                         BtfNetworkName(), strTheirs.c_str()));
                 return false;
             }
         }
