@@ -1244,6 +1244,22 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
 
     // ------------------------------------------------------------------
     if (method == "mining.subscribe") {
+        // A pool that is still catching up hands out templates for a height
+        // the network has already passed, and every share a worker submits
+        // against them is wasted -- not rejected, wasted, because the pool
+        // accepts them and they can never become a block anybody keeps. Seen
+        // on the first day of the public pool: it came up, took an hour to
+        // sync over Tor, and served height-1 jobs to the door the whole time.
+        // The peers' median height is in every handshake, so the pool knows.
+        int nNet = GetPeerMedianHeight();
+        if (nNet >= 0 && nBestHeight < nNet - 3) {
+            LogPrint("worker", "[pool] refusing fd=%d: pool is %d blocks behind the network (%d vs %d)\n",
+                     (int)m->fd, nNet - nBestHeight, nBestHeight, nNet);
+            reply(json{{"error", strprintf("pool is syncing (%d blocks behind); try again in a few minutes",
+                                           nNet - nBestHeight)}});
+            return false;
+        }
+
         // Which chain the worker thinks it is mining. Discovery is namespaced
         // per network now, but a worker can also be pointed at a pool by hand,
         // and hashing a testnet template for a mainnet payout address is a
