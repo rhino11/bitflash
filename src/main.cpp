@@ -3688,19 +3688,22 @@ static bool PoolParticipantMiner()
     // "subscribing", we're genuinely ready to read the reply the instant
     // it arrives.
     // ------------------------------------------------------------------
-    if (!RandomXFastReady()) {
+    // Keyed for the PoW version in force now; a job from the other side of
+    // the switch re-keys in the hashing loop below.
+    int nPoWVersion = PoWVersionAt(GetAdjustedTime());
+    if (!RandomXFastReady(nPoWVersion)) {
         SetParticipantMiningStatus("building RandomX dataset (~2GB, one-time)");
         unsigned int nThreads = std::thread::hardware_concurrency();
-        RandomXInitDataset(nThreads > 0 ? (int)nThreads : 1);
+        RandomXInitDataset(nPoWVersion, nThreads > 0 ? (int)nThreads : 1);
     }
-    void* rxvm = RandomXCreateMinerVM();
+    void* rxvm = RandomXCreateMinerVM(nPoWVersion);
     if (!rxvm) {
         LogPrint("worker", "[worker] failed to create RandomX VM\n");
         SetParticipantMiningStatus("RandomX init failed");
         closesocket(s); return false;
     }
-    LogPrint("worker", "[worker] RandomX VM ready (%s)\n",
-             RandomXFastReady() ? "fast 2GB" : "light 256MB");
+    LogPrint("worker", "[worker] RandomX v%d VM ready (%s)\n", nPoWVersion,
+             RandomXFastReady(nPoWVersion) ? "fast 2GB" : "light 256MB");
 
     // ------------------------------------------------------------------
     // Step 5: Stratum subscribe + authorize. The socket is read from
@@ -3916,7 +3919,22 @@ static bool PoolParticipantMiner()
 
         // -- Hash one nonce --
         memcpy(header+76, &nNonce, 4);
-        uint256 hash = RandomXHashWithVM(rxvm, header, 80);
+        {
+            // The job header carries its own nTime, so it decides the PoW
+            // version. When the pool crosses the switch, re-key once.
+            unsigned int nJobTime; memcpy(&nJobTime, header+68, 4);
+            int v = PoWVersionAt(nJobTime);
+            if (v != nPoWVersion) {
+                LogPrint("worker", "[worker] job is PoW v%d, re-keying RandomX\n", v);
+                RandomXDestroyMinerVM(rxvm);
+                unsigned int nThreads = std::thread::hardware_concurrency();
+                RandomXInitDataset(v, nThreads > 0 ? (int)nThreads : 1);
+                rxvm = RandomXCreateMinerVM(v);
+                if (!rxvm) { SetParticipantMiningStatus("RandomX re-key failed"); break; }
+                nPoWVersion = v;
+            }
+        }
+        uint256 hash = PoWHashHeaderWithVM(rxvm, header);
         hashesSinceSample++;
         gParticipantHashes.fetch_add(1);
         if ((hashesSinceSample & 0x3ff) == 0)
@@ -4197,9 +4215,9 @@ bool BitcoinMiner(int nThreadId)
 
     // Build the fast (~2 GB dataset) RandomX mode once, up front, so we're
     // not stuck mining in the much slower light/cache-only mode forever.
-    if (!RandomXFastReady()) {
+    if (!RandomXFastReady(PoWVersionAt(GetAdjustedTime()))) {
         unsigned int nThreads = std::thread::hardware_concurrency();
-        RandomXInitDataset(nThreads > 0 ? (int)nThreads : 1);
+        RandomXInitDataset(PoWVersionAt(GetAdjustedTime()), nThreads > 0 ? (int)nThreads : 1);
     }
 
     // Drawn from the pool, so it is already in wallet.dat before a single hash
@@ -4332,7 +4350,15 @@ bool BitcoinMiner(int nThreadId)
         //
         // Search (memory-hard RandomX PoW) -- each thread uses its own VM
         //
-        void* rxvm = RandomXCreateMinerVM();
+        // Keyed for the version this block's nTime selects. The first block
+        // after the switch pays for the other dataset once.
+        int nPoWVersion = PoWVersionAt(pblock->nTime);
+        if (!RandomXFastReady(nPoWVersion))
+        {
+            unsigned int nThreads = std::thread::hardware_concurrency();
+            RandomXInitDataset(nPoWVersion, nThreads > 0 ? (int)nThreads : 1);
+        }
+        void* rxvm = RandomXCreateMinerVM(nPoWVersion);
         if (!rxvm)
         {
             LogPrint("net", "BitcoinMiner: failed to create RandomX VM\n");
@@ -4342,15 +4368,14 @@ bool BitcoinMiner(int nThreadId)
         // The thread number is in the line on purpose: every miner would
         // otherwise print the same text, and the dedup filter would fold them
         // into one, leaving no way to tell four threads from one.
-        LogPrint("net", "BitcoinMiner: thread %d hashing with RandomX (%s)\n",
-               nThreadId, RandomXFastReady() ? "fast 2GB" : "light 256MB");
+        LogPrint("net", "BitcoinMiner: thread %d hashing with RandomX v%d (%s)\n",
+               nThreadId, nPoWVersion, RandomXFastReady(nPoWVersion) ? "fast 2GB" : "light 256MB");
 
         unsigned int nStart = GetTime();
         uint256 hashTarget = CBigNum().SetCompact(pblock->nBits).getuint256();
         loop
         {
-            uint256 hash = RandomXHashWithVM(rxvm, (const void*)BEGIN(pblock->nVersion),
-                                             END(pblock->nNonce) - BEGIN(pblock->nVersion));
+            uint256 hash = PoWHashHeaderWithVM(rxvm, (const unsigned char*)BEGIN(pblock->nVersion));
 
             if (hash <= hashTarget)
             {
@@ -4422,6 +4447,8 @@ bool BitcoinMiner(int nThreadId)
                 if (!fGenerateBitcoins)
                     break;
                 pblock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+                if (PoWVersionAt(pblock->nTime) != nPoWVersion)
+                    break;          // the switch happened under us: rebuild, keyed for v2
             }
         }
         RandomXDestroyMinerVM(rxvm);

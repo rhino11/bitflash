@@ -120,5 +120,6 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=consensus-limits
 	./bitflash.exe -selftest=pool-stratum
 	./bitflash.exe -selftest=debug-log-buffer
+	./bitflash.exe -selftest=pow-v2
 	./bitflash.exe -selftest=socks5-proxy
 	./bitflash.exe -selftest=managed-tor

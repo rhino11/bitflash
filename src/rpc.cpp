@@ -1011,6 +1011,14 @@ struct Miner {
     int64        lastSeen       = 0;
     uint32_t     extranonce2;
 
+    // Which stratum the miner speaks. Bitflash's own worker uses the Bitcoin
+    // dialect (mining.subscribe / mining.notify / mining.submit). XMRig and
+    // its relatives use the CryptoNote one (login / job / submit), with a
+    // JSON-RPC 2.0 envelope and the share target inside the job -- there is
+    // no set_difficulty there, a new job carries the new target.
+    bool         fCryptoNote    = false;
+    std::string  agent;                  // what the CryptoNote miner said it was
+
     // Vardiff state
     double       difficulty     = 1.0;   // current share difficulty sent to this miner
     uint256      shareTarget;            // derived from difficulty; what we check against
@@ -1050,11 +1058,16 @@ static void PushReady(btf_socket_t s)
 // I/O helpers -- event loop thread only
 // ---------------------------------------------------------------------------
 
+// The self-test drives HandleLine without a socket and reads what the pool
+// would have sent from here instead.
+static std::string* gSelfTestCapture = NULL;
+
 // Blocking send of a complete JSON line. Called only from the event loop so
 // no other thread is writing to the same fd concurrently.
 static bool SendLine(btf_socket_t fd, const json& j)
 {
     std::string s = j.dump() + "\n";
+    if (gSelfTestCapture) { *gSelfTestCapture += s; return true; }
     int off = 0, total = (int)s.size();
     while (off < total) {
         int r = send(fd, s.c_str() + off, total - off, SEND_FLAGS);
@@ -1150,15 +1163,60 @@ static json MakeNotifyParams(const StratumJob& job, const CBlock& b,
                         b.hashPrevBlock.GetHex(), ToHex(tgt, 32), clean});
 }
 
+// The same job as a CryptoNote miner (XMRig, SRBMiner) expects it:
+//   blob       the PoW v2 input -- the header laid out with the nonce at
+//              byte 39, nonce zeroed (a non-zero nonce puts XMRig in its
+//              NiceHash mode, where it only iterates the low three bytes)
+//   target     the top 64 bits of the share target, little-endian hex; the
+//              miner compares bytes 24..31 of the hash against it
+//   seed_hash  the 32-byte RandomX key
+//   algo       rx/0 -- Bitflash uses RandomX with the reference parameters
+// Returns null when the job predates the PoW switch: the miner cannot hash
+// that (wrong key, wrong nonce position), and the template is refreshed
+// within a minute anyway.
+static json MakeCryptoNoteJob(const StratumJob& job, const CBlock& b,
+                              const uint256& shareTarget)
+{
+    unsigned char hdr[80];
+    memcpy(hdr,    &b.nVersion,       4);
+    memcpy(hdr+4,  &b.hashPrevBlock,  32);
+    memcpy(hdr+36, &b.hashMerkleRoot, 32);
+    memcpy(hdr+68, &b.nTime,          4);
+    memcpy(hdr+72, &b.nBits,          4);
+    memset(hdr+76, 0,                 4);
+    if (PoWVersionAt(b.nTime) != 2)
+        return nullptr;
+    unsigned char input[POW_INPUT_MAX];
+    size_t n = PoWInputV2(hdr, input);
+    const unsigned char* tgt = (const unsigned char*)&shareTarget;
+    return json{{"blob", ToHex(input, n)},
+                {"job_id", job.jobId},
+                {"target", ToHex(tgt + 24, 8)},
+                {"algo", "rx/0"},
+                {"height", job.height},
+                {"seed_hash", PoWSeedV2Hex()}};
+}
+
 static void SendJob(Miner* m, bool clean)
 {
     if (!gHaveJob) return;
     CBlock mb = BuildMinerBlock(gCurrentJob, m->extranonce2);
-    // Use this miner's own shareTarget (set by vardiff) in the notify params.
-    // The participant miner reads p[3] as its share target, and HandleLine
-    // checks m->shareTarget on submit -- both sides now use the same value.
-    json n = {{"id",nullptr},{"method","mining.notify"},
-              {"params", MakeNotifyParams(gCurrentJob, mb, m->shareTarget, clean)}};
+    json n;
+    if (m->fCryptoNote) {
+        json j = MakeCryptoNoteJob(gCurrentJob, mb, m->shareTarget);
+        if (j.is_null()) {
+            LogPrint("worker", "[pool->worker] job %s is PoW v1, not sent to %s (RandomX miner)\n",
+                     gCurrentJob.jobId.c_str(), m->address.c_str());
+            return;
+        }
+        n = {{"jsonrpc","2.0"},{"method","job"},{"params", j}};
+    } else {
+        // Use this miner's own shareTarget (set by vardiff) in the notify params.
+        // The participant miner reads p[3] as its share target, and HandleLine
+        // checks m->shareTarget on submit -- both sides now use the same value.
+        n = {{"id",nullptr},{"method","mining.notify"},
+             {"params", MakeNotifyParams(gCurrentJob, mb, m->shareTarget, clean)}};
+    }
     if (!SendLine(m->fd, n))
         LogPrint("worker", "[pool->worker] job send FAILED for %s -- miner will be dropped\n",
                  m->address.empty() ? "(not yet authorized)" : m->address.c_str());
@@ -1234,31 +1292,135 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
     std::string method = req.value("method", "");
 
     // Reply helper: always sends result+error pair as Stratum requires
+    // A CryptoNote miner announces itself with "login"; from then on every
+    // reply to it wears the JSON-RPC 2.0 envelope, with errors as an object.
+    // That shape is not cosmetic: XMRig acts only on an error *object* --
+    // {"error":"unknown method"} as a string is ignored, and the miner sat at
+    // its banner forever. That is how the first public-pool user found out
+    // the pool did not speak its language.
+    if (method == "login" || method == "submit" || method == "keepalived" || method == "getjob")
+        m->fCryptoNote = true;
+
     auto reply = [&](json result, std::string error = "") {
-        json err = error.empty() ? json(nullptr) : json(error);
-        if (!SendLine(m->fd, json{{"id",id},{"result",result},{"error",err}}))
+        json msg;
+        if (m->fCryptoNote) {
+            if (!error.empty())
+                msg = json{{"id",id},{"jsonrpc","2.0"},{"result",nullptr},
+                           {"error",json{{"code",-1},{"message",error}}}};
+            else
+                msg = json{{"id",id},{"jsonrpc","2.0"},{"error",nullptr},
+                           {"result", result.is_boolean() ? json{{"status","OK"}} : result}};
+        } else {
+            json err = error.empty() ? json(nullptr) : json(error);
+            msg = json{{"id",id},{"result",result},{"error",err}};
+        }
+        if (!SendLine(m->fd, msg))
             LogPrint("worker", "[pool->worker] reply send FAILED for %s (method=%s)\n",
                      m->address.empty() ? "(unauth)" : m->address.c_str(),
                      method.c_str());
     };
 
-    // ------------------------------------------------------------------
-    if (method == "mining.subscribe") {
-        // A pool that is still catching up hands out templates for a height
-        // the network has already passed, and every share a worker submits
-        // against them is wasted -- not rejected, wasted, because the pool
-        // accepts them and they can never become a block anybody keeps. Seen
-        // on the first day of the public pool: it came up, took an hour to
-        // sync over Tor, and served height-1 jobs to the door the whole time.
-        // The peers' median height is in every handshake, so the pool knows.
+    // Shared by both dialects' first message. A pool that is still catching
+    // up hands out templates for a height the network has already passed,
+    // and every share a worker submits against them is wasted -- not
+    // rejected, wasted, because the pool accepts them and they can never
+    // become a block anybody keeps. Seen on the first day of the public
+    // pool: it came up, took an hour to sync over Tor, and served height-1
+    // jobs to the door the whole time. The peers' median height is in every
+    // handshake, so the pool knows.
+    auto refuseIfBehind = [&]() -> bool {
         int nNet = GetPeerMedianHeight();
         if (nNet >= 0 && nBestHeight < nNet - 3) {
             LogPrint("worker", "[pool] refusing fd=%d: pool is %d blocks behind the network (%d vs %d)\n",
                      (int)m->fd, nNet - nBestHeight, nBestHeight, nNet);
             reply(nullptr, strprintf("pool is syncing (%d blocks behind); try again in a few minutes",
                                      nNet - nBestHeight));
+            return true;
+        }
+        return false;
+    };
+
+    // Vardiff state and the first job, once a miner of either dialect is in.
+    auto authorise = [&]() {
+        m->authorised = true;
+        m->lastSeen   = GetTime();
+        m->difficulty       = 1.0;
+        m->shareTarget      = ShareTargetFromDifficulty(m->difficulty);
+        m->vardiffWindowStart = GetTime();
+        m->vardiffShares    = 0;
+    };
+
+    // ------------------------------------------------------------------
+    if (method == "login") {
+        // XMRig: {"method":"login","params":{"login":ADDRESS,"pass":"x",
+        //         "agent":"XMRig/6.26.0","algo":["rx/0",...]}}
+        if (refuseIfBehind())
+            return false;
+        auto& p = req["params"];
+        if (!p.is_object() || !p.contains("login") || !p["login"].is_string()) {
+            reply(nullptr, "login must carry a Bitflash payment address");
             return false;
         }
+        if (PoWVersionAt(GetAdjustedTime()) < 2) {
+            // Before the switch there is no job this miner could hash. Say
+            // when, in the error XMRig prints, instead of leaving it waiting.
+            LogPrint("worker", "[pool] refusing RandomX miner fd=%d before the PoW v2 switch\n", (int)m->fd);
+            reply(nullptr, strprintf("Bitflash PoW v2 (RandomX-miner compatible) activates at block time %u; "
+                                     "until then mine with: bitflash -participant=POOL.btf", PoWV2Time()));
+            return false;
+        }
+        if (!gHaveJob) {
+            reply(nullptr, "pool has no work yet; try again in a minute");
+            return false;
+        }
+        m->address = p["login"].get<std::string>();
+        m->worker  = (p.contains("pass") && p["pass"].is_string()) ? p["pass"].get<std::string>() : "worker";
+        m->agent   = (p.contains("agent") && p["agent"].is_string()) ? p["agent"].get<std::string>() : "";
+        uint160 h160; bool validAddr = AddressToHash160(m->address, h160);
+        if (!validAddr) {
+            // The Bitcoin-dialect worker is let through with an invalid
+            // address because it is our own software and the log says why.
+            // A third-party miner shows its user the error string, so here
+            // refusing is the message that actually reaches a person.
+            LogPrint("worker", "[pool] refusing RandomX miner fd=%d: '%s' is not a Bitflash payment address\n",
+                     (int)m->fd, m->address.c_str());
+            reply(nullptr, "not a Bitflash payment address (use the kind -newaddress prints, not a .btf)");
+            return false;
+        }
+        authorise();
+        CBlock mb = BuildMinerBlock(gCurrentJob, m->extranonce2);
+        json job = MakeCryptoNoteJob(gCurrentJob, mb, m->shareTarget);
+        if (job.is_null()) {
+            reply(nullptr, "pool template predates the PoW v2 switch; try again in a minute");
+            return false;
+        }
+        std::string sid = ToHex(&m->fd, 4);
+        LogPrint("worker", "[worker->pool] login address=%s agent=%s sid=%s -- RandomX miner, PoW v2 job %s\n",
+                 m->address.c_str(), m->agent.c_str(), sid.c_str(), gCurrentJob.jobId.c_str());
+        reply(json{{"id", sid},{"job", job},{"status","OK"}});
+        return true;
+    }
+
+    if (method == "keepalived") {
+        m->lastSeen = GetTime();
+        reply(json{{"status","KEEPALIVED"}});
+        return true;
+    }
+
+    if (method == "getjob") {
+        if (!m->authorised) { reply(nullptr, "Unauthenticated"); return false; }
+        if (!gHaveJob)      { reply(nullptr, "no work yet"); return true; }
+        CBlock mb = BuildMinerBlock(gCurrentJob, m->extranonce2);
+        json job = MakeCryptoNoteJob(gCurrentJob, mb, m->shareTarget);
+        if (job.is_null())  { reply(nullptr, "no PoW v2 work yet"); return true; }
+        reply(job);
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    if (method == "mining.subscribe") {
+        if (refuseIfBehind())
+            return false;
 
         // Which chain the worker thinks it is mining. Discovery is namespaced
         // per network now, but a worker can also be pointed at a pool by hand,
@@ -1292,12 +1454,10 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
         bool fArr = p.is_array();
         m->address = (fArr && p.size() > 0 && p[0].is_string()) ? p[0].get<std::string>() : "";
         m->worker  = (fArr && p.size() > 1 && p[1].is_string()) ? p[1].get<std::string>() : "worker";
-        m->lastSeen = GetTime();
 
         // Validate address before authorising
         uint160 h160; bool validAddr = AddressToHash160(m->address, h160);
 
-        m->authorised = true; // authorise regardless -- shares just won't pay out
         LogPrint("worker", "[worker->pool] authorize address=%s worker=%s addr_valid=%s\n",
                  m->address.c_str(), m->worker.c_str(), validAddr ? "yes" : "NO");
 
@@ -1308,11 +1468,9 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
 
         reply(true);
 
-        // Initialize vardiff state and send initial difficulty
-        m->difficulty       = 1.0;
-        m->shareTarget      = ShareTargetFromDifficulty(m->difficulty);
-        m->vardiffWindowStart = GetTime();
-        m->vardiffShares    = 0;
+        // Authorise regardless -- shares just won't pay out. Vardiff starts
+        // at 1.0; the Bitcoin dialect is told so explicitly.
+        authorise();
         LogPrint("worker", "[pool->worker] initial difficulty=%.4f for %s\n",
                  m->difficulty, m->address.c_str());
         if (!SendLine(m->fd, json{{"id",nullptr},{"method","mining.set_difficulty"},
@@ -1337,28 +1495,43 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
     if (method == "mining.get_transactions")     { reply(json::array()); return true; }
 
     // ------------------------------------------------------------------
-    if (method == "mining.submit") {
+    if (method == "mining.submit" || method == "submit") {
         if (!m->authorised) {
             LogPrint("worker", "[worker->pool] submit from unauthorized miner (fd=%d)\n",
                      (int)m->fd);
-            reply(false, "not authorised");
+            reply(false, m->fCryptoNote ? "Unauthenticated" : "not authorised");
             return true;
         }
 
         auto& p = req["params"];
-        // Check the shape as well as the length: a submit carrying
-        // "params":[1,2,3] would otherwise reach get<std::string>() and throw
-        // a json::type_error that nothing above catches, taking the pool down
-        // with it. Authorising costs an attacker nothing but an address.
-        if (!p.is_array() || p.size() < 3 || !p[1].is_string() || !p[2].is_string()) {
-            LogPrint("worker", "[worker->pool] submit bad params from %s\n",
-                     m->address.c_str());
-            reply(false, "bad params");
-            return true;
+        std::string submitJobId, nonceHex, resultHex;
+        if (m->fCryptoNote) {
+            // XMRig: {"params":{"id":SID,"job_id":..,"nonce":"8 hex, the 4 bytes
+            // at blob offset 39 in order","result":"the 32-byte hash, hex"}}
+            if (!p.is_object() || !p.contains("job_id") || !p["job_id"].is_string()
+                || !p.contains("nonce") || !p["nonce"].is_string()) {
+                LogPrint("worker", "[worker->pool] submit bad params from %s\n", m->address.c_str());
+                reply(false, "bad params");
+                return true;
+            }
+            submitJobId = p["job_id"].get<std::string>();
+            nonceHex    = p["nonce"].get<std::string>();
+            if (p.contains("result") && p["result"].is_string())
+                resultHex = p["result"].get<std::string>();
+        } else {
+            // Check the shape as well as the length: a submit carrying
+            // "params":[1,2,3] would otherwise reach get<std::string>() and throw
+            // a json::type_error that nothing above catches, taking the pool down
+            // with it. Authorising costs an attacker nothing but an address.
+            if (!p.is_array() || p.size() < 3 || !p[1].is_string() || !p[2].is_string()) {
+                LogPrint("worker", "[worker->pool] submit bad params from %s\n",
+                         m->address.c_str());
+                reply(false, "bad params");
+                return true;
+            }
+            submitJobId = p[1].get<std::string>();
+            nonceHex    = p[2].get<std::string>();
         }
-
-        std::string submitJobId = p[1].get<std::string>();
-        std::string nonceHex    = p[2].get<std::string>();
 
         if (!gHaveJob) {
             LogPrint("worker", "[worker->pool] submit from %s but pool has no current job\n",
@@ -1394,14 +1567,28 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
         memcpy(hdr+72, &b.nBits,          4);
         memcpy(hdr+76, &b.nNonce,         4);
 
-        uint256 powHash = RandomXPoWHash(hdr, 80);
+        uint256 powHash = PoWHashHeader(hdr);
+
+        // A RandomX miner sends the hash it computed. If it differs from ours
+        // the miner is keyed or laid out wrong, and "Low difficulty share"
+        // would send its user hunting in the wrong place.
+        if (!resultHex.empty()) {
+            auto rb = FromHex(resultHex);
+            if (rb.size() != 32 || memcmp(rb.data(), &powHash, 32) != 0) {
+                LogPrint("worker", "[worker->pool] hash mismatch from %s (agent %s):"
+                         " miner %s pool %s\n", m->address.c_str(), m->agent.c_str(),
+                         resultHex.c_str(), powHash.GetHex().c_str());
+                reply(false, "hash does not match: this pool is Bitflash PoW v2 (rx/0, seed_hash from the job)");
+                return true;
+            }
+        }
 
         // Check against this miner's personal share target (set by vardiff)
         if (powHash > m->shareTarget) {
             LogPrint("worker", "[worker->pool] high-hash from %s"
                      " nonce=%u (difficulty=%.4f)\n",
                      m->address.c_str(), nNonce, m->difficulty);
-            reply(false, "high-hash");
+            reply(false, m->fCryptoNote ? "Low difficulty share" : "high-hash");
             return true;
         }
 
@@ -1457,9 +1644,10 @@ static bool HandleLine(Miner* m, const std::string& rawLine,
                              " (%.1fs/share actual vs %ds target)\n",
                              m->address.c_str(), m->difficulty,
                              actualSecsPerShare, (int)VARDIFF_TARGET_SECS);
-                    SendLine(m->fd, json{{"id",nullptr},
-                                        {"method","mining.set_difficulty"},
-                                        {"params",json::array({m->difficulty})}});
+                    if (!m->fCryptoNote)   // a RandomX miner reads the target off the job
+                        SendLine(m->fd, json{{"id",nullptr},
+                                            {"method","mining.set_difficulty"},
+                                            {"params",json::array({m->difficulty})}});
                     // set_difficulty alone doesn't change what the worker
                     // actually hashes against -- it only reads its share
                     // target from mining.notify params[3]. Without this, the
@@ -1617,6 +1805,111 @@ int RunPoolStratumSelfTest()
     };
     HandleLine(&miner, stale.dump(), roundShareCount, roundShareTotal, blocksFound);
     check(roundShareTotal == 1, "stale submit does not increment shares");
+
+    // ---- The CryptoNote dialect (XMRig, SRBMiner) against a PoW v2 job ----
+    // A template whose nTime is past the switch, so it has a v2 input.
+    CBlock v2block = block;
+    v2block.nTime = PoWV2Time() + 1;
+    gCurrentJob.block = v2block;
+    gCurrentJob.jobId = "selftest-v2";
+    CBlock v2miner = BuildMinerBlock(gCurrentJob, miner.extranonce2);
+
+    json cnjob = MakeCryptoNoteJob(gCurrentJob, v2miner, miner.shareTarget);
+    check(cnjob.is_object(), "a v2 template yields a CryptoNote job");
+    std::string blobHex = cnjob.value("blob", "");
+    std::vector<unsigned char> blob = FromHex(blobHex);
+    check(blob.size() == POW_INPUT_V2_SIZE, "job blob is the 83-byte v2 input");
+    bool nonceZero = blob.size() == 83 && blob[39] == 0 && blob[40] == 0 && blob[41] == 0 && blob[42] == 0;
+    check(nonceZero, "job blob carries a zero nonce at byte 39 (else XMRig goes NiceHash)");
+    check(blob.size() == 83 && memcmp(&blob[0], &v2miner.nVersion, 4) == 0
+          && memcmp(&blob[4], &v2miner.hashPrevBlock, 32) == 0
+          && memcmp(&blob[43], &v2miner.hashMerkleRoot, 32) == 0
+          && memcmp(&blob[75], &v2miner.nTime, 4) == 0
+          && memcmp(&blob[79], &v2miner.nBits, 4) == 0,
+          "job blob is the miner's own header, nonce moved to 39");
+    check(cnjob.value("seed_hash", "") == PoWSeedV2Hex() && PoWSeedV2Hex().size() == 64,
+          "job carries the 32-byte v2 seed as seed_hash");
+    check(cnjob.value("target", "") == ToHex(((const unsigned char*)&miner.shareTarget) + 24, 8),
+          "job target is the top 64 bits of the share target, little-endian");
+    check(cnjob.value("algo", "") == "rx/0" && cnjob.value("job_id", "") == "selftest-v2",
+          "job says rx/0 and names the job");
+    CBlock v1block = block;
+    v1block.nTime = PoWV2Time() - 1;
+    check(MakeCryptoNoteJob(gCurrentJob, v1block, miner.shareTarget).is_null(),
+          "a v1 template yields no CryptoNote job");
+
+    // login, with the reply captured
+    std::string captured;
+    gSelfTestCapture = &captured;
+    Miner cn(INVALID_SOCKET);
+    json login = {{"id", 1}, {"jsonrpc", "2.0"}, {"method", "login"},
+                  {"params", json{{"login", "selftest-cn-address"}, {"pass", "x"},
+                                  {"agent", "XMRig/6.26.0"}, {"algo", json::array({"rx/0"})}}}};
+    HandleLine(&cn, login.dump(), roundShareCount, roundShareTotal, blocksFound);
+    json loginReply;
+    try { loginReply = json::parse(captured); } catch (...) {}
+    check(loginReply.is_object() && loginReply.value("jsonrpc", "") == "2.0" && loginReply["id"] == 1,
+          "login reply wears the JSON-RPC 2.0 envelope");
+    check(cn.fCryptoNote, "a login marks the miner as CryptoNote");
+    // Before the switch the pool must say so in an error *object*; after it,
+    // the address above is not a payment address and must be refused the
+    // same way. Either way: an object XMRig will show its user.
+    check(loginReply.is_object() && loginReply["error"].is_object()
+          && loginReply["error"].value("message", "").size() > 0,
+          "login refusal is an error object with a message, not a string");
+    if (PoWVersionAt(GetAdjustedTime()) < 2)
+        check(loginReply.is_object() && loginReply["error"].value("message", "").find("activates") != std::string::npos,
+              "before the switch the refusal names the activation time");
+    else
+        check(loginReply.is_object() && loginReply["error"].value("message", "").find("payment address") != std::string::npos,
+              "after the switch a non-address login is refused as such");
+    check(!cn.authorised, "a refused login does not authorise");
+
+    // submit: the nonce and the hash a correctly keyed miner would send
+    cn.authorised = true; cn.address = "selftest-cn-address";
+    cn.shareTarget = ~uint256(0); cn.difficulty = 0.001; cn.vardiffWindowStart = GetTime();
+    CBlock cnBlock = BuildMinerBlock(gCurrentJob, cn.extranonce2);
+    cnBlock.nNonce = 0x01020304;
+    unsigned char hdr[80];
+    memcpy(hdr, &cnBlock.nVersion, 4); memcpy(hdr+4, &cnBlock.hashPrevBlock, 32);
+    memcpy(hdr+36, &cnBlock.hashMerkleRoot, 32); memcpy(hdr+68, &cnBlock.nTime, 4);
+    memcpy(hdr+72, &cnBlock.nBits, 4); memcpy(hdr+76, &cnBlock.nNonce, 4);
+    uint256 want = PoWHashHeader(hdr);
+    uint64 before = roundShareTotal;
+    captured.clear();
+    json cnsubmit = {{"id", 2}, {"jsonrpc", "2.0"}, {"method", "submit"},
+                     {"params", json{{"id", "00"}, {"job_id", "selftest-v2"},
+                                     {"nonce", ToHex(&cnBlock.nNonce, 4)},
+                                     {"result", ToHex((const unsigned char*)&want, 32)}}}};
+    HandleLine(&cn, cnsubmit.dump(), roundShareCount, roundShareTotal, blocksFound);
+    json submitReply;
+    try { submitReply = json::parse(captured); } catch (...) {}
+    check(roundShareTotal == before + 1 && roundShareCount["selftest-cn-address"] == 1,
+          "CryptoNote submit with the right nonce and hash is credited");
+    check(submitReply.is_object() && submitReply["error"].is_null()
+          && submitReply["result"].value("status", "") == "OK",
+          "accepted submit answers {\"status\":\"OK\"}");
+
+    captured.clear();
+    uint256 wrong = want; ((unsigned char*)&wrong)[0] ^= 1;
+    cnsubmit["params"]["result"] = ToHex((const unsigned char*)&wrong, 32);
+    cnsubmit["id"] = 3;
+    HandleLine(&cn, cnsubmit.dump(), roundShareCount, roundShareTotal, blocksFound);
+    try { submitReply = json::parse(captured); } catch (...) {}
+    check(roundShareTotal == before + 1, "a submit whose hash differs from the pool's is not credited");
+    check(submitReply.is_object() && submitReply["error"].is_object()
+          && submitReply["error"].value("message", "").find("does not match") != std::string::npos,
+          "the mismatch is reported as such, not as low difficulty");
+
+    captured.clear();
+    json keep = {{"id", 4}, {"jsonrpc", "2.0"}, {"method", "keepalived"}, {"params", json{{"id", "00"}}}};
+    HandleLine(&cn, keep.dump(), roundShareCount, roundShareTotal, blocksFound);
+    try { submitReply = json::parse(captured); } catch (...) {}
+    check(submitReply.is_object() && submitReply["result"].value("status", "") == "KEEPALIVED",
+          "keepalived is answered");
+    gSelfTestCapture = NULL;
+    gCurrentJob.block = block;
+    gCurrentJob.jobId = "selftest";
 
     std::vector<PoolRoundProof> savedRounds = gPoolRounds;
     std::string savedRoundsFile = strPoolRoundsFile;
