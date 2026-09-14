@@ -679,6 +679,12 @@ public:
     // else is, is the only way a node can tell "in sync" from "not hearing".
     int nStartingHeight;
 
+    // Release this peer said it runs ("1.2.24"), sent after the height from
+    // 1.2.24 on. Empty for peers older than that. The protocol number above
+    // has been 101 across every release, so until this field existed no node
+    // could tell which of its peers would follow a consensus change.
+    std::string strRelease;
+
 
     CNode(SOCKET hSocketIn, CAddress addrIn, bool fInboundIn=false)
     {
@@ -709,6 +715,7 @@ public:
         strBtfAddr.clear();
         strBtfMeeting.clear();
         nStartingHeight = -1;
+        strRelease = "";
         vfSubscribe.assign(256, false);
 
         // Push a version message
@@ -717,7 +724,8 @@ public:
         // nBestHeight goes last so a node that predates it stops reading after
         // addr and treats the rest as trailing bytes, which cost it a log line
         // and nothing else.
-        PushMessage("version", VERSION, nLocalServices, nTime, addr, nBestHeight);
+        PushMessage("version", VERSION, nLocalServices, nTime, addr, nBestHeight,
+                    std::string(BITFLASH_VERSION_STRING));
     }
 
     // Disconnect() closes the socket and sets this to INVALID_SOCKET, so by the
@@ -973,6 +981,22 @@ public:
         {
             BeginMessage(pszCommand);
             vSend << a1 << a2 << a3 << a4 << a5;
+            EndMessage();
+        }
+        catch (...)
+        {
+            AbortMessage();
+            throw;
+        }
+    }
+
+    template<typename T1, typename T2, typename T3, typename T4, typename T5, typename T6>
+    void PushMessage(const char* pszCommand, const T1& a1, const T2& a2, const T3& a3, const T4& a4, const T5& a5, const T6& a6)
+    {
+        try
+        {
+            BeginMessage(pszCommand);
+            vSend << a1 << a2 << a3 << a4 << a5 << a6;
             EndMessage();
         }
         catch (...)

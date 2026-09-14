@@ -3042,6 +3042,17 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         // -- every node released so far sends the short form.
         if (!vRecv.empty())
             vRecv >> pfrom->nStartingHeight;
+        // Same rule for the release string (1.2.24+). Bounded: it is a peer's
+        // claim, and it only ever reaches a log line and the diagnostics.
+        if (!vRecv.empty())
+        {
+            try { vRecv >> pfrom->strRelease; } catch (...) { pfrom->strRelease = ""; }
+            if (pfrom->strRelease.size() > 32)
+                pfrom->strRelease.resize(32);
+            for (size_t i = 0; i < pfrom->strRelease.size(); i++)
+                if (!isprint((unsigned char)pfrom->strRelease[i]))
+                    pfrom->strRelease[i] = '?';
+        }
 
         pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
         pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
