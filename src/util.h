@@ -320,6 +320,32 @@ inline void AttachTerminal()
 #endif
 }
 
+// Line accumulator in front of a line-oriented sink (the Windows debugger).
+// Text goes in as (pointer, length); every complete line is handed to the sink
+// as soon as its '\n' is in; a tail without one waits for the next call.
+//
+// This replaces the accumulator that made a node go deaf: on a message that did
+// not fit, the old code left vsnprintf's NUL in the middle of the buffer, then
+// appended a '\n' *behind* it. strchr never saw past that NUL again, so
+// nothing drained; once the write pointer reached the last byte the remaining
+// room was computed as -1, which vsnprintf takes as SIZE_MAX, and the next
+// message was written past the array over the mutex guarding it. Every thread
+// that logged after that blocked forever (pool on the 202, 2026-09-12 23:23:
+// 35 hours with a live process, a listening stratum socket and no reply).
+//
+// Invariants here: nUsed < nCap always; nothing is kept that cannot be
+// flushed; room is unsigned and never negative; a message larger than the
+// buffer goes to the sink directly instead of into it.
+struct CDebugLineBuffer
+{
+    char*  pch;      // storage
+    size_t nCap;     // its size, including the byte reserved for the NUL
+    size_t nUsed;    // bytes pending, always < nCap
+};
+typedef void (*DebugLineSink)(const char* pszLine);
+void DebugLineAppend(CDebugLineBuffer& buf, const char* pszText, size_t nLen, DebugLineSink sink);
+void DebugLineToDebugger(const char* pszLine);
+
 inline int OutputDebugStringF(const char* pszFormat, ...) BF_FORMAT(1, 2);
 
 inline int OutputDebugStringF(const char* pszFormat, ...)
@@ -378,59 +404,35 @@ inline int OutputDebugStringF(const char* pszFormat, ...)
     }
 #endif
 
-    // accumulate a line at a time
+    // Windows debugger channel. OutputDebugStringA is line-oriented, so pieces
+    // of a line (hex dumps come one byte per call) are held back until their
+    // '\n' arrives. The accumulator lives in DebugLineAppend so the self-test
+    // can drive it against a canary; see there for the bug it replaces.
+    //
+    // Linux does not compile this at all: OutputDebugStringA is a no-op there,
+    // so the old accumulator ran on every node with no reader and one way to
+    // wedge the process.
+#ifdef _WIN32
     static CCriticalSection cs_OutputDebugStringF;
     CRITICAL_BLOCK(cs_OutputDebugStringF)
     {
-        static char pszBuffer[50000];
-        static char* pend;
-        if (pend == NULL)
-            pend = pszBuffer;
+        static char pszStorage[8192];
+        static CDebugLineBuffer buf = { pszStorage, sizeof(pszStorage), 0 };
+        char pszLine[4096];
         va_list arg_ptr;
         va_start(arg_ptr, pszFormat);
-        int limit = END(pszBuffer) - pend - 2;
-        int ret = _vsnprintf(pend, limit, pszFormat, arg_ptr);
+        int ret = _vsnprintf(pszLine, sizeof(pszLine), pszFormat, arg_ptr);
         va_end(arg_ptr);
-        if (ret < 0 || ret >= limit)
-        {
-            pend = END(pszBuffer) - 2;
-            *pend++ = '\n';
-        }
-        else
-            pend += ret;
-        *pend = '\0';
-        char* p1 = pszBuffer;
-        char* p2;
-        while (p2 = strchr(p1, '\n'))
-        {
-            p2++;
-            char c = *p2;
-            *p2 = '\0';
-            OutputDebugStringA(p1);
-            *p2 = c;
-            p1 = p2;
-        }
-        if (p1 != pszBuffer)
-            memmove(pszBuffer, p1, pend - p1 + 1);
-        pend -= (p1 - pszBuffer);
+        // MSVC-style _vsnprintf returns -1 on truncation and may leave the
+        // buffer unterminated; the debugger line is best-effort, so just cap.
+        pszLine[sizeof(pszLine) - 1] = '\0';
+        DebugLineAppend(buf, pszLine, strlen(pszLine), DebugLineToDebugger);
         return ret;
     }
 #endif
-
-    va_list arg_ptr;
-    va_start(arg_ptr, pszFormat);
-    vprintf(pszFormat, arg_ptr);
-    va_end(arg_ptr);
+#endif
     return 0;
 }
-
-
-
-
-
-
-
-
 
 inline void heapchk()
 {
