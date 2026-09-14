@@ -1168,9 +1168,10 @@ public:
 
     uint256 GetPoWHash() const
     {
-        // Memory-hard PROOF-OF-WORK hash (RandomX) over the 80-byte header.
-        // This is the one that must be <= target (nBits).
-        return RandomXPoWHash((const void*)BEGIN(nVersion), END(nNonce) - BEGIN(nVersion));
+        // Memory-hard PROOF-OF-WORK hash (RandomX) of the 80-byte header.
+        // This is the one that must be <= target (nBits). Which input and
+        // key apply depends on nTime -- see randomx_pow.h, PoW v2.
+        return PoWHashHeader((const unsigned char*)BEGIN(nVersion));
     }
 
     bool CheckSizeLimits() const

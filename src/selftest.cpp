@@ -52,6 +52,8 @@ extern int RunPoolStratumSelfTest();
 #include <sys/types.h>
 #include <unistd.h>
 #endif
+#include <randomx.h>
+#include <openssl/sha.h>
 
 static std::string HexStrLocal(const std::vector<unsigned char>& v)
 {
@@ -3348,6 +3350,96 @@ static int RunDebugLogBufferSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// PoW v2: the input a RandomX miner hashes, the key it is told, and the
+// switch by block time. The last check is the one that matters: a RandomX
+// VM created here from nothing but the 32-byte seed_hash -- which is all
+// XMRig ever gets -- must reproduce the hash consensus computes.
+static int RunPoWV2SelfTest()
+{
+    printf("pow-v2 self-test\n");
+    int nFail = 0;
+    unsigned int T = PoWV2Time();
+
+    nFail += Check(PoWVersionAt(T - 1) == 1 && PoWVersionAt(T) == 2 && PoWVersionAt(T + 1) == 2,
+                   "the switch is at the activation time, inclusive") ? 0 : 1;
+    nFail += Check(POW_V2_TIME_MAINNET > POW_V2_TIME_TESTNET,
+                   "testnet switches before mainnet") ? 0 : 1;
+
+    unsigned char hdr[80];
+    for (int i = 0; i < 80; i++) hdr[i] = (unsigned char)(0xA0 + i);
+    unsigned char in[POW_INPUT_MAX];
+    size_t n = PoWInputV2(hdr, in);
+    nFail += Check(n == 83, "the v2 input is 83 bytes") ? 0 : 1;
+    nFail += Check(memcmp(in, hdr, 36) == 0, "version and previous hash stay at 0..35") ? 0 : 1;
+    nFail += Check(in[36] == 0 && in[37] == 0 && in[38] == 0, "three zero bytes at 36..38") ? 0 : 1;
+    nFail += Check(memcmp(in + 39, hdr + 76, 4) == 0, "the nonce lands at 39..42, where XMRig writes") ? 0 : 1;
+    nFail += Check(memcmp(in + 43, hdr + 36, 32) == 0, "the merkle root follows at 43..74") ? 0 : 1;
+    nFail += Check(memcmp(in + 75, hdr + 68, 8) == 0, "time and bits close it at 75..82") ? 0 : 1;
+
+    // version selection reads the header's own nTime
+    unsigned char h1[80], h2[80];
+    memcpy(h1, hdr, 80); memcpy(h2, hdr, 80);
+    unsigned int t1 = T - 1, t2 = T;
+    memcpy(h1 + 68, &t1, 4); memcpy(h2 + 68, &t2, 4);
+    int v = 0;
+    unsigned char out[POW_INPUT_MAX];
+    size_t n1 = PoWInputFromHeader(h1, out, &v);
+    nFail += Check(n1 == 80 && v == 1 && memcmp(out, h1, 80) == 0, "a pre-switch header hashes as itself (v1)") ? 0 : 1;
+    size_t n2 = PoWInputFromHeader(h2, out, &v);
+    nFail += Check(n2 == 83 && v == 2, "a post-switch header hashes as the v2 input") ? 0 : 1;
+
+    // the seed is SHA-256 of the v1 key string, 32 bytes
+    unsigned char want[32];
+    const char* k1 = "Bitflash/RandomX/v1/one-cpu-one-vote";
+    SHA256((const unsigned char*)k1, strlen(k1), want);
+    nFail += Check(memcmp(PoWSeedV2(), want, 32) == 0 && PoWSeedV2Hex().size() == 64,
+                   "the v2 seed is SHA-256 of the v1 key, 64 hex chars") ? 0 : 1;
+
+    // consensus hash of each side of the switch equals the raw call
+    uint256 c1 = PoWHashHeader(h1);
+    uint256 c2 = PoWHashHeader(h2);
+    nFail += Check(c1 == RandomXPoWHash(1, h1, 80), "v1 consensus hash is RandomX(v1 key, header)") ? 0 : 1;
+    unsigned char in2[POW_INPUT_MAX];
+    PoWInputV2(h2, in2);
+    nFail += Check(c2 == RandomXPoWHash(2, in2, 83), "v2 consensus hash is RandomX(v2 key, v2 input)") ? 0 : 1;
+    nFail += Check(c1 != c2 && c1 != 0 && c2 != 0, "the two sides of the switch hash differently") ? 0 : 1;
+
+    // a miner VM keyed for v2 agrees with the verifier
+    void* vm = RandomXCreateMinerVM(2);
+    nFail += Check(vm != NULL && PoWHashHeaderWithVM(vm, h2) == c2, "a v2 miner VM agrees with the verifier") ? 0 : 1;
+    RandomXDestroyMinerVM(vm);
+
+    // Independent: RandomX from scratch with only the seed, over the blob.
+    // This is exactly what XMRig does with the job it is sent.
+    randomx_flags flags = randomx_get_flags();
+    randomx_cache* cache = randomx_alloc_cache(flags);
+    bool fIndependent = false;
+    if (cache) {
+        randomx_init_cache(cache, PoWSeedV2(), 32);
+        randomx_vm* xvm = randomx_create_vm(flags, cache, NULL);
+        if (xvm) {
+            unsigned char hash[32];
+            randomx_calculate_hash(xvm, in2, 83, hash);
+            fIndependent = memcmp(hash, &c2, 32) == 0;
+            // and the nonce at 39 is what moves the hash
+            unsigned char in3[POW_INPUT_MAX];
+            memcpy(in3, in2, 83);
+            in3[39] ^= 0x01;
+            unsigned char hash3[32];
+            randomx_calculate_hash(xvm, in3, 83, hash3);
+            fIndependent = fIndependent && memcmp(hash3, hash, 32) != 0;
+            randomx_destroy_vm(xvm);
+        }
+        randomx_release_cache(cache);
+    }
+    nFail += Check(fIndependent, "a fresh RandomX keyed by seed_hash alone reproduces the consensus hash") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static bool SelfTestReadN(SOCKET s, void* buf, int n)
 {
     char* p = (char*)buf;
@@ -3737,12 +3829,14 @@ int RunSelfTest(const std::string& name)
         return RunParseMoneySelfTest();
     if (name == "debug-log-buffer")
         return RunDebugLogBufferSelfTest();
+    if (name == "pow-v2")
+        return RunPoWV2SelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, socks5-proxy, managed-tor\n");
     return 1;
 }

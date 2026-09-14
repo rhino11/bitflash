@@ -355,13 +355,17 @@ string GetDiagnosticsText()
         str += "  blocks received   0\n";
 
     int nMining = MinersRunningCount();
-    str += strprintf("  proof of work     %s mode%s\n",
-                     RandomXFastReady() ? "fast (2 GB dataset)" : "light (256 MB cache)",
+    int nPoWNow = PoWVersionAt(GetAdjustedTime());
+    str += strprintf("  proof of work     v%d, %s mode%s\n", nPoWNow,
+                     RandomXFastReady(nPoWNow) ? "fast (2 GB dataset)" : "light (256 MB cache)",
                      nMining > 0
                          ? strprintf(", mining on %d thread(s), about %d MB",
                                      nMining,
-                                     (RandomXFastReady() ? 2080 : 256) + 2 * nMining).c_str()
+                                     (RandomXFastReady(nPoWNow) ? 2080 : 256) + 2 * nMining).c_str()
                          : ", not mining");
+    if (nPoWNow == 1)
+        str += strprintf("  PoW v2 switch     block time %u; RandomX miners (xmrig) from then on\n",
+                         PoWV2Time());
     str += strprintf("  large pages       %s\n", RandomXLargePagesStatus());
 
     str += SockAccountingText();
