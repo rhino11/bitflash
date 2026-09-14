@@ -3250,6 +3250,104 @@ static int RunParseMoneySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static std::vector<std::string> g_debugLinesSeen;
+static void SelfTestDebugLineSink(const char* pszLine) { g_debugLinesSeen.push_back(pszLine); }
+
+// The accumulator in front of OutputDebugStringA. Driven here against a small
+// buffer with a canary behind it, through the exact sequence that overflowed
+// the real one: a pending tail, a message that does not fit, then more
+// messages. The old code left an unreachable NUL in the buffer at step two,
+// never drained again, and at the first message after the buffer filled
+// wrote past the array (util.h has the full story).
+static int RunDebugLogBufferSelfTest()
+{
+    printf("debug-log-buffer self-test\n");
+    int nFail = 0;
+
+    const size_t CAP = 64;
+    const size_t GUARD = 32;
+    std::vector<char> storage(CAP + GUARD, (char)0xEE);
+    CDebugLineBuffer buf = { &storage[0], CAP, 0 };
+    std::vector<std::string>& seen = g_debugLinesSeen;
+
+    #define CANARY_OK() ([&]{ for (size_t k = CAP; k < CAP + GUARD; k++) if (storage[k] != (char)0xEE) return false; return true; }())
+    #define FEED(str) DebugLineAppend(buf, str, strlen(str), SelfTestDebugLineSink)
+
+    // 1. pieces of a line are held until the '\n', then delivered as one
+    seen.clear();
+    FEED("received: inv (37 bytes)  ");
+    FEED("01 ");
+    FEED("02 ");
+    nFail += Check(seen.empty(), "pieces without a newline are held back") ? 0 : 1;
+    FEED("\n");
+    nFail += Check(seen.size() == 1 && seen[0] == "received: inv (37 bytes)  01 02 \n",
+                   "the newline delivers the assembled line") ? 0 : 1;
+    nFail += Check(buf.nUsed == 0, "nothing pending after a complete line") ? 0 : 1;
+
+    // 2. two lines in one message, plus a tail
+    seen.clear();
+    FEED("a\nb\nc");
+    nFail += Check(seen.size() == 2 && seen[0] == "a\n" && seen[1] == "b\n",
+                   "every complete line in a message is delivered") ? 0 : 1;
+    nFail += Check(buf.nUsed == 1 && storage[0] == 'c', "the tail waits at the front") ? 0 : 1;
+
+    // 3. the wedge sequence: 40 pending bytes, then a message that does not fit
+    seen.clear();
+    buf.nUsed = 0;
+    std::string tail(40, 't');
+    FEED(tail.c_str());
+    std::string big(50, 'B');
+    FEED(big.c_str());
+    nFail += Check(seen.size() == 1 && seen[0] == tail,
+                   "a message that does not fit flushes the pending tail as it is") ? 0 : 1;
+    nFail += Check(buf.nUsed == 50, "the new message is pending in full") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact after the overflowing message") ? 0 : 1;
+    // the old code never recovered from here; this must keep draining
+    seen.clear();
+    FEED("\n");
+    nFail += Check(seen.size() == 1 && seen[0] == big + "\n" && buf.nUsed == 0,
+                   "the buffer keeps draining afterwards") ? 0 : 1;
+
+    // 4. exactly the room left, off by one each way
+    seen.clear();
+    buf.nUsed = 0;
+    std::string fill(CAP - 2, 'f');          // fits: leaves the NUL byte
+    FEED(fill.c_str());
+    nFail += Check(seen.empty() && buf.nUsed == CAP - 2, "a message of exactly the room fits") ? 0 : 1;
+    FEED("x");                               // one more does not
+    nFail += Check(seen.size() == 1 && seen[0] == fill && buf.nUsed == 1,
+                   "one byte over the room flushes and starts over") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact at the boundary") ? 0 : 1;
+
+    // 5. a message larger than the whole buffer goes straight through
+    seen.clear();
+    buf.nUsed = 0;
+    std::string huge(CAP * 3, 'H');
+    FEED(huge.c_str());
+    nFail += Check(seen.size() == 1 && seen[0] == huge && buf.nUsed == 0,
+                   "a message larger than the buffer is delivered directly") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact after the oversize message") ? 0 : 1;
+
+    // 6. the long run: a full buffer's worth of traffic, many times over
+    seen.clear();
+    for (int i = 0; i < 20000; i++)
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "line %d of %s\n", i, i % 7 == 0 ? "something longer than usual here" : "x");
+        FEED(line);
+    }
+    nFail += Check(seen.size() == 20000, "20000 lines in, 20000 lines out") ? 0 : 1;
+    nFail += Check(buf.nUsed == 0 && CANARY_OK(), "nothing pending and canary intact after the long run") ? 0 : 1;
+
+    #undef FEED
+    #undef CANARY_OK
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static bool SelfTestReadN(SOCKET s, void* buf, int n)
 {
     char* p = (char*)buf;
@@ -3637,12 +3735,14 @@ int RunSelfTest(const std::string& name)
         return RunPoolStratumSelfTest();
     if (name == "parse-money")
         return RunParseMoneySelfTest();
+    if (name == "debug-log-buffer")
+        return RunDebugLogBufferSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, socks5-proxy, managed-tor\n");
     return 1;
 }

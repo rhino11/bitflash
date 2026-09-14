@@ -119,7 +119,8 @@ static void PrintUsage()
     printf("            wallet-crypto, wallet-encrypt, wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
-    printf("            parse-money, network-params, socks5-proxy, or managed-tor\n");
+    printf("            parse-money, debug-log-buffer, network-params, socks5-proxy,\n");
+    printf("            or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");

@@ -197,6 +197,7 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=consensus-limits
 	./bitflash-node -selftest=pool-stratum
 	./bitflash-node -selftest=parse-money
+	./bitflash-node -selftest=debug-log-buffer
 	./bitflash-node -selftest=socks5-proxy
 	./bitflash-node -selftest=managed-tor
 

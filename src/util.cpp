@@ -438,6 +438,56 @@ uint64 GetRand(uint64 nMax)
 
 
 
+void DebugLineAppend(CDebugLineBuffer& buf, const char* pszText, size_t nLen, DebugLineSink sink)
+{
+    // Room behind what is pending, keeping one byte for the NUL.
+    if (nLen >= buf.nCap - 1 - buf.nUsed)
+    {
+        // Does not fit behind the pending tail: let the tail go as it is,
+        // unfinished, rather than keep anything the flush cannot reach.
+        buf.pch[buf.nUsed] = '\0';
+        if (buf.nUsed > 0)
+            sink(buf.pch);
+        buf.nUsed = 0;
+    }
+    if (nLen >= buf.nCap - 1)
+    {
+        // Larger than the whole buffer: hand it over directly.
+        std::string strLine(pszText, nLen);
+        sink(strLine.c_str());
+        return;
+    }
+
+    memcpy(buf.pch + buf.nUsed, pszText, nLen);
+    buf.nUsed += nLen;
+    buf.pch[buf.nUsed] = '\0';
+
+    // Emit every complete line, then slide the unfinished tail to the front.
+    size_t nStart = 0;
+    for (size_t i = 0; i < buf.nUsed; i++)
+    {
+        if (buf.pch[i] != '\n')
+            continue;
+        char c = buf.pch[i + 1];
+        buf.pch[i + 1] = '\0';
+        sink(buf.pch + nStart);
+        buf.pch[i + 1] = c;
+        nStart = i + 1;
+    }
+    if (nStart > 0)
+    {
+        memmove(buf.pch, buf.pch + nStart, buf.nUsed - nStart + 1);
+        buf.nUsed -= nStart;
+    }
+}
+
+void DebugLineToDebugger(const char* pszLine)
+{
+    OutputDebugStringA(pszLine);
+}
+
+
+
 //
 // "Never go to sea with two chronometers; take one or three."
 // Our three chronometers are:
