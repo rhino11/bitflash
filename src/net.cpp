@@ -411,7 +411,7 @@ string GetDiagnosticsText()
     if (!strLastHandshakeTimeout.empty())
         str += strprintf("  last handshake    %s\n", strLastHandshakeTimeout.c_str());
 
-    str += "\n  peer                          dir  height   last recv   last send   unsent  via\n";
+    str += "\n  peer                          dir  height  release   last recv   last send   unsent  via\n";
     foreach(CNode* pnode, vCopy)
     {
         int nSendSize = 0;
@@ -420,10 +420,11 @@ string GetDiagnosticsText()
         string strVia;
         if (!pnode->strBtfMeeting.empty())
             strVia = pnode->strBtfMeeting;
-        str += strprintf("  %-28s %-4s %6d  %10s  %10s  %7d  %s\n",
+        str += strprintf("  %-28s %-4s %6d  %-8s  %10s  %10s  %7d  %s\n",
                          pnode->addr.ToString().substr(0, 28).c_str(),
                          pnode->fInbound ? "in" : "out",
                          pnode->nStartingHeight,
+                         pnode->strRelease.empty() ? "<=1.2.23" : pnode->strRelease.substr(0, 8).c_str(),
                          FormatAge(pnode->nLastRecv ? nNow - pnode->nLastRecv : -1).c_str(),
                          FormatAge(pnode->nLastSend ? nNow - pnode->nLastSend : -1).c_str(),
                          nSendSize,
