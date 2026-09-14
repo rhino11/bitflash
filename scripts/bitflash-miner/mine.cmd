@@ -73,11 +73,29 @@ if not exist tor-data mkdir tor-data
 echo.
 echo   Starting Tor (own instance, SOCKS on %SOCKS%)...
 start "Bitflash Miner - Tor" /min tor\tor.exe --SocksPort %SOCKS% --DataDirectory tor-data --PidFile tor-data\tor.pid --Log "notice file tor-data\tor.log" --ClientOnly 1
-echo   Tor bootstraps in 10-60 s; XMRig retries until it is through.
 echo   Pool: %POOL%
 echo   Address: %ADDR%
 echo.
 
+rem Give Tor time to open its SOCKS port before XMRig starts knocking on it,
+rem so the first thing on screen is not a red "connection refused".
+set /a WAITED=0
+:waittor
+netstat -an | find "127.0.0.1:%SOCKS:~10%" >nul 2>&1
+if not errorlevel 1 goto torup
+if %WAITED% geq 60 (
+  echo   Tor did not open %SOCKS% in 60 s. See tor-data\tor.log and the
+  echo   "Bitflash Miner - Tor" window. Starting XMRig anyway; it retries.
+  goto start_xmrig
+)
+ping -n 3 127.0.0.1 >nul
+set /a WAITED+=2
+goto waittor
+:torup
+echo   Tor is listening on %SOCKS%; it finishes bootstrapping in the background.
+echo.
+
+:start_xmrig
 xmrig\xmrig.exe -a rx/0 -x %SOCKS% -o %POOL% -u %ADDR% -p x --retries=100000 --retry-pause=5 %EXTRA%
 
 rem XMRig exited (Ctrl+C or error): stop our Tor, and only ours.
