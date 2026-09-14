@@ -307,8 +307,10 @@ See [public pool directory](docs/pool-directory.md) for the website/API shape.
 
 ### Mining with ordinary software
 
-You do not need Bitflash installed to mine it. There is a public pool, and any
-RandomX miner reaches it the way it reaches any other pool:
+From **PoW v2** — mainnet at block time 1789992000 (2026-09-21 12:00 UTC),
+testnet at 1789419600 (2026-09-14 21:00 UTC) — you do not need Bitflash
+installed to mine it. There is a public pool, and any RandomX miner reaches it
+the way it reaches any other pool:
 
 ```bash
 xmrig -a rx/0 -o pool.bitflash.network:3333 -u YOUR_BTF_ADDRESS -p x
@@ -316,7 +318,21 @@ SRBMiner-MULTI --algorithm randomx --pool pool.bitflash.network:3333 --wallet YO
 ```
 
 `YOUR_BTF_ADDRESS` is a Bitflash payment address, the kind `-newaddress` prints
-— not a `.btf` node address. The pool pays out to it. Fee 1%.
+— not a `.btf` node address. The pool pays out to it. Fee 1%. To try it before
+mainnet switches, the testnet pool is on port `3334` and pays a testnet address.
+
+Before the switch the pool refuses these miners with a message that names the
+activation time. Until then, and for anyone who prefers the node's own miner,
+Bitflash mines to the same pool over Tor with no bridge at all:
+
+```bash
+./bitflash -participant=ygnbd2zwq5wllaafopxa7ccnvnwuen75qt6rqco3x4bx3mfiorbaxei.btf
+```
+
+Why a switch was needed, and what a pool has to send, is in
+[docs/pow-v2.md](docs/pow-v2.md). The 1.2.23 release and earlier could not be
+mined by XMRig at all — the README of that release said otherwise, and it was
+wrong.
 
 What is on the other end of that port is a **stratum bridge**: a small node on a
 public host that forwards your connection over Tor to the pool, which itself
