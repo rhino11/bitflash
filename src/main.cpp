@@ -3544,7 +3544,7 @@ static bool StratumSendLine(SOCKET s, const json& j)
     std::string line = j.dump() + "\n";
     int sent = 0, total = (int)line.size();
     while (sent < total) {
-        int r = send(s, line.c_str()+sent, total-sent, 0);
+        int r = send(s, line.c_str()+sent, total-sent, BTF_SEND_FLAGS);
         if (r <= 0) return false;
         sent += r;
     }
@@ -4007,7 +4007,7 @@ static bool BridgeSendAll(SOCKET s, const char* p, int n)
     int off = 0;
     while (off < n)
     {
-        int r = send(s, p + off, n - off, 0);
+        int r = send(s, p + off, n - off, BTF_SEND_FLAGS);
         if (r <= 0)
             return false;
         off += r;

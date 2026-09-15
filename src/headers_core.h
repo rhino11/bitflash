@@ -27,6 +27,20 @@ inline int _mkdir(const char* p) { return ::mkdir(p); }
 #include "compat.h"
 #endif
 
+// Flag for send() to any socket. On POSIX a write to a peer that has closed
+// raises SIGPIPE, whose default action ends the process with no core and no
+// log line; MSG_NOSIGNAL turns that into EPIPE, which every send path already
+// treats as "gone". Windows raises no signal and has no flag. main() also
+// ignores SIGPIPE outright, for the writes that do not go through send() --
+// OpenSSL's, on the Nostr connections. Reported, with the first patch, by
+// mischelf.
+#ifdef _WIN32
+#define BTF_SEND_FLAGS 0
+#else
+#define BTF_SEND_FLAGS MSG_NOSIGNAL
+#endif
+
+
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
 #include <openssl/rand.h>

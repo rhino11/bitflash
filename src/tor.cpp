@@ -228,7 +228,7 @@ static bool SendAll(SOCKET s, const std::string& data)
     int left = (int)data.size();
     while (left > 0)
     {
-        int n = send(s, p, left, 0);
+        int n = send(s, p, left, BTF_SEND_FLAGS);
         if (n <= 0)
             return false;
         p += n;
