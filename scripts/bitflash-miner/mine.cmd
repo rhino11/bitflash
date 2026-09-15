@@ -39,6 +39,13 @@ for /f "tokens=1,* delims= " %%a in ("%LINE%") do (
   set ADDR=%%a
   set REST=%%b
 )
+if not "%REST%"=="" goto have_addr
+echo.
+echo   Which network? Mainnet is the real coin (RandomX miners from 2026-09-21
+echo   12:00 UTC). Testnet is for trying it out; it needs a testnet address.
+set /p NET=  network [mainnet/testnet] (Enter = mainnet):
+if /i "%NET%"=="testnet" set REST=testnet
+if /i "%NET%"=="t" set REST=testnet
 goto have_addr
 
 :from_args
