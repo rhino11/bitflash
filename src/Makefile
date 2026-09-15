@@ -52,7 +52,7 @@ LIBS = -L$(SECP_LIB) -lsecp256k1 \
 # binary. Nothing crashed here, and nothing would say so if it had.
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
-          randomx_pow.h btfaddr.h btfchan.h btfsock.h market.h \
+          randomx_pow.h consensus.h btfaddr.h btfchan.h btfsock.h market.h \
           selftest.h walletcmd.h wallet_sqlite.h compat.h sockcount.h proxy.h tor.h font_roboto.h
 
 IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
@@ -201,6 +201,7 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=pow-v2
 	./bitflash-node -selftest=sigpipe
 	./bitflash-node -selftest=script-eval
+	./bitflash-node -selftest=rules-v2
 	./bitflash-node -selftest=socks5-proxy
 	./bitflash-node -selftest=managed-tor
 

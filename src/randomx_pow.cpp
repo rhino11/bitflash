@@ -42,6 +42,16 @@ unsigned int PoWV2Time()
     return IsTestNet() ? POW_V2_TIME_TESTNET : POW_V2_TIME_MAINNET;
 }
 
+unsigned int RulesV2Time()
+{
+    return IsTestNet() ? RULES_V2_TIME_TESTNET : RULES_V2_TIME_MAINNET;
+}
+
+bool RulesV2Active(unsigned int nBlockTime)
+{
+    return nBlockTime >= RulesV2Time();
+}
+
 int PoWVersionAt(unsigned int nTime)
 {
     return nTime >= PoWV2Time() ? 2 : 1;

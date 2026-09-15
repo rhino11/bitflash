@@ -3176,6 +3176,176 @@ static CBlock MakeSizedConsensusBlock(size_t nScriptBytes)
     return block;
 }
 
+// Turn a low-S DER signature (with hash-type byte) into its high-S twin:
+// S' = n - S. Verifies against the same key and hash; only the encoding
+// rules tell them apart.
+static std::vector<unsigned char> HighSTwin(const std::vector<unsigned char>& sig)
+{
+    static const unsigned char order[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41 };
+    unsigned int lenR = sig[3];
+    unsigned int lenS = sig[5 + lenR];
+    BIGNUM* n = BN_bin2bn(order, 32, NULL);
+    BIGNUM* s = BN_bin2bn(&sig[6 + lenR], lenS, NULL);
+    BIGNUM* t = BN_new();
+    BN_sub(t, n, s);
+    std::vector<unsigned char> S(BN_num_bytes(t));
+    BN_bn2bin(t, &S[0]);
+    if (S[0] & 0x80) S.insert(S.begin(), 0x00);          // DER positive
+    BN_free(n); BN_free(s); BN_free(t);
+    std::vector<unsigned char> out;
+    out.push_back(0x30); out.push_back((unsigned char)(lenR + S.size() + 4));
+    out.push_back(0x02); out.push_back((unsigned char)lenR);
+    out.insert(out.end(), sig.begin() + 4, sig.begin() + 4 + lenR);
+    out.push_back(0x02); out.push_back((unsigned char)S.size());
+    out.insert(out.end(), S.begin(), S.end());
+    out.push_back(sig.back());                            // hash type
+    return out;
+}
+
+// Rules v2, each rule with a case it accepts and a case it refuses.
+static int RunRulesV2SelfTest()
+{
+    printf("rules-v2 self-test\n");
+    int nFail = 0;
+    unsigned int T = RulesV2Time();
+    nFail += Check(RULES_V2_TIME_TESTNET < RULES_V2_TIME_MAINNET, "testnet switches before mainnet") ? 0 : 1;
+    nFail += Check(RULES_V2_TIME_MAINNET == POW_V2_TIME_MAINNET, "on mainnet rules v2 and PoW v2 switch together") ? 0 : 1;
+    nFail += Check(!RulesV2Active(T - 1) && RulesV2Active(T), "the switch is at the activation time, inclusive") ? 0 : 1;
+
+    // ---- signatures: strict DER, low S, and the wallet producing them
+    CKey key; key.MakeNewKey();
+    CTransaction txFrom;
+    txFrom.vout.resize(1);
+    txFrom.vout[0].nValue = 1 * COIN;
+    txFrom.vout[0].scriptPubKey << OP_DUP << OP_HASH160 << Hash160(key.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+    CTransaction txTo;
+    txTo.vin.resize(1);
+    txTo.vin[0].prevout = COutPoint(txFrom.GetHash(), 0);
+    txTo.vout.resize(1);
+    txTo.vout[0].nValue = 1 * COIN;
+    uint256 hash = SignatureHash(txFrom.vout[0].scriptPubKey, txTo, 0, SIGHASH_ALL);
+
+    int nLow = 0, nDer = 0, nSigs = 200;
+    std::vector<unsigned char> vchSig;
+    for (int i = 0; i < nSigs; i++)
+    {
+        std::vector<unsigned char> s;
+        if (!key.Sign(hash, s)) break;
+        s.push_back((unsigned char)SIGHASH_ALL);
+        if (IsStrictDERSignature(s)) nDer++;
+        if (IsLowSSignature(s)) nLow++;
+        vchSig = s;
+    }
+    nFail += Check(nDer == nSigs, "every signature the wallet makes is strict DER") ? 0 : 1;
+    nFail += Check(nLow == nSigs, "every signature the wallet makes is low S (200 of 200)") ? 0 : 1;
+
+    std::vector<unsigned char> vchHigh = HighSTwin(vchSig);
+    nFail += Check(IsStrictDERSignature(vchHigh) && !IsLowSSignature(vchHigh),
+                   "the high-S twin is well-formed DER but not low S") ? 0 : 1;
+    {
+        std::vector<unsigned char> a(vchSig.begin(), vchSig.end() - 1), b(vchHigh.begin(), vchHigh.end() - 1);
+        nFail += Check(key.Verify(hash, a) && key.Verify(hash, b),
+                       "ECDSA itself accepts both twins -- which is the problem") ? 0 : 1;
+    }
+    txTo.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
+    nFail += Check(VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, true), "the low-S spend verifies under rules v2") ? 0 : 1;
+    txTo.vin[0].scriptSig = CScript() << vchHigh << key.GetPubKey();
+    nFail += Check(VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, false), "the high-S twin verifies under the old rules") ? 0 : 1;
+    nFail += Check(!VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, true), "the high-S twin is refused under rules v2") ? 0 : 1;
+    {
+        // a DER shape OpenSSL tolerates and BIP66 does not: a padded R
+        std::vector<unsigned char> pad = vchSig;
+        pad.insert(pad.begin() + 4, 0x00); pad[3]++; pad[1]++;
+        nFail += Check(!IsStrictDERSignature(pad), "a signature with a padded R is not strict DER") ? 0 : 1;
+        std::vector<unsigned char> neg = vchSig;
+        neg[4] |= 0x80;
+        nFail += Check(!IsStrictDERSignature(neg), "a signature with a negative R is not strict DER") ? 0 : 1;
+    }
+
+    // ---- BIP34: the coinbase this tree's miners write starts with the height
+    {
+        int nHeight = 35061;
+        CScript cb; cb << nHeight << 0x1d00ffff << CBigNum(7);
+        CScript expect = CScript() << nHeight;
+        nFail += Check(cb.size() >= expect.size() && std::equal(expect.begin(), expect.end(), cb.begin()),
+                       "a coinbase written as <height nBits extranonce> starts with the height") ? 0 : 1;
+        CScript old; old << 0x1d00ffff << CBigNum(7);
+        nFail += Check(!(old.size() >= expect.size() && std::equal(expect.begin(), expect.end(), old.begin())),
+                       "a coinbase without the height does not") ? 0 : 1;
+        CScript wrong = CScript() << (nHeight + 1);
+        nFail += Check(!std::equal(wrong.begin(), wrong.end(), cb.begin()),
+                       "a coinbase with the wrong height does not") ? 0 : 1;
+    }
+
+    // ---- retarget: the window covers nInterval intervals from rules v2 on
+    {
+        // 31 blocks, 120 s apart, except the boundary interval, which is
+        // 3600 s wide. Old window (29 intervals) never sees it; the v2
+        // window (30) does, so the two disagree -- and only v2 is right
+        // about how long the 30 blocks actually took.
+        std::vector<CBlockIndex*> v;
+        unsigned int nBits = 0x1e0fffff;            // well inside the limit, so easing is visible
+        for (int i = 0; i < 31; i++)
+        {
+            CBlockIndex* p = new CBlockIndex();
+            p->nHeight = 29 + i;                    // last is height 59 -> next is 60, a retarget
+            p->nBits = nBits;
+            p->pprev = i ? v.back() : NULL;
+            v.push_back(p);
+        }
+        // times: block 0 at t0, block 1 at t0+3600 (the wide interval), then +120 each
+        unsigned int t0 = T + 100000;
+        v[0]->nTime = t0;
+        for (int i = 1; i < 31; i++) v[i]->nTime = v[i-1]->nTime + (i == 1 ? 3600 : 120);
+        unsigned int nV2 = GetNextWorkRequired(v.back());
+        // the same chain, dated before the switch: old window
+        for (int i = 0; i < 31; i++) v[i]->nTime -= 200000;
+        unsigned int nV1 = GetNextWorkRequired(v.back());
+        nFail += Check(nV1 != nV2, "the retarget window changes at the switch") ? 0 : 1;
+        // v2: actual = 29*120 + 3600 = 7080 > target 3600 -> easier (bigger target)
+        nFail += Check(CBigNum().SetCompact(nV2) > CBigNum().SetCompact(nBits),
+                       "rules v2 sees the slow boundary interval and eases difficulty") ? 0 : 1;
+        // v1: actual = 29*120 = 3480 < 3600 -> slightly harder
+        nFail += Check(CBigNum().SetCompact(nV1) < CBigNum().SetCompact(nBits),
+                       "the old window misses it and tightens instead") ? 0 : 1;
+        for (size_t i = 0; i < v.size(); i++) delete v[i];
+    }
+
+    // ---- relay policy
+    {
+        CTransaction tx = txTo;
+        tx.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
+        tx.vout[0].scriptPubKey = txFrom.vout[0].scriptPubKey;
+        nFail += Check(tx.IsStandard(), "a wallet-shaped transaction is standard") ? 0 : 1;
+        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0x42);
+        nFail += Check(!t2.IsStandard(), "an OP_RETURN output is not relayed") ? 0 : 1;
+        CTransaction t3 = tx; t3.vout[0].scriptPubKey = CScript() << OP_1 << OP_CHECKSIG << OP_CHECKSIG;
+        nFail += Check(!t3.IsStandard(), "an output built from bare operators is not relayed") ? 0 : 1;
+        CTransaction t4 = tx; t4.vin[0].scriptSig = CScript() << OP_1 << OP_DROP << vchSig << key.GetPubKey();
+        nFail += Check(!t4.IsStandard(), "a scriptSig with an operator is not relayed") ? 0 : 1;
+        CTransaction t5 = tx;
+        for (int i = 0; i < 3000; i++) t5.vout.push_back(txFrom.vout[0]);
+        nFail += Check(!t5.IsStandard(), "a transaction over 100 kB is not relayed") ? 0 : 1;
+        nFail += Check(MAX_MEMPOOL_TRANSACTIONS >= 1000, "the mempool ceiling leaves room for real traffic") ? 0 : 1;
+    }
+
+    // ---- the clock: peers may nudge it, not set it (last: it moves this process's clock)
+    {
+        int64 before = GetAdjustedTime() - GetTime();
+        for (unsigned int ip = 0x0a000001; ip < 0x0a000006; ip++)
+            AddTimeData(ip, GetTime() + 5 * 3600);       // five peers, all 5 h ahead
+        int64 after = GetAdjustedTime() - GetTime();
+        nFail += Check(before == 0 && after == 0, "five peers five hours ahead move the clock by nothing") ? 0 : 1;
+    }
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 // The script interpreter against the ways a scriptSig can try to skip the
 // scriptPubKey it is supposed to satisfy. scriptSig and scriptPubKey run as
 // one concatenated script (0.1.0), so anything in the scriptSig that changes
@@ -3967,12 +4137,14 @@ int RunSelfTest(const std::string& name)
         return RunSigpipeSelfTest();
     if (name == "script-eval")
         return RunScriptEvalSelfTest();
+    if (name == "rules-v2")
+        return RunRulesV2SelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, socks5-proxy, managed-tor\n");
     return 1;
 }

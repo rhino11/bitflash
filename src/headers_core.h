@@ -84,6 +84,7 @@ inline typename std::common_type<T1,T2>::type max(const T1& a, const T2& b)
 #include "net.h"
 #include "nostr.h"
 #include "randomx_pow.h"
+#include "consensus.h"
 #include "main.h"
 #include "market.h"
 

@@ -352,6 +352,10 @@ Why a switch was needed, and what a pool has to send, is in
 mined by XMRig at all — the README of that release said otherwise, and it was
 wrong.
 
+The same switch brings the consensus rules Bitcoin adopted after 0.1.0 —
+strict DER and low-S signatures, the height in every coinbase, the retarget
+window that measures what it divides by — see [docs/rules-v2.md](docs/rules-v2.md).
+
 A node can also act as a local stratum bridge for a pool, for miners that
 cannot be given a proxy:
 
