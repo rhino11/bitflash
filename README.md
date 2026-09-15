@@ -309,8 +309,21 @@ See [public pool directory](docs/pool-directory.md) for the website/API shape.
 
 From **PoW v2** — mainnet at block time 1789992000 (2026-09-21 12:00 UTC),
 testnet at 1789419600 (2026-09-14 21:00 UTC) — you do not need Bitflash
-installed to mine it. The pool lives behind a Tor hidden service like every
-node on this network, and XMRig has spoken Tor on its own since 5.7.0: run Tor
+installed to mine it. Download **Bitflash Miner** from the releases page
+(`Bitflash-Miner-*-windows.zip` or `-linux.tar.gz`): it is the official XMRig
+build plus a Tor client and a launcher.
+
+```
+mine.cmd YOUR_BTF_ADDRESS        Windows
+./mine.sh YOUR_BTF_ADDRESS       Linux
+```
+
+It starts a private Tor and runs XMRig through it to the pool's onion; Ctrl+C
+stops both. Double-clicked, it asks for the address. Antivirus products flag
+XMRig everywhere — the binary is unchanged, and its hash matches the one on
+XMRig's release page.
+
+Or bring your own XMRig, which has spoken Tor on its own since 5.7.0: run Tor
 (the Tor Browser, open, is enough — its SOCKS port is 9150; a `tor` daemon
 listens on 9050) and point the miner at the pool's onion through it:
 
@@ -318,18 +331,13 @@ listens on 9050) and point the miner at the pool's onion through it:
 xmrig -a rx/0 -x 127.0.0.1:9150 -o mddjuyuctouv62eqdaofvwf4timxxmp72d2ghmc6qp5mdey6f5au56id.onion:8436 -u YOUR_BTF_ADDRESS -p x
 ```
 
-Nothing in that path touches the clear net. `YOUR_BTF_ADDRESS` is a Bitflash
-payment address, the kind `-newaddress` prints — not a `.btf` node address.
-The pool pays out to it. Fee 1%. SRBMiner-MULTI takes the same onion with
-`--pool` and its own proxy option.
-
-For miners without Tor there is a clearnet door, `pool.bitflash.network:3333`,
-a small relay on a rented host that forwards to the same onion. It holds no
-wallet and no key, it is the one piece of this network on a public IP, and it
-is a convenience that may be switched off; the onion is the address that
-lasts. To try PoW v2 before mainnet switches, the testnet pool is at
-`vocwzaqll3vzuvs4nkva5fxh6q5odlokkqvfc2uvhcjtmjlygae5l4id.onion:18438` (door:
-port `3334`) and pays a testnet address.
+The pool lives behind a Tor hidden service like every node on this network,
+and nothing in either path touches the clear net; there is no public IP
+anywhere in it to switch off. `YOUR_BTF_ADDRESS` is a Bitflash payment
+address, the kind `-newaddress` prints — not a `.btf` node address. The pool
+pays out to it. Fee 1%. To try PoW v2 before mainnet switches, the testnet
+pool is `vocwzaqll3vzuvs4nkva5fxh6q5odlokkqvfc2uvhcjtmjlygae5l4id.onion:18438`
+(`testnet` as the launcher's second word) and pays a testnet address.
 
 Before the switch the pool refuses these miners with a message that names the
 activation time. Until then, and for anyone who prefers the node's own miner,
@@ -344,7 +352,8 @@ Why a switch was needed, and what a pool has to send, is in
 mined by XMRig at all — the README of that release said otherwise, and it was
 wrong.
 
-Any node can be a clearnet door for any pool, including your own:
+A node can also act as a local stratum bridge for a pool, for miners that
+cannot be given a proxy:
 
 ```bash
 ./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS -stratumbridgeport=3333
@@ -352,7 +361,7 @@ xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ```
 
 `-stratumbridgebind=0.0.0.0` opens it to the network; it stays on loopback
-unless asked.
+unless asked. Bitflash itself runs no public bridge.
 
 Estimate rewards and electricity cost locally:
 
