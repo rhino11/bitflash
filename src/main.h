@@ -33,6 +33,12 @@ static const unsigned int MAX_BLOCK_SIGOPS = 20000;
 // limit (32 MB), not a block rule. Bitcoin 0.1.0 predated the later 1 MB block
 // cap, so this tree inherited no real block-size consensus limit.
 static const unsigned int MAX_BLOCK_SIZE = 1000000;
+// Relay policy (not consensus): the largest transaction this node passes on,
+// and how many it holds waiting for a block before it starts asking for the
+// base fee. Both had no ceiling in 0.1.0: a flood of free transactions grew
+// memory without limit on every node that heard it.
+static const unsigned int MAX_STANDARD_TX_SIZE = 100000;
+static const unsigned int MAX_MEMPOOL_TRANSACTIONS = 5000;
 static const int64 COIN = 100000000;
 // Total Bitflash emission: identical to Bitcoin (21 million).
 // MAX_MONEY guards against the value overflow bug (CVE-2010-5139), which in
@@ -719,6 +725,34 @@ public:
         return n;
     }
 
+    // Relay policy: the shapes this node will hold in its pool and pass on.
+    // Everything the wallet makes passes; a block may still carry anything
+    // consensus allows. Bounds the size, keeps scriptSigs to pushes of a
+    // sane length, and accepts only the two output scripts this network has
+    // ever used (pay-to-pubkey-hash, pay-to-pubkey) -- so an output nobody
+    // can spend, or one built to cost the most to check, is not relayed.
+    bool IsStandard() const
+    {
+        if (::GetSerializeSize(*this, SER_NETWORK) > MAX_STANDARD_TX_SIZE)
+            return false;
+        foreach(const CTxIn& txin, vin)
+        {
+            if (txin.scriptSig.size() > 200 || !txin.scriptSig.IsPushOnly())
+                return false;
+        }
+        foreach(const CTxOut& txout, vout)
+        {
+            const CScript& s = txout.scriptPubKey;
+            bool fP2PKH = s.size() == 25 && s[0] == OP_DUP && s[1] == OP_HASH160 && s[2] == 20
+                       && s[23] == OP_EQUALVERIFY && s[24] == OP_CHECKSIG;
+            bool fP2PK  = (s.size() == 35 || s.size() == 67) && s[0] == s.size() - 2
+                       && s[s.size() - 1] == OP_CHECKSIG;
+            if (!fP2PKH && !fP2PK)
+                return false;
+        }
+        return true;
+    }
+
     bool CheckTransaction() const
     {
         // Basic checks that don't depend on any context
@@ -872,7 +906,10 @@ public:
 
 
     bool DisconnectInputs(CTxDB& txdb);
-    bool ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee=0);
+    // nBlockTime is the time of the block these inputs are being connected
+    // in -- which decides whether rules v2 apply to its signatures. 0 means
+    // "not in a block yet" (mempool, template), and the current time stands in.
+    bool ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee=0, unsigned int nBlockTime=0);
     bool ClientConnectInputs();
 
     bool AcceptTransaction(CTxDB& txdb, bool fCheckInputs=true, bool* pfMissingInputs=NULL);

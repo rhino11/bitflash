@@ -530,13 +530,22 @@ void AddTimeData(unsigned int ip, int64 nTime)
     {
         sort(vTimeOffsets.begin(), vTimeOffsets.end());
         int64 nMedian = vTimeOffsets[vTimeOffsets.size()/2];
-        nTimeOffset = nMedian;
-        if ((nMedian > 0 ? nMedian : -nMedian) > 5 * 60)
+        // Peers may nudge the clock, not set it. Past the cap the offset is
+        // dropped: a node that far from its peers has a clock to fix, and a
+        // node whose peers can move its time by hours can be handed blocks
+        // it must reject and shown a fork as the best chain.
+        if ((nMedian > 0 ? nMedian : -nMedian) <= MAX_TIME_ADJUSTMENT)
+            nTimeOffset = nMedian;
+        else
         {
-            // Only let other nodes change our clock so far before we
-            // go to the NTP servers
-            /// todo: Get time from NTP servers, then set a flag
-            ///    to make sure it doesn't get changed again
+            nTimeOffset = 0;
+            static bool fWarned;
+            if (!fWarned)
+            {
+                fWarned = true;
+                printf("WARNING: peers put this node's clock %+lld minutes off; ignoring them. Check the system time.\n",
+                       nMedian / 60);
+            }
         }
         foreach(int64 n, vTimeOffsets)
             printf("%+lld  ", n);

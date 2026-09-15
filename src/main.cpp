@@ -1503,6 +1503,11 @@ bool CTransaction::AcceptTransaction(CTxDB& txdb, bool fCheckInputs, bool* pfMis
     if (!CheckTransaction())
         return error("AcceptTransaction() : CheckTransaction failed");
 
+    // Relay policy, not consensus: what this node is willing to hold and
+    // pass on. A block may still carry anything consensus allows.
+    if (!IsStandard())
+        return error("AcceptTransaction() : non-standard transaction %s", GetHash().ToString().substr(0,6).c_str());
+
     // Do we already have it?
     uint256 hash = GetHash();
     CRITICAL_BLOCK(cs_mapTransactions)
@@ -1548,6 +1553,13 @@ bool CTransaction::AcceptTransaction(CTxDB& txdb, bool fCheckInputs, bool* pfMis
     // Store transaction in memory
     CRITICAL_BLOCK(cs_mapTransactions)
     {
+        // The pool is bounded. Past the ceiling only a transaction that
+        // pays the full base fee gets in, so a flood of free ones cannot
+        // grow memory without limit or crowd out the ones that pay.
+        if (fCheckInputs && !ptxOld && mapTransactions.size() >= MAX_MEMPOOL_TRANSACTIONS
+            && nFees < GetMinFee(false))
+            return error("AcceptTransaction() : mempool full (%d), %s pays too little to enter",
+                         (int)mapTransactions.size(), hash.ToString().substr(0,6).c_str());
         if (ptxOld)
         {
             if (LogAcceptsCategory("net")) printf("mapTransaction.erase(%s) replacing with new version\n", ptxOld->GetHash().ToString().c_str());
@@ -1857,8 +1869,15 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast)
         return pindexLast->nBits;
 
     // Go back by what we want to be 14 days worth of blocks
+    // Go back the whole window from rules v2 on. 0.1.0 walked nInterval-1
+    // blocks, so the timespan it measured was one interval short of the
+    // one it divided by, and the block on the boundary was counted by
+    // neither window -- the gap the time-warp attack drives through.
+    // Bitcoin never fixed this on mainnet; here the window is 30 blocks,
+    // which makes it a proportionally larger lever, so it is fixed.
+    int nWindow = RulesV2Active(pindexLast->nTime) ? nInterval : nInterval-1;
     const CBlockIndex* pindexFirst = pindexLast;
-    for (int i = 0; pindexFirst && i < nInterval-1; i++)
+    for (int i = 0; pindexFirst && i < nWindow; i++)
         pindexFirst = pindexFirst->pprev;
     assert(pindexFirst);
 
@@ -1926,8 +1945,9 @@ bool CTransaction::DisconnectInputs(CTxDB& txdb)
 }
 
 
-bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee)
+bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee, unsigned int nBlockTime)
 {
+    bool fStrictSigs = RulesV2Active(nBlockTime ? nBlockTime : (unsigned int)GetAdjustedTime());
     // Take over previous transactions' spent pointers
     if (!IsCoinBase())
     {
@@ -1983,7 +2003,7 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
                         return error("ConnectInputs() : tried to spend coinbase at depth %d", nBestHeight - pindex->nHeight);
 
             // Verify signature
-            if (!VerifySignature(txPrev, *this, i))
+            if (!VerifySignature(txPrev, *this, i, 0, fStrictSigs))
                 return error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,6).c_str());
 
             // Check for conflicts
@@ -2107,7 +2127,22 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
         CDiskTxPos posThisTx(pindex->nFile, pindex->nBlockPos, nTxPos);
         nTxPos += ::GetSerializeSize(tx, SER_DISK);
 
-        if (!tx.ConnectInputs(txdb, mapUnused, posThisTx, pindex->nHeight, nFees, true, false))
+        // Rules v2 (BIP30): a transaction whose txid is already in the index
+        // with outputs still unspent cannot be connected -- AddTxPos would
+        // replace the earlier entry and its unspent outputs would be gone.
+        // With the height in every coinbase (above) this cannot happen going
+        // forward; the check is what stops it if something ever does.
+        if (RulesV2Active(nTime))
+        {
+            CTxIndex txindexOld;
+            if (txdb.ReadTxIndex(tx.GetHash(), txindexOld))
+                foreach(const CDiskTxPos& pos, txindexOld.vSpent)
+                    if (pos.IsNull())
+                        return error("ConnectBlock() : tx %s already exists unspent (BIP30)",
+                                     tx.GetHash().ToString().substr(0,10).c_str());
+        }
+
+        if (!tx.ConnectInputs(txdb, mapUnused, posThisTx, pindex->nHeight, nFees, true, false, 0, nTime))
             return false;
     }
 
@@ -2396,6 +2431,19 @@ bool CBlock::AcceptBlock()
     // Check proof of work
     if (nBits != GetNextWorkRequired(pindexPrev))
         return error("AcceptBlock() : incorrect proof of work");
+
+    // Rules v2: the coinbase scriptSig starts with the block height (BIP34).
+    // Two coinbases paying the same key with the same value were otherwise
+    // byte-identical, so the second had the txid of the first and its index
+    // entry overwrote it. Both miners in this tree have written the height
+    // first since before the switch; from here on it is required.
+    if (RulesV2Active(nTime))
+    {
+        CScript expect = CScript() << (pindexPrev->nHeight + 1);
+        const CScript& cb = vtx[0].vin[0].scriptSig;
+        if (cb.size() < expect.size() || !std::equal(expect.begin(), expect.end(), cb.begin()))
+            return error("AcceptBlock() : coinbase does not start with height %d", pindexPrev->nHeight + 1);
+    }
 
     // Write block to history file
     unsigned int nFile;
@@ -4332,7 +4380,7 @@ bool BitcoinMiner(int nThreadId)
                     int64 nMinFee = tx.GetMinFee(pblock->vtx.size() < 100);
 
                     map<uint256, CTxIndex> mapTestPoolTmp(mapTestPool);
-                    if (!tx.ConnectInputs(txdb, mapTestPoolTmp, CDiskTxPos(1,1,1), 0, nFees, false, true, nMinFee))
+                    if (!tx.ConnectInputs(txdb, mapTestPoolTmp, CDiskTxPos(1,1,1), 0, nFees, false, true, nMinFee, pblock->nTime))
                         continue;
                     swap(mapTestPool, mapTestPoolTmp);
 

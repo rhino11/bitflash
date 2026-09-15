@@ -202,7 +202,7 @@ static bool RebuildJob()
                         if (tx.IsCoinBase() || !tx.IsFinal()) continue;
                         map<uint256, CTxIndex> tmp(pool);
                         if (!tx.ConnectInputs(txdb, tmp, CDiskTxPos(1,1,1), 0, nFees,
-                                              false, true, tx.GetMinFee(block.vtx.size() < 100)))
+                                              false, true, tx.GetMinFee(block.vtx.size() < 100), block.nTime))
                             continue;
                         swap(pool, tmp);
                         block.vtx.push_back(tx);

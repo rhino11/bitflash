@@ -643,10 +643,14 @@ public:
 
 
 bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nIn, int nHashType=0,
-                vector<vector<unsigned char> >* pvStackRet=NULL);
+                vector<vector<unsigned char> >* pvStackRet=NULL, bool fStrictSigs=false);
+// Rules v2 signature encoding: strict DER (BIP66) and low S (BIP62). Both take
+// the signature as it sits on the stack, hash-type byte included.
+bool IsStrictDERSignature(const vector<unsigned char>& vchSig);
+bool IsLowSSignature(const vector<unsigned char>& vchSig);
 uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType);
 bool IsMine(const CScript& scriptPubKey);
 bool ExtractPubKey(const CScript& scriptPubKey, bool fMineOnly, vector<unsigned char>& vchPubKeyRet);
 bool ExtractHash160(const CScript& scriptPubKey, uint160& hash160Ret);
 bool SignSignature(const CTransaction& txFrom, CTransaction& txTo, unsigned int nIn, int nHashType=SIGHASH_ALL, CScript scriptPrereq=CScript());
-bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType=0);
+bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType=0, bool fStrictSigs=false);
