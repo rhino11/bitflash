@@ -552,7 +552,7 @@ public:
         while (off < len)
         {
             int n = fTls ? SSL_write(ssl, buf + off, len - off)
-                         : send(hSocket, buf + off, len - off, 0);
+                         : send(hSocket, buf + off, len - off, BTF_SEND_FLAGS);
             if (n <= 0) return false;
             off += n;
         }

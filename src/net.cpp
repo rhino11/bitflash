@@ -478,7 +478,7 @@ bool GetMyExternalIP(unsigned int& ipRet)
         freeaddrinfo(res);
 
         string req = string("GET ") + svc.path + " HTTP/1.0\r\nHost: " + svc.host + "\r\nConnection: close\r\n\r\n";
-        send(hSocket, req.c_str(), (int)req.size(), 0);
+        send(hSocket, req.c_str(), (int)req.size(), BTF_SEND_FLAGS);
 
         // Read response, skip HTTP headers, grab first line of body
         string response;
@@ -1835,7 +1835,7 @@ void ThreadSocketHandler2(void* parg)
                     CDataStream& vSend = pnode->vSend;
                     if (!vSend.empty())
                     {
-                        int nBytes = send(hSocket, &vSend[0], vSend.size(), 0);
+                        int nBytes = send(hSocket, &vSend[0], vSend.size(), BTF_SEND_FLAGS);
                         if (nBytes > 0)
                         {
                             vSend.erase(vSend.begin(), vSend.begin() + nBytes);

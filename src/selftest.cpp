@@ -3460,7 +3460,7 @@ static bool SelfTestWriteN(SOCKET s, const void* buf, int n)
     int off = 0;
     while (off < n)
     {
-        int r = send(s, p + off, n - off, 0);
+        int r = send(s, p + off, n - off, BTF_SEND_FLAGS);
         if (r <= 0)
             return false;
         off += r;
@@ -3629,6 +3629,84 @@ static bool RunSocks5HandshakeProbe(std::string& errOut)
     else
         return true;
     return false;
+}
+
+// A write to a peer that has closed must come back as an error, not end the
+// process. This test runs inside the same main() the node runs in, so it
+// exercises both halves of the fix: BTF_SEND_FLAGS on the send, and the
+// SIGPIPE disposition main() sets for writes that do not go through send().
+// On the code before the fix, the plain send below kills the process, and
+// the harness sees a missing "ALL TESTS PASSED" instead of a FAIL line.
+static int RunSigpipeSelfTest()
+{
+    printf("sigpipe self-test\n");
+    int nFail = 0;
+#ifdef _WIN32
+    SelfTestWinsock winsock;
+    nFail += Check(winsock.fStarted, "Winsock started") ? 0 : 1;
+#endif
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    bool fUp = listener != INVALID_SOCKET
+        && bind(listener, (struct sockaddr*)&addr, sizeof(addr)) == 0
+        && listen(listener, 1) == 0;
+#ifdef _WIN32
+    int addrLen = sizeof(addr);
+#else
+    socklen_t addrLen = sizeof(addr);
+#endif
+    fUp = fUp && getsockname(listener, (struct sockaddr*)&addr, &addrLen) == 0;
+    nFail += Check(fUp, "loopback listener up") ? 0 : 1;
+
+    SOCKET client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    bool fConn = fUp && client != INVALID_SOCKET
+        && connect(client, (struct sockaddr*)&addr, sizeof(addr)) == 0;
+    SOCKET server = fConn ? accept(listener, NULL, NULL) : INVALID_SOCKET;
+    nFail += Check(fConn && server != INVALID_SOCKET, "client connected, server accepted") ? 0 : 1;
+
+    // The peer goes away.
+    if (server != INVALID_SOCKET)
+        closesocket(server);
+    Sleep(100);
+
+    // Writes into the void: the first may be accepted into the buffer (the
+    // RST arrives after it), the ones after it must fail -- and the process
+    // must still be here to see that.
+    int nErr = 0;
+    int nLastErrno = 0;
+    for (int i = 0; i < 8 && nErr == 0; i++)
+    {
+        char c = 'x';
+        int r = send(client, &c, 1, BTF_SEND_FLAGS);
+        if (r < 0) { nErr++; nLastErrno = WSAGetLastError(); }
+        Sleep(50);
+    }
+    nFail += Check(nErr > 0, "send to a closed peer returns an error with BTF_SEND_FLAGS") ? 0 : 1;
+#ifndef _WIN32
+    nFail += Check(nLastErrno == EPIPE || nLastErrno == ECONNRESET,
+                   "the error is EPIPE or ECONNRESET, not a dead process") ? 0 : 1;
+    // And the same without the flag: only main()'s SIG_IGN stands between
+    // this write and the end of the process.
+    nErr = 0;
+    for (int i = 0; i < 8 && nErr == 0; i++)
+    {
+        char c = 'y';
+        if (send(client, &c, 1, 0) < 0) nErr++;
+        Sleep(50);
+    }
+    nFail += Check(nErr > 0, "a plain send to a closed peer returns an error too (SIGPIPE ignored)") ? 0 : 1;
+#endif
+    if (client != INVALID_SOCKET) closesocket(client);
+    if (listener != INVALID_SOCKET) closesocket(listener);
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
 }
 
 static int RunSocks5ProxySelfTest()
@@ -3831,12 +3909,14 @@ int RunSelfTest(const std::string& name)
         return RunDebugLogBufferSelfTest();
     if (name == "pow-v2")
         return RunPoWV2SelfTest();
+    if (name == "sigpipe")
+        return RunSigpipeSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, socks5-proxy, managed-tor\n");
     return 1;
 }

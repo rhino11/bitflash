@@ -564,7 +564,7 @@ static void SendHttp(btf_socket_t s, int nCode, const string& strBody)
     size_t off = 0;
     while (off < resp.size())
     {
-        int w = send(s, resp.data() + off, (int)(resp.size() - off), 0);
+        int w = send(s, resp.data() + off, (int)(resp.size() - off), BTF_SEND_FLAGS);
         if (w <= 0) break;
         off += w;
     }

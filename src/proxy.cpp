@@ -52,7 +52,7 @@ static bool WriteN(SOCKET s, const void* buf, int n)
     int off = 0;
     while (off < n)
     {
-        int r = send(s, p + off, n - off, 0);
+        int r = send(s, p + off, n - off, BTF_SEND_FLAGS);
         if (r <= 0)
             return false;
         off += r;

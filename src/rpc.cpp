@@ -45,13 +45,8 @@
 
 using json = nlohmann::json;
 
-#ifdef _WIN32
 #define sock_close(s)  BtfCloseSocket(s)
-#define SEND_FLAGS     0
-#else
-#define sock_close(s)  BtfCloseSocket(s)
-#define SEND_FLAGS     MSG_NOSIGNAL
-#endif
+#define SEND_FLAGS     BTF_SEND_FLAGS
 
 volatile bool gPoolRunning = false;
 

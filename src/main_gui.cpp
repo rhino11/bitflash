@@ -119,7 +119,7 @@ static void PrintUsage()
     printf("            wallet-crypto, wallet-encrypt, wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
-    printf("            parse-money, debug-log-buffer, pow-v2, network-params, socks5-proxy,\n");
+    printf("            parse-money, debug-log-buffer, pow-v2, sigpipe, network-params, socks5-proxy,\n");
     printf("            or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
@@ -634,6 +634,11 @@ static BOOL WINAPI HeadlessConsoleCtrlHandler(DWORD dwCtrlType)
 
 int main(int argc, char* argv[])
 {
+#ifndef _WIN32
+    // See BTF_SEND_FLAGS in compat.h: the signal would end the process on the
+    // first write to a peer that has gone, and not every write is a send().
+    signal(SIGPIPE, SIG_IGN);
+#endif
     if (arg(argc,argv,"/help") || arg(argc,argv,"-help") ||
         arg(argc,argv,"--help") || arg(argc,argv,"/?"))
     {
