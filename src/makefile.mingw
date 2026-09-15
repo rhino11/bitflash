@@ -122,5 +122,6 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=debug-log-buffer
 	./bitflash.exe -selftest=pow-v2
 	./bitflash.exe -selftest=sigpipe
+	./bitflash.exe -selftest=script-eval
 	./bitflash.exe -selftest=socks5-proxy
 	./bitflash.exe -selftest=managed-tor

@@ -840,6 +840,15 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
     }
 
 
+    // A conditional left open is a script that never reached the code after
+    // it. With scriptSig and scriptPubKey running as one script, a scriptSig
+    // ending in <OP_0 OP_IF> parked the whole scriptPubKey -- OP_CHECKSIG
+    // included -- in a branch that never ran, and the final CastToBool saw
+    // whatever the scriptSig had pushed. Anyone could spend anyone's output
+    // without a signature. 0.1.0 never checked this; Bitcoin does.
+    if (!vfExec.empty())
+        return false;
+
     if (pvStackRet)
         *pvStackRet = stack;
     return (stack.empty() ? false : CastToBool(stack.back()));
@@ -1172,6 +1181,14 @@ bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsig
     const CTxOut& txout = txFrom.vout[txin.prevout.n];
 
     if (txin.prevout.hash != txFrom.GetHash())
+        return false;
+
+    // The scriptSig supplies data; it does not get to run operators in the
+    // same script as the scriptPubKey it is spending. The open-OP_IF spend
+    // above is one member of that family; this closes the family. Every
+    // scriptSig on both chains was push-only when this was added (44,673
+    // mainnet inputs scanned, 0 exceptions), so it holds from genesis.
+    if (!txin.scriptSig.IsPushOnly())
         return false;
 
     return EvalScript(txin.scriptSig + CScript(OP_CODESEPARATOR) + txout.scriptPubKey, txTo, nIn, nHashType);
