@@ -586,6 +586,25 @@ public:
         //printf("FindAndDeleted deleted %d items\n", count); /// debug
     }
 
+    // True when every opcode is a push (data, OP_0, OP_1NEGATE, OP_1..OP_16).
+    // A scriptSig is only ever meant to supply data to the scriptPubKey it
+    // spends; an operator in it is either a mistake or an attempt to change
+    // how the scriptPubKey runs. False on a malformed script.
+    bool IsPushOnly() const
+    {
+        const_iterator pc = begin();
+        while (pc < end())
+        {
+            opcodetype opcode;
+            vector<unsigned char> vchPush;
+            if (!GetOp(pc, opcode, vchPush))
+                return false;
+            if (opcode > OP_16)
+                return false;
+        }
+        return true;
+    }
+
 
     void PrintHex() const
     {

@@ -3176,6 +3176,60 @@ static CBlock MakeSizedConsensusBlock(size_t nScriptBytes)
     return block;
 }
 
+// The script interpreter against the ways a scriptSig can try to skip the
+// scriptPubKey it is supposed to satisfy. scriptSig and scriptPubKey run as
+// one concatenated script (0.1.0), so anything in the scriptSig that changes
+// control flow reaches the output's own checks.
+static int RunScriptEvalSelfTest()
+{
+    printf("script-eval self-test\n");
+    int nFail = 0;
+
+    // An output paid to a fresh key, and a spend of it with no signature.
+    CKey key;
+    key.MakeNewKey();
+    CTransaction txFrom;
+    txFrom.vout.resize(1);
+    txFrom.vout[0].nValue = 1 * COIN;
+    txFrom.vout[0].scriptPubKey << OP_DUP << OP_HASH160 << Hash160(key.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+
+    CTransaction txTo;
+    txTo.vin.resize(1);
+    txTo.vin[0].prevout = COutPoint(txFrom.GetHash(), 0);
+    txTo.vout.resize(1);
+    txTo.vout[0].nValue = 1 * COIN;
+
+    struct Case { const char* name; CScript scriptSig; };
+    std::vector<Case> cases;
+    { CScript s; s << OP_1 << OP_0 << OP_IF;            cases.push_back({"scriptSig ending in an open OP_IF (false branch) cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_1 << OP_NOTIF;         cases.push_back({"scriptSig ending in an open OP_NOTIF cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_0 << OP_IF << OP_ELSE; cases.push_back({"scriptSig ending in an open OP_ELSE cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_RETURN;                cases.push_back({"scriptSig ending in OP_RETURN cannot spend", s}); }
+    { CScript s; s << OP_1;                             cases.push_back({"scriptSig of a bare OP_1 cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_ENDIF;                 cases.push_back({"scriptSig with a stray OP_ENDIF cannot spend", s}); }
+    for (size_t i = 0; i < cases.size(); i++)
+    {
+        txTo.vin[0].scriptSig = cases[i].scriptSig;
+        bool fSpent = VerifySignature(txFrom, txTo, 0, SIGHASH_ALL);
+        nFail += Check(!fSpent, cases[i].name) ? 0 : 1;
+    }
+
+    // And the honest spend still works: sign it.
+    txTo.vin[0].scriptSig = CScript();
+    uint256 hash = SignatureHash(txFrom.vout[0].scriptPubKey, txTo, 0, SIGHASH_ALL);
+    std::vector<unsigned char> vchSig;
+    bool fSigned = key.Sign(hash, vchSig);
+    vchSig.push_back((unsigned char)SIGHASH_ALL);
+    txTo.vin[0].scriptSig << vchSig << key.GetPubKey();
+    nFail += Check(fSigned && VerifySignature(txFrom, txTo, 0, SIGHASH_ALL),
+                   "a properly signed spend verifies") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunConsensusLimitsSelfTest()
 {
     fflush(stdout);
@@ -3911,12 +3965,14 @@ int RunSelfTest(const std::string& name)
         return RunPoWV2SelfTest();
     if (name == "sigpipe")
         return RunSigpipeSelfTest();
+    if (name == "script-eval")
+        return RunScriptEvalSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, socks5-proxy, managed-tor\n");
     return 1;
 }
