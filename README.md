@@ -613,4 +613,5 @@ ten months rather than four years.
 
 Young network. Keep your node current and don't put in more than you are willing to lose.
 
-MIT. Built on Bitcoin 0.1.0 (Satoshi Nakamoto, 2009).
+MIT. Built on Bitcoin 0.1.0 (Satoshi Nakamoto, 2009). The license covers the code; the name,
+logo and domain are not licensed. See [TRADEMARK.md](TRADEMARK.md).
