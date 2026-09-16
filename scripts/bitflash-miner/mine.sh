@@ -29,7 +29,10 @@ fi
 mkdir -p tor-data
 chmod 700 tor-data
 echo "Starting Tor (own instance, SOCKS on $SOCKS)..."
-./tor/tor --SocksPort "$SOCKS" --DataDirectory tor-data --Log "notice file tor-data/tor.log" --ClientOnly 1 >/dev/null 2>&1 &
+# The Expert Bundle's tor has no RUNPATH; it needs the libevent/libssl/libcrypto
+# shipped in tor/ ahead of the system's, or it dies with "undefined symbol:
+# evutil_secure_rng_add_bytes" (exit 127) on Fedora 44 / Ubuntu 26.04.
+LD_LIBRARY_PATH="$PWD/tor${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ./tor/tor --SocksPort "$SOCKS" --DataDirectory tor-data --Log "notice file tor-data/tor.log" --ClientOnly 1 >/dev/null 2>&1 &
 TORPID=$!
 echo "Tor bootstraps in 10-60 s; XMRig retries until it is through."
 echo "Pool: $POOL"
