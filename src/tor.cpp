@@ -11,6 +11,8 @@
 #ifndef _WIN32
 #include <signal.h>
 #include <sys/wait.h>
+#include <unistd.h>
+extern char** environ;
 #endif
 
 static CCriticalSection cs_managedTor;
@@ -695,6 +697,41 @@ static bool StartTorProcess(const std::string& torPath, const std::string& torrc
     }
     return true;
 #else
+    // The Tor Expert Bundle's tor carries no RUNPATH: it expects the launcher
+    // to point LD_LIBRARY_PATH at the libevent/libssl/libcrypto shipped next
+    // to it, the way Tor Browser does. Left to the system copies it dies with
+    // "symbol lookup error: undefined symbol: evutil_secure_rng_add_bytes"
+    // (exit 127) on any distribution whose libevent was built on a libc with
+    // arc4random -- Fedora 44 and Ubuntu 26.04 among them. Everything the
+    // child needs is assembled here, before fork(): in a threaded program the
+    // child may only call async-signal-safe functions, and setenv/malloc are
+    // not. A bare name (no '/') is left to execlp and the PATH search.
+    std::vector<std::string> envStrings;
+    std::string torDir;
+    {
+        size_t slash = torPath.rfind('/');
+        if (slash != std::string::npos)
+            torDir = torPath.substr(0, slash);
+    }
+    bool fHaveLdPath = false;
+    for (char** e = environ; e && *e; e++)
+    {
+        if (!torDir.empty() && strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0)
+        {
+            envStrings.push_back("LD_LIBRARY_PATH=" + torDir + ":" + std::string(*e + 16));
+            fHaveLdPath = true;
+        }
+        else
+            envStrings.push_back(*e);
+    }
+    if (!torDir.empty() && !fHaveLdPath)
+        envStrings.push_back("LD_LIBRARY_PATH=" + torDir);
+    std::vector<const char*> envpTor;
+    for (size_t i = 0; i < envStrings.size(); i++)
+        envpTor.push_back(envStrings[i].c_str());
+    envpTor.push_back(NULL);
+    const char* argvTor[] = { torPath.c_str(), "-f", torrcPath.c_str(), NULL };
+
     g_managedTorPid = fork();
     if (g_managedTorPid < 0)
     {
@@ -703,7 +740,11 @@ static bool StartTorProcess(const std::string& torPath, const std::string& torrc
     }
     if (g_managedTorPid == 0)
     {
-        execlp(torPath.c_str(), torPath.c_str(), "-f", torrcPath.c_str(), (char*)NULL);
+        if (torPath.find('/') == std::string::npos)
+            execlp(torPath.c_str(), torPath.c_str(), "-f", torrcPath.c_str(), (char*)NULL);
+        else
+            execve(torPath.c_str(), const_cast<char* const*>(&argvTor[0]),
+                   const_cast<char* const*>(&envpTor[0]));
         _exit(127);
     }
     return true;
@@ -762,7 +803,9 @@ static bool ValidateManagedTorStartup(std::string& errOut)
     int nExitCode = 0;
     if (ManagedTorProcessAlive(fExited, nExitCode))
         return true;
-    if (fExited)
+    if (fExited && nExitCode == 127)
+        errOut = "Tor could not be executed (exit code 127: the binary or a shared library it needs was not found)";
+    else if (fExited)
         errOut = strprintf("Tor exited during startup with code %d", nExitCode);
     else
         errOut = "Tor process is not running after startup";
