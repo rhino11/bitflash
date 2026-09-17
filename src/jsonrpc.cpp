@@ -446,7 +446,17 @@ static json rpc_validateaddress(const json& p)
             j["active"] = RulesV3Active(GetAdjustedTime());
         }
         else
+        {
             j["ismine"] = IsMineAddress(addr);
+            // The public key, when it is ours: what the other parties of a
+            // multisig need from this wallet, and nothing else hands out.
+            CRITICAL_BLOCK(cs_mapKeys)
+            {
+                map<uint160, vector<unsigned char> >::iterator mi = mapPubKeys.find(h);
+                if (mi != mapPubKeys.end())
+                    j["pubkey"] = HexStr(mi->second.begin(), mi->second.end(), false);
+            }
+        }
     }
     return j;
 }
