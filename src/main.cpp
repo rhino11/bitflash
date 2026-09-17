@@ -442,6 +442,35 @@ bool AddCryptedKey(const vector<unsigned char>& vchPubKey,
     return true;
 }
 
+map<uint160, CScript> mapScripts;
+
+bool AddCScript(const CScript& redeemScript)
+{
+    uint160 hash = Hash160(redeemScript);
+    CRITICAL_BLOCK(cs_mapKeys)
+        mapScripts[hash] = redeemScript;
+    return CWalletDB().WriteCScript(hash, redeemScript);
+}
+
+bool HaveCScript(const uint160& hash)
+{
+    CRITICAL_BLOCK(cs_mapKeys)
+        return mapScripts.count(hash) > 0;
+    return false;
+}
+
+bool GetWalletCScript(const uint160& hash, CScript& scriptRet)
+{
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        map<uint160, CScript>::iterator mi = mapScripts.find(hash);
+        if (mi == mapScripts.end())
+            return false;
+        scriptRet = mi->second;
+    }
+    return true;
+}
+
 bool WalletCanSpendKey(const vector<unsigned char>& vchPubKey)
 {
     CRITICAL_BLOCK(cs_mapKeys)

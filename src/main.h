@@ -297,6 +297,7 @@ bool ProcessMessages(CNode* pfrom);
 // no honest node could have sent (bad proof of work, bad merkle root).
 bool ProcessBlock(CNode* pfrom, CBlock* pblock, int* pnDoS=NULL);
 bool SelectCoins(int64 nTargetValue, std::set<CWalletTx*>& setCoinsRet);
+bool AddToWalletIfMine(const CTransaction& tx, const CBlock* pblock);
 // True while this node is catching up: peers say the chain is well past us.
 // A node in that state neither mines (its template would build on a stale
 // tip -- the Debian node mined a 323-block fork that way) nor announces the
@@ -746,7 +747,9 @@ public:
             return false;
         foreach(const CTxIn& txin, vin)
         {
-            if (txin.scriptSig.size() > 200 || !txin.scriptSig.IsPushOnly())
+            // 500: three 73-byte signatures with the multisig dummy and the
+            // pushes fit; a 200-byte cap fit one signature and one key.
+            if (txin.scriptSig.size() > 500 || !txin.scriptSig.IsPushOnly())
                 return false;
         }
         foreach(const CTxOut& txout, vout)
@@ -756,8 +759,17 @@ public:
                        && s[23] == OP_EQUALVERIFY && s[24] == OP_CHECKSIG;
             bool fP2PK  = (s.size() == 35 || s.size() == 67) && s[0] == s.size() - 2
                        && s[s.size() - 1] == OP_CHECKSIG;
-            if (!fP2PKH && !fP2PK)
-                return false;
+            if (fP2PKH || fP2PK)
+                continue;
+            // Bare m-of-n multisig, n <= 3: valid since genesis, relayed from
+            // 1.2.28. Pay-to-script-hash is deliberately NOT here until the
+            // rules v3 switch makes it something other than anyone-can-spend.
+            txnouttype whichType;
+            vector<vector<unsigned char> > vSolutions;
+            if (SolverTyped(s, whichType, vSolutions) && whichType == TX_MULTISIG &&
+                vSolutions.size() - 2 <= 3)
+                continue;
+            return false;
         }
         return true;
     }
@@ -1691,4 +1703,9 @@ extern CCriticalSection cs_mapWallet;
 extern map<vector<unsigned char>, CPrivKey> mapKeys;
 extern map<uint160, vector<unsigned char> > mapPubKeys;
 extern CCriticalSection cs_mapKeys;
+// Redeem scripts this wallet knows, by Hash160: what a pay-to-script-hash
+// output of ours needs presented to be spent. Stored as "cscript" records.
+extern map<uint160, CScript> mapScripts;
+bool AddCScript(const CScript& redeemScript);
+bool HaveCScript(const uint160& hash);
 extern CKey keyUser;

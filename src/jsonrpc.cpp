@@ -122,11 +122,101 @@ static string Base64Decode(const string& in)
 static CScript ScriptForAddress(const string& strAddr)
 {
     uint160 hash160;
-    if (!AddressToHash160(strAddr, hash160))
+    bool fScript = false;
+    if (!DecodeAnyAddress(strAddr, hash160, fScript))
         throw runtime_error("invalid Bitflash address");
     CScript s;
+    if (fScript)
+    {
+        // Until the rules v3 switch a pay-to-script-hash output is spendable
+        // by anyone who presents the script, signatures or not. Paying to one
+        // before then is giving the money away.
+        if (!RulesV3Active(GetAdjustedTime()))
+            throw runtime_error(RulesV3Time() == 0
+                ? "pay-to-script-hash addresses (C...) are not active on this network yet: the rules v3 switch is not scheduled"
+                : strprintf("pay-to-script-hash addresses (C...) activate at block time %u; not before", RulesV3Time()));
+        s << OP_HASH160 << hash160 << OP_EQUAL;
+        return s;
+    }
     s << OP_DUP << OP_HASH160 << hash160 << OP_EQUALVERIFY << OP_CHECKSIG;
     return s;
+}
+
+// A public key for multisig construction: hex, or an address whose key this
+// wallet holds.
+static vector<unsigned char> PubKeyFromParam(const string& str)
+{
+    if (IsHex(str))
+    {
+        vector<unsigned char> vch = ParseHex(str);
+        if (vch.size() != 65 && vch.size() != 33)
+            throw runtime_error("public key must be 65 (or 33) bytes: " + str);
+        return vch;
+    }
+    uint160 h;
+    if (!AddressToHash160(str, h))
+        throw runtime_error("not a public key and not a Bitflash address: " + str);
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        map<uint160, vector<unsigned char> >::iterator mi = mapPubKeys.find(h);
+        if (mi == mapPubKeys.end())
+            throw runtime_error("this wallet does not hold the key for " + str + "; give the public key in hex");
+        return mi->second;
+    }
+    throw runtime_error("unreachable");
+}
+
+static CScript MultisigRedeemScript(const json& p)
+{
+    if (p.size() < 2 || !p[0].is_number_integer() || !p[1].is_array())
+        throw runtime_error("<nrequired> [\"key\",...]");
+    int nRequired = p[0].get<int>();
+    vector<vector<unsigned char> > keys;
+    for (size_t i = 0; i < p[1].size(); i++)
+    {
+        if (!p[1][i].is_string())
+            throw runtime_error("keys must be strings");
+        keys.push_back(PubKeyFromParam(p[1][i].get<string>()));
+    }
+    if (keys.empty() || keys.size() > 16)
+        throw runtime_error("between 1 and 16 keys");
+    if (nRequired < 1 || nRequired > (int)keys.size())
+        throw runtime_error(strprintf("nrequired must be between 1 and %d", (int)keys.size()));
+    CScript redeem;
+    redeem.SetMultisig(nRequired, keys);
+    if (redeem.size() > 520)
+        throw runtime_error("redeem script over 520 bytes");
+    return redeem;
+}
+
+static json ScriptToJson(const CScript& script)
+{
+    json j;
+    j["asm"] = script.ToString();
+    j["hex"] = HexStr(script.begin(), script.end(), false);
+    txnouttype whichType;
+    vector<vector<unsigned char> > vSolutions;
+    if (SolverTyped(script, whichType, vSolutions))
+    {
+        j["type"] = GetTxnOutputType(whichType);
+        if (whichType == TX_PUBKEYHASH)
+            j["address"] = Hash160ToAddress(uint160(vSolutions[0]));
+        else if (whichType == TX_PUBKEY)
+            j["address"] = PubKeyToAddress(vSolutions[0]);
+        else if (whichType == TX_SCRIPTHASH)
+            j["address"] = Hash160ToScriptAddress(uint160(vSolutions[0]));
+        else if (whichType == TX_MULTISIG)
+        {
+            j["reqSigs"] = (int)vSolutions.front()[0];
+            json a = json::array();
+            for (size_t i = 1; i + 1 < vSolutions.size(); i++)
+                a.push_back(PubKeyToAddress(vSolutions[i]));
+            j["addresses"] = a;
+        }
+    }
+    else
+        j["type"] = "nonstandard";
+    return j;
 }
 
 static string AddressOfScript(const CScript& scriptPubKey)
@@ -332,14 +422,66 @@ static json rpc_validateaddress(const json& p)
         throw runtime_error("validateaddress <address>");
     string addr = p[0].get<string>();
     uint160 h;
+    bool fScript = false;
     json j;
-    bool fValid = AddressToHash160(addr, h);
+    bool fValid = DecodeAnyAddress(addr, h, fScript);
     j["isvalid"] = fValid;
     if (fValid)
     {
         j["address"] = addr;
-        j["ismine"]  = IsMineAddress(addr);
+        j["isscript"] = fScript;
+        if (fScript)
+        {
+            CScript redeem;
+            bool fHave = GetWalletCScript(h, redeem);
+            j["ismine"] = fHave && IsMine(redeem);
+            if (fHave)
+            {
+                json sub = ScriptToJson(redeem);
+                j["script"] = sub["type"];
+                j["hex"] = sub["hex"];
+                if (sub.contains("addresses")) j["addresses"] = sub["addresses"];
+                if (sub.contains("reqSigs")) j["sigsrequired"] = sub["reqSigs"];
+            }
+            j["active"] = RulesV3Active(GetAdjustedTime());
+        }
+        else
+            j["ismine"] = IsMineAddress(addr);
     }
+    return j;
+}
+
+// createmultisig <nrequired> ["key",...]: the redeem script and its address,
+// nothing stored. addmultisigaddress does the same and keeps the script, so
+// the wallet recognizes and can sign for outputs paid to it.
+static json rpc_createmultisig(const json& p)
+{
+    CScript redeem = MultisigRedeemScript(p);
+    json j;
+    j["address"] = Hash160ToScriptAddress(Hash160(redeem));
+    j["redeemScript"] = HexStr(redeem.begin(), redeem.end(), false);
+    return j;
+}
+
+static json rpc_addmultisigaddress(const json& p)
+{
+    CScript redeem = MultisigRedeemScript(p);
+    if (!AddCScript(redeem))
+        throw runtime_error("could not store the redeem script in the wallet");
+    string strAddr = Hash160ToScriptAddress(Hash160(redeem));
+    if (p.size() >= 3 && p[2].is_string() && !p[2].get<string>().empty())
+        SetAddressBookName(strAddr, p[2].get<string>());
+    return strAddr;
+}
+
+static json rpc_decodescript(const json& p)
+{
+    if (p.size() < 1 || !p[0].is_string() || !IsHex(p[0].get<string>()))
+        throw runtime_error("decodescript <hex>");
+    vector<unsigned char> vch = ParseHex(p[0].get<string>());
+    CScript script(vch.begin(), vch.end());
+    json j = ScriptToJson(script);
+    j["p2sh"] = Hash160ToScriptAddress(Hash160(script));
     return j;
 }
 
@@ -449,10 +591,412 @@ static json rpc_listsinceblock(const json& p)
     return j;
 }
 
+// ---------------------------------------------------------------------------
+// raw transactions: what a multisig needs, since the two (or three) wallets
+// that hold the keys pass one half-signed transaction between them
+
+static json TxToJson(const CTransaction& tx)
+{
+    json j;
+    j["txid"] = tx.GetHash().GetHex();
+    j["version"] = tx.nVersion;
+    j["locktime"] = tx.nLockTime;
+    json vin = json::array();
+    for (size_t i = 0; i < tx.vin.size(); i++)
+    {
+        const CTxIn& txin = tx.vin[i];
+        json in;
+        if (tx.IsCoinBase())
+            in["coinbase"] = HexStr(txin.scriptSig.begin(), txin.scriptSig.end(), false);
+        else
+        {
+            in["txid"] = txin.prevout.hash.GetHex();
+            in["vout"] = txin.prevout.n;
+            json ss;
+            ss["asm"] = txin.scriptSig.ToString();
+            ss["hex"] = HexStr(txin.scriptSig.begin(), txin.scriptSig.end(), false);
+            in["scriptSig"] = ss;
+        }
+        in["sequence"] = txin.nSequence;
+        vin.push_back(in);
+    }
+    j["vin"] = vin;
+    json vout = json::array();
+    for (size_t i = 0; i < tx.vout.size(); i++)
+    {
+        json out;
+        out["value"] = ValueFromAmount(tx.vout[i].nValue);
+        out["n"] = (int)i;
+        out["scriptPubKey"] = ScriptToJson(tx.vout[i].scriptPubKey);
+        vout.push_back(out);
+    }
+    j["vout"] = vout;
+    CDataStream ss(SER_NETWORK);
+    ss << tx;
+    j["hex"] = HexStr(ss.begin(), ss.end(), false);
+    return j;
+}
+
+static CTransaction TxFromHexParam(const json& v)
+{
+    if (!v.is_string() || !IsHex(v.get<string>()))
+        throw runtime_error("expected a transaction in hex");
+    vector<unsigned char> vch = ParseHex(v.get<string>());
+    CDataStream ss(vch, SER_NETWORK);
+    CTransaction tx;
+    try { ss >> tx; }
+    catch (std::exception&) { throw runtime_error("transaction does not decode"); }
+    return tx;
+}
+
+// The transaction an outpoint refers to: memory pool, then the chain.
+static bool LookupTransaction(const uint256& hash, CTransaction& txRet)
+{
+    CRITICAL_BLOCK(cs_mapTransactions)
+    {
+        map<uint256, CTransaction>::iterator mi = mapTransactions.find(hash);
+        if (mi != mapTransactions.end())
+        {
+            txRet = mi->second;
+            return true;
+        }
+    }
+    CTxDB txdb("r");
+    return txdb.ReadDiskTx(hash, txRet);
+}
+
+// listunspent [minconf=1] [maxconf=9999999] [["address",...]]
+// The wallet marks spending per transaction (0.1.0), so an unspent wallet
+// transaction's outputs that are ours are the unspent outputs.
+static json rpc_listunspent(const json& p)
+{
+    int nMinDepth = (p.size() >= 1 && p[0].is_number_integer()) ? p[0].get<int>() : 1;
+    int nMaxDepth = (p.size() >= 2 && p[1].is_number_integer()) ? p[1].get<int>() : 9999999;
+    set<string> setFilter;
+    if (p.size() >= 3 && p[2].is_array())
+        for (size_t i = 0; i < p[2].size(); i++)
+            if (p[2][i].is_string())
+                setFilter.insert(p[2][i].get<string>());
+
+    json out = json::array();
+    CRITICAL_BLOCK(cs_mapWallet)
+    {
+        for (map<uint256, CWalletTx>::iterator it = mapWallet.begin(); it != mapWallet.end(); ++it)
+        {
+            const CWalletTx& wtx = it->second;
+            if (wtx.fSpent || !wtx.IsFinal())
+                continue;
+            if (wtx.IsCoinBase() && wtx.GetBlocksToMaturity() > 0)
+                continue;
+            int nDepth = wtx.GetDepthInMainChain();
+            if (nDepth < nMinDepth || nDepth > nMaxDepth)
+                continue;
+            for (size_t n = 0; n < wtx.vout.size(); n++)
+            {
+                const CTxOut& txout = wtx.vout[n];
+                if (!IsMine(txout.scriptPubKey))
+                    continue;
+                json sj = ScriptToJson(txout.scriptPubKey);
+                string strAddr = sj.contains("address") ? sj["address"].get<string>() : "";
+                if (!setFilter.empty() && !setFilter.count(strAddr))
+                    continue;
+                json o;
+                o["txid"] = wtx.GetHash().GetHex();
+                o["vout"] = (int)n;
+                if (!strAddr.empty())
+                    o["address"] = strAddr;
+                o["scriptPubKey"] = HexStr(txout.scriptPubKey.begin(), txout.scriptPubKey.end(), false);
+                if (txout.scriptPubKey.IsPayToScriptHash())
+                {
+                    CScript redeem;
+                    if (GetWalletCScript(uint160(vector<unsigned char>(txout.scriptPubKey.begin() + 2, txout.scriptPubKey.begin() + 22)), redeem))
+                        o["redeemScript"] = HexStr(redeem.begin(), redeem.end(), false);
+                }
+                o["amount"] = ValueFromAmount(txout.nValue);
+                o["confirmations"] = nDepth;
+                out.push_back(o);
+            }
+        }
+    }
+    return out;
+}
+
+// createrawtransaction [{"txid":h,"vout":n},...] {"address":amount,...}
+// An output key may also be "script:<hex>" for a script that has no address
+// form -- a bare multisig, which is what works before the rules v3 switch.
+static json rpc_createrawtransaction(const json& p)
+{
+    if (p.size() < 2 || !p[0].is_array() || !p[1].is_object())
+        throw runtime_error("createrawtransaction [{\"txid\":txid,\"vout\":n},...] {address:amount,...}");
+    CTransaction tx;
+    for (size_t i = 0; i < p[0].size(); i++)
+    {
+        const json& in = p[0][i];
+        if (!in.is_object() || !in.contains("txid") || !in["txid"].is_string() ||
+            !in.contains("vout") || !in["vout"].is_number_integer())
+            throw runtime_error("each input needs txid and vout");
+        int nOut = in["vout"].get<int>();
+        if (nOut < 0)
+            throw runtime_error("vout must be positive");
+        tx.vin.push_back(CTxIn(COutPoint(uint256(in["txid"].get<string>()), nOut)));
+    }
+    set<string> setSeen;
+    for (json::const_iterator it = p[1].begin(); it != p[1].end(); ++it)
+    {
+        string strKey = it.key();
+        if (setSeen.count(strKey))
+            throw runtime_error("duplicated output: " + strKey);
+        setSeen.insert(strKey);
+        CScript scriptPubKey;
+        if (strKey.compare(0, 7, "script:") == 0)
+        {
+            string strHex = strKey.substr(7);
+            if (!IsHex(strHex))
+                throw runtime_error("script: must be followed by hex");
+            vector<unsigned char> vch = ParseHex(strHex);
+            scriptPubKey = CScript(vch.begin(), vch.end());
+            if (scriptPubKey.IsPayToScriptHash() && !RulesV3Active(GetAdjustedTime()))
+                throw runtime_error("pay-to-script-hash outputs are not active on this network yet");
+        }
+        else
+            scriptPubKey = ScriptForAddress(strKey);
+        int64 nValue = AmountFromValue(it.value());
+        if (nValue <= 0)
+            throw runtime_error("amount must be positive");
+        tx.vout.push_back(CTxOut(nValue, scriptPubKey));
+    }
+    if (tx.vin.empty() || tx.vout.empty())
+        throw runtime_error("a transaction needs at least one input and one output");
+    CDataStream ss(SER_NETWORK);
+    ss << tx;
+    return HexStr(ss.begin(), ss.end(), false);
+}
+
+static json rpc_decoderawtransaction(const json& p)
+{
+    if (p.size() < 1)
+        throw runtime_error("decoderawtransaction <hex>");
+    return TxToJson(TxFromHexParam(p[0]));
+}
+
+static json rpc_getrawtransaction(const json& p)
+{
+    if (p.size() < 1 || !p[0].is_string())
+        throw runtime_error("getrawtransaction <txid> [verbose=0]");
+    CTransaction tx;
+    if (!LookupTransaction(uint256(p[0].get<string>()), tx))
+        throw runtime_error("transaction not found (not in the memory pool and not in the chain)");
+    json j = TxToJson(tx);
+    bool fVerbose = p.size() >= 2 && ((p[1].is_boolean() && p[1].get<bool>()) || (p[1].is_number_integer() && p[1].get<int>() != 0));
+    return fVerbose ? j : j["hex"];
+}
+
+// A key handed to signrawtransaction lives in the wallet's key map only for
+// the duration of the call, and is never written anywhere.
+struct CTemporaryKeys
+{
+    vector<vector<unsigned char> > vPubKeys;
+    ~CTemporaryKeys()
+    {
+        CRITICAL_BLOCK(cs_mapKeys)
+            for (size_t i = 0; i < vPubKeys.size(); i++)
+            {
+                mapKeys.erase(vPubKeys[i]);
+                mapPubKeys.erase(Hash160(vPubKeys[i]));
+            }
+    }
+};
+
+// signrawtransaction <hex> [[{"txid","vout","scriptPubKey","redeemScript"},...]] [["privkey-hex",...]]
+// Signs what this wallet's keys (plus any given) can sign, keeps what is
+// already signed, and says whether every input now verifies.
+static json rpc_signrawtransaction(const json& p)
+{
+    if (p.size() < 1)
+        throw runtime_error("signrawtransaction <hex> [prevtxs] [privkeys]");
+    if (IsWalletLocked())
+        throw runtime_error("wallet is locked");
+    CTransaction tx = TxFromHexParam(p[0]);
+
+    // Previous outputs: given, else looked up
+    map<COutPoint, CScript> mapPrevOut;
+    map<uint160, CScript> mapRedeem;
+    if (p.size() >= 2 && p[1].is_array())
+    {
+        for (size_t i = 0; i < p[1].size(); i++)
+        {
+            const json& pv = p[1][i];
+            if (!pv.is_object() || !pv.contains("txid") || !pv.contains("vout") || !pv.contains("scriptPubKey"))
+                throw runtime_error("each prevtx needs txid, vout and scriptPubKey");
+            vector<unsigned char> vch = ParseHex(pv["scriptPubKey"].get<string>());
+            mapPrevOut[COutPoint(uint256(pv["txid"].get<string>()), pv["vout"].get<int>())] = CScript(vch.begin(), vch.end());
+            if (pv.contains("redeemScript") && pv["redeemScript"].is_string())
+            {
+                vector<unsigned char> r = ParseHex(pv["redeemScript"].get<string>());
+                CScript redeem(r.begin(), r.end());
+                mapRedeem[Hash160(redeem)] = redeem;
+            }
+        }
+    }
+    CTemporaryKeys tempKeys;
+    if (p.size() >= 3 && p[2].is_array())
+    {
+        for (size_t i = 0; i < p[2].size(); i++)
+        {
+            if (!p[2][i].is_string() || !IsHex(p[2][i].get<string>()))
+                throw runtime_error("private keys are given as 64 hex characters");
+            CKey key;
+            if (!key.SetSecret(ParseHex(p[2][i].get<string>())))
+                throw runtime_error("invalid private key");
+            vector<unsigned char> vchPubKey = key.GetPubKey();
+            CRITICAL_BLOCK(cs_mapKeys)
+            {
+                if (!mapKeys.count(vchPubKey))
+                {
+                    mapKeys[vchPubKey] = key.GetPrivKey();
+                    mapPubKeys[Hash160(vchPubKey)] = vchPubKey;
+                    tempKeys.vPubKeys.push_back(vchPubKey);
+                }
+            }
+        }
+    }
+    // Redeem scripts named by the caller are usable for this call
+    for (map<uint160, CScript>::iterator it = mapRedeem.begin(); it != mapRedeem.end(); ++it)
+        CRITICAL_BLOCK(cs_mapKeys)
+            if (!mapScripts.count(it->first))
+                mapScripts[it->first] = it->second;
+
+    bool fComplete = true;
+    json errors = json::array();
+    for (unsigned int i = 0; i < tx.vin.size(); i++)
+    {
+        CTxIn& txin = tx.vin[i];
+        CScript scriptPubKey;
+        map<COutPoint, CScript>::iterator mi = mapPrevOut.find(txin.prevout);
+        if (mi != mapPrevOut.end())
+            scriptPubKey = mi->second;
+        else
+        {
+            CTransaction txPrev;
+            if (!LookupTransaction(txin.prevout.hash, txPrev) || txin.prevout.n >= txPrev.vout.size())
+            {
+                json e; e["vout"] = (int)i; e["error"] = "previous output not found; give it in prevtxs";
+                errors.push_back(e);
+                fComplete = false;
+                continue;
+            }
+            scriptPubKey = txPrev.vout[txin.prevout.n].scriptPubKey;
+        }
+
+        // Sign afresh into a scratch transaction, then merge with what the
+        // input already carried
+        CScript scriptSigOld = txin.scriptSig;
+        CTransaction txScratch = tx;
+        txScratch.vin[i].scriptSig.clear();
+        CTransaction txFrom;
+        txFrom.vout.resize(txin.prevout.n + 1);
+        txFrom.vout[txin.prevout.n].scriptPubKey = scriptPubKey;
+        // SignSignature checks prevout.hash against txFrom's hash only through
+        // VerifySignature; here the outpoint is trusted as given
+        CScript scriptSigNew;
+        {
+            CTransaction txForSig = txScratch;
+            uint256 hash;
+            if (scriptPubKey.IsPayToScriptHash())
+            {
+                CScript subscript;
+                if (GetWalletCScript(uint160(vector<unsigned char>(scriptPubKey.begin() + 2, scriptPubKey.begin() + 22)), subscript))
+                {
+                    hash = SignatureHash(subscript, txForSig, i, SIGHASH_ALL);
+                    CScript inner;
+                    Solver(subscript, hash, SIGHASH_ALL, inner);
+                    // merge inner parts (multisig) before appending the script
+                    CScript innerOld;
+                    {
+                        vector<vector<unsigned char> > pushes;
+                        CScript::const_iterator pc = scriptSigOld.begin();
+                        opcodetype opcode; vector<unsigned char> vch;
+                        while (pc < scriptSigOld.end() && scriptSigOld.GetOp(pc, opcode, vch))
+                            pushes.push_back(vch);
+                        for (size_t k = 0; k + 1 < pushes.size(); k++)
+                            innerOld << pushes[k];
+                    }
+                    CScript merged = CombineMultisig(subscript, txForSig, i, innerOld, inner);
+                    scriptSigNew = merged;
+                    scriptSigNew << static_cast<vector<unsigned char> >(subscript);
+                }
+                else
+                    scriptSigNew = scriptSigOld;
+            }
+            else
+            {
+                hash = SignatureHash(scriptPubKey, txForSig, i, SIGHASH_ALL);
+                CScript fresh;
+                Solver(scriptPubKey, hash, SIGHASH_ALL, fresh);
+                txnouttype whichType;
+                vector<vector<unsigned char> > vSolutions;
+                if (SolverTyped(scriptPubKey, whichType, vSolutions) && whichType == TX_MULTISIG)
+                    scriptSigNew = CombineMultisig(scriptPubKey, txForSig, i, scriptSigOld, fresh);
+                else
+                    scriptSigNew = fresh.empty() ? scriptSigOld : fresh;
+            }
+        }
+        txin.scriptSig = scriptSigNew;
+        if (!VerifyScriptP2SH(txin.scriptSig, scriptPubKey, tx, i))
+        {
+            fComplete = false;
+            json e; e["vout"] = (int)i; e["error"] = "input does not verify yet (more signatures needed, or keys not held)";
+            errors.push_back(e);
+        }
+    }
+
+    // Forget the caller's redeem scripts again unless the wallet had them
+    for (map<uint160, CScript>::iterator it = mapRedeem.begin(); it != mapRedeem.end(); ++it)
+        CRITICAL_BLOCK(cs_mapKeys)
+            if (mapScripts.count(it->first) && !HaveCScript(it->first))
+                mapScripts.erase(it->first);
+
+    CDataStream ss(SER_NETWORK);
+    ss << tx;
+    json j;
+    j["hex"] = HexStr(ss.begin(), ss.end(), false);
+    j["complete"] = fComplete;
+    if (!errors.empty())
+        j["errors"] = errors;
+    return j;
+}
+
+static json rpc_sendrawtransaction(const json& p)
+{
+    if (p.size() < 1)
+        throw runtime_error("sendrawtransaction <hex>");
+    CTransaction tx = TxFromHexParam(p[0]);
+    uint256 hash = tx.GetHash();
+    CDataStream ssTx(SER_NETWORK);
+    ssTx << tx;
+    CRITICAL_BLOCK(cs_main)
+    {
+        CTransaction txHave;
+        bool fHave = LookupTransaction(hash, txHave);
+        if (!fHave)
+        {
+            bool fMissingInputs = false;
+            if (!tx.AcceptTransaction(true, &fMissingInputs))
+                throw runtime_error(fMissingInputs ? "transaction rejected: missing inputs"
+                                                   : "transaction rejected (invalid, non-standard, or already spent inputs)");
+            AddToWalletIfMine(tx, NULL);
+        }
+        RelayMessage(CInv(MSG_TX, hash), ssTx);
+    }
+    return hash.GetHex();
+}
+
 static json rpc_help(const json&)
 {
     return "getinfo getblockcount getblockhash getblock getnewaddress validateaddress "
-           "getbalance sendtoaddress gettransaction listtransactions listsinceblock help";
+           "getbalance sendtoaddress gettransaction listtransactions listsinceblock "
+           "createmultisig addmultisigaddress decodescript listunspent createrawtransaction "
+           "decoderawtransaction getrawtransaction signrawtransaction sendrawtransaction help";
 }
 
 struct RpcEntry { const char* name; RpcMethod fn; };
@@ -468,6 +1012,15 @@ static const RpcEntry kMethods[] = {
     { "gettransaction",   rpc_gettransaction },
     { "listtransactions", rpc_listtransactions },
     { "listsinceblock",   rpc_listsinceblock },
+    { "createmultisig",   rpc_createmultisig },
+    { "addmultisigaddress", rpc_addmultisigaddress },
+    { "decodescript",     rpc_decodescript },
+    { "listunspent",      rpc_listunspent },
+    { "createrawtransaction", rpc_createrawtransaction },
+    { "decoderawtransaction", rpc_decoderawtransaction },
+    { "getrawtransaction", rpc_getrawtransaction },
+    { "signrawtransaction", rpc_signrawtransaction },
+    { "sendrawtransaction", rpc_sendrawtransaction },
     { "help",             rpc_help },
 };
 

@@ -4300,6 +4300,192 @@ static int RunNetHardeningSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// Script shapes, the script address, bare multisig signed by one wallet and
+// by two halves combined, pay-to-script-hash signing against the redeem
+// script, and the relay policy around all of it -- everything 1.2.28 ships
+// ahead of the rules v3 switch that gives P2SH its meaning.
+static int RunMultisigSelfTest()
+{
+    printf("multisig self-test\n");
+    int nFail = 0;
+
+    // three keys, two in this wallet, one held elsewhere
+    CKey keyA, keyB, keyC;
+    keyA.MakeNewKey(); keyB.MakeNewKey(); keyC.MakeNewKey();
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        mapKeys[keyA.GetPubKey()] = keyA.GetPrivKey(); mapPubKeys[Hash160(keyA.GetPubKey())] = keyA.GetPubKey();
+        mapKeys[keyB.GetPubKey()] = keyB.GetPrivKey(); mapPubKeys[Hash160(keyB.GetPubKey())] = keyB.GetPubKey();
+    }
+    std::vector<std::vector<unsigned char> > keys;
+    keys.push_back(keyA.GetPubKey()); keys.push_back(keyB.GetPubKey()); keys.push_back(keyC.GetPubKey());
+
+    // ---- shapes
+    {
+        txnouttype t; std::vector<std::vector<unsigned char> > sol;
+        CScript p2pkh; p2pkh << OP_DUP << OP_HASH160 << Hash160(keyA.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+        CScript p2pk; p2pk << keyA.GetPubKey() << OP_CHECKSIG;
+        CScript ms; ms.SetMultisig(2, keys);
+        CScript p2sh; p2sh.SetPayToScriptHash(ms);
+        nFail += Check(SolverTyped(p2pkh, t, sol) && t == TX_PUBKEYHASH && sol.size() == 1 && uint160(sol[0]) == Hash160(keyA.GetPubKey()),
+                       "pay-to-pubkey-hash is recognized with its hash") ? 0 : 1;
+        nFail += Check(SolverTyped(p2pk, t, sol) && t == TX_PUBKEY && sol[0] == keyA.GetPubKey(),
+                       "pay-to-pubkey is recognized with its key") ? 0 : 1;
+        nFail += Check(SolverTyped(ms, t, sol) && t == TX_MULTISIG && sol.size() == 5 && sol[0][0] == 2 && sol[4][0] == 3 && sol[2] == keyB.GetPubKey(),
+                       "2-of-3 multisig is recognized: m, the keys in order, n") ? 0 : 1;
+        nFail += Check(SolverTyped(p2sh, t, sol) && t == TX_SCRIPTHASH && uint160(sol[0]) == Hash160(ms) && p2sh.IsPayToScriptHash(),
+                       "pay-to-script-hash is recognized with the script hash") ? 0 : 1;
+        CScript bad; bad << OP_3 << keyA.GetPubKey() << keyB.GetPubKey() << OP_2 << OP_CHECKMULTISIG;
+        nFail += Check(!SolverTyped(bad, t, sol), "3-of-2 is not a multisig") ? 0 : 1;
+        CScript bad2; bad2 << OP_1 << std::vector<unsigned char>(20, 7) << OP_1 << OP_CHECKMULTISIG;
+        nFail += Check(!SolverTyped(bad2, t, sol), "a 20-byte push is not a key") ? 0 : 1;
+        CScript trailing = ms; trailing << OP_NOP;
+        nFail += Check(!SolverTyped(trailing, t, sol), "anything after OP_CHECKMULTISIG breaks the shape") ? 0 : 1;
+        nFail += Check(std::string(GetTxnOutputType(TX_MULTISIG)) == "multisig", "the type has a name") ? 0 : 1;
+
+        // ---- the script address
+        std::string strAddr = Hash160ToScriptAddress(Hash160(ms));
+        uint160 h; bool fScript = false;
+        nFail += Check(strAddr[0] == 'C' && DecodeAnyAddress(strAddr, h, fScript) && fScript && h == Hash160(ms),
+                       "a script address starts with C and decodes back to the script hash") ? 0 : 1;
+        nFail += Check(!AddressToHash160(strAddr, h), "the key-hash decoder refuses it") ? 0 : 1;
+        std::string strKeyAddr = PubKeyToAddress(keyA.GetPubKey());
+        nFail += Check(DecodeAnyAddress(strKeyAddr, h, fScript) && !fScript && h == Hash160(keyA.GetPubKey()),
+                       "a B address decodes as a key hash") ? 0 : 1;
+        nFail += Check(!RulesV3Active(GetAdjustedTime()) && RulesV3Time() == 0,
+                       "rules v3 are not scheduled: pay-to-script-hash is not live") ? 0 : 1;
+
+        // ---- IsMine and relay policy
+        nFail += Check(!IsMine(ms), "2-of-3 with one key elsewhere is not 'mine': the wallet cannot spend it alone... " ) ? 0 : 1;
+        std::vector<std::vector<unsigned char> > keysAB(keys.begin(), keys.begin() + 2);
+        CScript msAB; msAB.SetMultisig(2, keysAB);
+        nFail += Check(IsMine(msAB), "...but 2-of-2 with both keys here is") ? 0 : 1;
+        nFail += Check(!IsMine(p2sh), "the script hash of an unknown redeem script is not mine") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts[Hash160(msAB)] = msAB;
+        CScript p2shAB; p2shAB.SetPayToScriptHash(msAB);
+        nFail += Check(IsMine(p2shAB), "with the redeem script held and its keys ours, the script hash is mine") ? 0 : 1;
+
+        CTransaction txStd;
+        txStd.vin.resize(1);
+        txStd.vin[0].scriptSig = CScript() << std::vector<unsigned char>(72, 1);
+        txStd.vout.push_back(CTxOut(1 * COIN, ms));
+        nFail += Check(txStd.IsStandard(), "a bare 2-of-3 output is standard (relayed)") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > keys4 = keys; keys4.push_back(keyC.GetPubKey());
+        CScript ms4; ms4.SetMultisig(2, keys4);
+        txStd.vout[0].scriptPubKey = ms4;
+        nFail += Check(!txStd.IsStandard(), "four keys is not (relay policy, not validity)") ? 0 : 1;
+        txStd.vout[0].scriptPubKey = p2sh;
+        nFail += Check(!txStd.IsStandard(), "a pay-to-script-hash output is not relayed before rules v3") ? 0 : 1;
+        txStd.vout[0].scriptPubKey = p2pkh;
+        txStd.vin[0].scriptSig = CScript() << OP_0 << std::vector<unsigned char>(72, 1) << std::vector<unsigned char>(72, 2) << std::vector<unsigned char>(72, 3);
+        nFail += Check(txStd.IsStandard(), "a scriptSig with three signatures fits the relay limit") ? 0 : 1;
+    }
+
+    // ---- spending a bare 2-of-3
+    CScript ms; ms.SetMultisig(2, keys);
+    CTransaction txFrom;
+    txFrom.vout.push_back(CTxOut(10 * COIN, ms));
+    CTransaction txTo;
+    txTo.vin.push_back(CTxIn(COutPoint(txFrom.GetHash(), 0)));
+    txTo.vout.push_back(CTxOut(9 * COIN, CScript() << keyA.GetPubKey() << OP_CHECKSIG));
+    {
+        CTransaction t1 = txTo;
+        nFail += Check(SignSignature(txFrom, t1, 0), "the wallet with two of the keys signs a 2-of-3 in one go") ? 0 : 1;
+        nFail += Check(VerifySignature(txFrom, t1, 0, 0, true), "and the spend verifies under the strict rules") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > pushes;
+        CScript::const_iterator pc = t1.vin[0].scriptSig.begin(); opcodetype op; std::vector<unsigned char> vch;
+        while (pc < t1.vin[0].scriptSig.end() && t1.vin[0].scriptSig.GetOp(pc, op, vch)) pushes.push_back(vch);
+        nFail += Check(pushes.size() == 3 && pushes[0].empty(), "scriptSig is OP_0 then exactly two signatures") ? 0 : 1;
+        nFail += Check(t1.IsStandard(), "the spend is standard") ? 0 : 1;
+
+        // two halves: A alone, then C (elsewhere) alone, combined
+        CTransaction tA = txTo, tC = txTo;
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyB.GetPubKey()); mapPubKeys.erase(Hash160(keyB.GetPubKey()));
+        }
+        uint256 hash = SignatureHash(ms, txTo, 0, SIGHASH_ALL);
+        CScript sigA;
+        bool fA = Solver(ms, hash, SIGHASH_ALL, sigA);
+        nFail += Check(!fA, "one key of two required: the solver reports incomplete") ? 0 : 1;
+        tA.vin[0].scriptSig = sigA;
+        nFail += Check(!VerifyScriptP2SH(tA.vin[0].scriptSig, ms, tA, 0), "and the half-signed input does not verify") ? 0 : 1;
+        // now only C
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyA.GetPubKey()); mapPubKeys.erase(Hash160(keyA.GetPubKey()));
+            mapKeys[keyC.GetPubKey()] = keyC.GetPrivKey(); mapPubKeys[Hash160(keyC.GetPubKey())] = keyC.GetPubKey();
+        }
+        CScript sigC;
+        Solver(ms, hash, SIGHASH_ALL, sigC);
+        CScript combined = CombineMultisig(ms, txTo, 0, sigA, sigC);
+        tC.vin[0].scriptSig = combined;
+        nFail += Check(VerifyScriptP2SH(tC.vin[0].scriptSig, ms, tC, 0) && VerifySignature(txFrom, tC, 0, 0, true),
+                       "A's half and C's half combined verify: co-signing across two wallets works") ? 0 : 1;
+        CScript again = CombineMultisig(ms, txTo, 0, combined, sigA);
+        nFail += Check(again == combined, "combining again with a half already in is a no-op") ? 0 : 1;
+        // signatures in wrong key order are put right
+        CScript reversed; reversed << OP_0;
+        {
+            std::vector<std::vector<unsigned char> > pv;
+            CScript::const_iterator pc2 = combined.begin();
+            while (pc2 < combined.end() && combined.GetOp(pc2, op, vch)) if (!vch.empty()) pv.push_back(vch);
+            for (size_t i = pv.size(); i-- > 0;) reversed << pv[i];
+        }
+        CTransaction tR = txTo; tR.vin[0].scriptSig = reversed;
+        nFail += Check(!VerifyScriptP2SH(tR.vin[0].scriptSig, ms, tR, 0), "signatures out of key order do not verify (CHECKMULTISIG is ordered)") ? 0 : 1;
+        tR.vin[0].scriptSig = CombineMultisig(ms, txTo, 0, reversed, CScript());
+        nFail += Check(VerifyScriptP2SH(tR.vin[0].scriptSig, ms, tR, 0), "CombineMultisig puts them in key order") ? 0 : 1;
+        // restore A and B for the P2SH part
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyC.GetPubKey()); mapPubKeys.erase(Hash160(keyC.GetPubKey()));
+            mapKeys[keyA.GetPubKey()] = keyA.GetPrivKey(); mapPubKeys[Hash160(keyA.GetPubKey())] = keyA.GetPubKey();
+            mapKeys[keyB.GetPubKey()] = keyB.GetPrivKey(); mapPubKeys[Hash160(keyB.GetPubKey())] = keyB.GetPubKey();
+        }
+    }
+
+    // ---- pay-to-script-hash: signing against the redeem script
+    {
+        CScript p2sh; p2sh.SetPayToScriptHash(ms);
+        CTransaction txFromS;
+        txFromS.vout.push_back(CTxOut(10 * COIN, p2sh));
+        CTransaction t = txTo;
+        t.vin[0].prevout = COutPoint(txFromS.GetHash(), 0);
+        nFail += Check(!SignSignature(txFromS, t, 0), "without the redeem script the wallet cannot sign for the hash") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts[Hash160(ms)] = ms;
+        nFail += Check(SignSignature(txFromS, t, 0), "with it, it signs") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > pushes;
+        CScript::const_iterator pc = t.vin[0].scriptSig.begin(); opcodetype op; std::vector<unsigned char> vch;
+        while (pc < t.vin[0].scriptSig.end() && t.vin[0].scriptSig.GetOp(pc, op, vch)) pushes.push_back(vch);
+        nFail += Check(pushes.size() == 4 && pushes[0].empty() && CScript(pushes[3].begin(), pushes[3].end()) == ms,
+                       "scriptSig is OP_0, two signatures, then the redeem script as one push") ? 0 : 1;
+        nFail += Check(VerifyScriptP2SH(t.vin[0].scriptSig, p2sh, t, 0),
+                       "the rules v3 check runs the redeem script and accepts the spend") ? 0 : 1;
+        CTransaction tBad = t;
+        tBad.vin[0].scriptSig = CScript() << static_cast<std::vector<unsigned char> >(ms);
+        nFail += Check(VerifySignature(txFromS, tBad, 0, 0, true) && !VerifyScriptP2SH(tBad.vin[0].scriptSig, p2sh, tBad, 0),
+                       "today's rule accepts the script alone (anyone-can-spend); the rules v3 check refuses it") ? 0 : 1;
+        CScript other; other.SetMultisig(1, keys);
+        tBad.vin[0].scriptSig = CScript() << OP_0 << pushes[1] << static_cast<std::vector<unsigned char> >(other);
+        nFail += Check(!VerifyScriptP2SH(tBad.vin[0].scriptSig, p2sh, tBad, 0), "a different script than the hash names is refused") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts.clear();
+    }
+
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        mapKeys.erase(keyA.GetPubKey()); mapPubKeys.erase(Hash160(keyA.GetPubKey()));
+        mapKeys.erase(keyB.GetPubKey()); mapPubKeys.erase(Hash160(keyB.GetPubKey()));
+    }
+
+    printf("\n%s\n", nFail == 0 ? "ALL TESTS PASSED (0 failures)"
+                                 : strprintf("%d FAILURE(S)", nFail).c_str());
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunManagedTorSelfTest()
 {
     printf("managed-tor self-test\n");
@@ -4418,12 +4604,14 @@ int RunSelfTest(const std::string& name)
         return RunRulesV2SelfTest();
     if (name == "net-hardening")
         return RunNetHardeningSelfTest();
+    if (name == "multisig")
+        return RunMultisigSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, multisig, socks5-proxy, managed-tor\n");
     return 1;
 }

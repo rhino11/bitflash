@@ -1073,9 +1073,148 @@ bool Solver(const CScript& scriptPubKey, vector<pair<opcodetype, valtype> >& vSo
 }
 
 
+const char* GetTxnOutputType(txnouttype t)
+{
+    switch (t)
+    {
+    case TX_NONSTANDARD: return "nonstandard";
+    case TX_PUBKEY: return "pubkey";
+    case TX_PUBKEYHASH: return "pubkeyhash";
+    case TX_SCRIPTHASH: return "scripthash";
+    case TX_MULTISIG: return "multisig";
+    }
+    return NULL;
+}
+
+bool SolverTyped(const CScript& scriptPubKey, txnouttype& typeRet, vector<valtype>& vSolutionsRet)
+{
+    vSolutionsRet.clear();
+    typeRet = TX_NONSTANDARD;
+
+    if (scriptPubKey.IsPayToScriptHash())
+    {
+        typeRet = TX_SCRIPTHASH;
+        vSolutionsRet.push_back(valtype(scriptPubKey.begin() + 2, scriptPubKey.begin() + 22));
+        return true;
+    }
+
+    // The two shapes the network has used since genesis
+    vector<pair<opcodetype, valtype> > vSolution;
+    if (Solver(scriptPubKey, vSolution))
+    {
+        if (vSolution.size() == 1 && vSolution[0].first == OP_PUBKEY)
+        {
+            typeRet = TX_PUBKEY;
+            vSolutionsRet.push_back(vSolution[0].second);
+            return true;
+        }
+        if (vSolution.size() == 1 && vSolution[0].first == OP_PUBKEYHASH)
+        {
+            typeRet = TX_PUBKEYHASH;
+            vSolutionsRet.push_back(vSolution[0].second);
+            return true;
+        }
+        return false;
+    }
+
+    // m <key>... n OP_CHECKMULTISIG, 1 <= m <= n <= 16, every key a full
+    // (65-byte) or compressed (33-byte) public key
+    CScript::const_iterator pc = scriptPubKey.begin();
+    opcodetype opcode;
+    valtype vch;
+    if (!scriptPubKey.GetOp(pc, opcode, vch) || opcode < OP_1 || opcode > OP_16)
+        return false;
+    int m = CScript::DecodeOP_N(opcode);
+    vector<valtype> keys;
+    for (;;)
+    {
+        if (!scriptPubKey.GetOp(pc, opcode, vch))
+            return false;
+        if (opcode >= OP_1 && opcode <= OP_16)
+            break;
+        if (vch.size() != 65 && vch.size() != 33)
+            return false;
+        keys.push_back(vch);
+    }
+    int n = CScript::DecodeOP_N(opcode);
+    if (n != (int)keys.size() || m < 1 || m > n)
+        return false;
+    if (!scriptPubKey.GetOp(pc, opcode, vch) || opcode != OP_CHECKMULTISIG)
+        return false;
+    if (pc != scriptPubKey.end())
+        return false;
+    typeRet = TX_MULTISIG;
+    vSolutionsRet.push_back(valtype(1, (unsigned char)m));
+    for (size_t i = 0; i < keys.size(); i++)
+        vSolutionsRet.push_back(keys[i]);
+    vSolutionsRet.push_back(valtype(1, (unsigned char)n));
+    return true;
+}
+
+// One signature for one key, appended to the scriptSig. hash == 0 means only
+// ask whether we could.
+static bool SignOne(const valtype& vchPubKey, uint256 hash, int nHashType, CScript& scriptSigRet)
+{
+    if (!WalletCanSpendKey(vchPubKey))
+        return false;
+    if (hash == 0)
+        return true;
+    CPrivKey vchPrivKey;
+    string strError;
+    if (!GetWalletPrivKey(vchPubKey, vchPrivKey, strError))
+        return false;
+    vector<unsigned char> vchSig;
+    if (!CKey::Sign(vchPrivKey, hash, vchSig))
+        return false;
+    vchSig.push_back((unsigned char)nHashType);
+    scriptSigRet << vchSig;
+    return true;
+}
+
+// Bare multisig: OP_0 (the element CHECKMULTISIG consumes and never looks at,
+// a 0.1.0 accident every Bitcoin-derived chain keeps) then m signatures in
+// key order. Ours to spend only if we hold every key; signable if we hold m.
+static bool SolverMultisig(const vector<valtype>& vSolutions, uint256 hash, int nHashType, CScript& scriptSigRet)
+{
+    int nRequired = vSolutions.front()[0];
+    int nKeys = (int)vSolutions.size() - 2;
+    if (hash == 0)
+    {
+        for (int i = 1; i <= nKeys; i++)
+            if (!WalletCanSpendKey(vSolutions[i]))
+                return false;
+        return true;
+    }
+    scriptSigRet << OP_0;
+    int nSigned = 0;
+    for (int i = 1; i <= nKeys && nSigned < nRequired; i++)
+        if (SignOne(vSolutions[i], hash, nHashType, scriptSigRet))
+            nSigned++;
+    return nSigned == nRequired;
+}
+
 bool Solver(const CScript& scriptPubKey, uint256 hash, int nHashType, CScript& scriptSigRet)
 {
     scriptSigRet.clear();
+
+    txnouttype whichType;
+    vector<valtype> vSolutions;
+    if (SolverTyped(scriptPubKey, whichType, vSolutions))
+    {
+        if (whichType == TX_MULTISIG)
+            return SolverMultisig(vSolutions, hash, nHashType, scriptSigRet);
+        if (whichType == TX_SCRIPTHASH)
+        {
+            // Signing for a script hash is done by SignSignature(), which
+            // hashes against the redeem script; here only "is it ours".
+            CScript subscript;
+            if (!GetWalletCScript(uint160(vSolutions[0]), subscript))
+                return false;
+            if (hash != 0)
+                return false;
+            return IsMine(subscript);
+        }
+    }
 
     vector<pair<opcodetype, valtype> > vSolution;
     if (!Solver(scriptPubKey, vSolution))
@@ -1206,6 +1345,20 @@ bool SignSignature(const CTransaction& txFrom, CTransaction& txTo, unsigned int 
     assert(txin.prevout.n < txFrom.vout.size());
     const CTxOut& txout = txFrom.vout[txin.prevout.n];
 
+    // Pay-to-script-hash: the signature commits to the redeem script, which
+    // then goes last in the scriptSig as one push.
+    if (txout.scriptPubKey.IsPayToScriptHash())
+    {
+        CScript subscript;
+        if (!GetWalletCScript(uint160(valtype(txout.scriptPubKey.begin() + 2, txout.scriptPubKey.begin() + 22)), subscript))
+            return false;
+        uint256 hash = SignatureHash(subscript, txTo, nIn, nHashType);
+        if (!Solver(subscript, hash, nHashType, txin.scriptSig))
+            return false;
+        txin.scriptSig << static_cast<valtype>(subscript);
+        return true;
+    }
+
     // Leave out the signature from the hash, since a signature can't sign itself.
     // The checksig op will also drop the signatures from its hash.
     uint256 hash = SignatureHash(scriptPrereq + txout.scriptPubKey, txTo, nIn, nHashType);
@@ -1223,6 +1376,80 @@ bool SignSignature(const CTransaction& txFrom, CTransaction& txTo, unsigned int 
     return true;
 }
 
+
+bool VerifyScriptP2SH(const CScript& scriptSig, const CScript& scriptPubKey, const CTransaction& txTo, unsigned int nIn)
+{
+    if (!scriptSig.IsPushOnly())
+        return false;
+    if (!EvalScript(scriptSig + CScript(OP_CODESEPARATOR) + scriptPubKey, txTo, nIn))
+        return false;
+    if (!scriptPubKey.IsPayToScriptHash())
+        return true;
+
+    // Split off the last push: that is the redeem script
+    vector<valtype> pushes;
+    CScript::const_iterator pc = scriptSig.begin();
+    opcodetype opcode;
+    valtype vch;
+    while (pc < scriptSig.end())
+    {
+        if (!scriptSig.GetOp(pc, opcode, vch))
+            return false;
+        pushes.push_back(vch);
+    }
+    if (pushes.empty())
+        return false;
+    CScript subscript(pushes.back().begin(), pushes.back().end());
+    if (Hash160(subscript) != uint160(valtype(scriptPubKey.begin() + 2, scriptPubKey.begin() + 22)))
+        return false;
+    CScript inner;
+    for (size_t i = 0; i + 1 < pushes.size(); i++)
+        inner << pushes[i];
+    return EvalScript(inner + CScript(OP_CODESEPARATOR) + subscript, txTo, nIn);
+}
+
+CScript CombineMultisig(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn,
+                        const CScript& sigA, const CScript& sigB)
+{
+    txnouttype whichType;
+    vector<valtype> vSolutions;
+    if (!SolverTyped(scriptCode, whichType, vSolutions) || whichType != TX_MULTISIG)
+        return sigA.empty() ? sigB : sigA;
+    int nRequired = vSolutions.front()[0];
+    int nKeys = (int)vSolutions.size() - 2;
+
+    // Every push from both sides that looks like a signature
+    vector<valtype> vSigs;
+    const CScript* both[2] = { &sigA, &sigB };
+    for (int s = 0; s < 2; s++)
+    {
+        CScript::const_iterator pc = both[s]->begin();
+        opcodetype opcode;
+        valtype vch;
+        while (pc < both[s]->end() && both[s]->GetOp(pc, opcode, vch))
+            if (!vch.empty())
+                vSigs.push_back(vch);
+    }
+
+    // For each key in order, the first signature that verifies for it
+    CScript result;
+    result << OP_0;
+    int nFound = 0;
+    for (int k = 1; k <= nKeys && nFound < nRequired; k++)
+    {
+        for (size_t i = 0; i < vSigs.size(); i++)
+        {
+            int nHashType = vSigs[i].back();
+            if (CheckSig(vSigs[i], vSolutions[k], scriptCode, txTo, nIn, nHashType, false))
+            {
+                result << vSigs[i];
+                nFound++;
+                break;
+            }
+        }
+    }
+    return result;
+}
 
 bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType, bool fStrictSigs)
 {

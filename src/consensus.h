@@ -35,4 +35,17 @@ static const int64 MAX_TIME_ADJUSTMENT = 70 * 60;
 unsigned int RulesV2Time();
 bool RulesV2Active(unsigned int nBlockTime);
 
+// Rules v3 -- pay-to-script-hash (BIP16), OP_CHECKLOCKTIMEVERIFY (BIP65),
+// OP_CHECKSEQUENCEVERIFY with relative lock-time and median-time-past
+// (BIP68/112/113), and sigops counted inside redeem scripts. Not scheduled:
+// a time of 0 means "never, so far". The wallet already understands the
+// shapes (1.2.28) so that the tools exist before the rule does; it refuses to
+// pay to a script hash while this reads 0, because until the rule is live
+// such an output belongs to whoever spends it first.
+static const unsigned int RULES_V3_TIME_MAINNET = 0;
+static const unsigned int RULES_V3_TIME_TESTNET = 0;
+
+unsigned int RulesV3Time();
+bool RulesV3Active(unsigned int nBlockTime);
+
 #endif
