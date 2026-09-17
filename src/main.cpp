@@ -1112,6 +1112,26 @@ bool AddToWallet(const CWalletTx& wtxIn)
         if (!wtx.WriteToDisk())
             return false;
 
+        // Whatever this transaction spends of ours is spent now. 0.1.0 set
+        // the flag only in CommitTransaction, i.e. for sends it built itself;
+        // a spend that arrived from outside -- a raw transaction, a copy of
+        // this wallet elsewhere -- left the coin listed as available until
+        // RescanSpentFlags at the next start, and the next send built on it
+        // was refused for missing inputs (Bitcoin 0.3: WalletUpdateSpent).
+        foreach(const CTxIn& txin, wtx.vin)
+        {
+            map<uint256, CWalletTx>::iterator mi = mapWallet.find(txin.prevout.hash);
+            if (mi == mapWallet.end() || mi->second.fSpent)
+                continue;
+            CWalletTx& prev = mi->second;
+            if (txin.prevout.n < prev.vout.size() && prev.vout[txin.prevout.n].IsMine())
+            {
+                prev.fSpent = true;
+                prev.WriteToDisk();
+                vWalletUpdated.push_back(make_pair(prev.GetHash(), false));
+            }
+        }
+
         // Notify UI
         vWalletUpdated.push_back(make_pair(hash, fInsertedNew));
     }
@@ -1123,9 +1143,21 @@ bool AddToWallet(const CWalletTx& wtxIn)
 
 bool AddToWalletIfMine(const CTransaction& tx, const CBlock* pblock)
 {
-    if (tx.IsMine() || mapWallet.count(tx.GetHash()))
+    // Ours if it pays us, or if it spends something of ours: the second kind
+    // is a send, and the wallet has to know its coin went.
+    bool fSpendsMine = false;
+    if (!tx.IsCoinBase())
+        foreach(const CTxIn& txin, tx.vin)
+            if (txin.IsMine())
+            {
+                fSpendsMine = true;
+                break;
+            }
+    if (tx.IsMine() || fSpendsMine || mapWallet.count(tx.GetHash()))
     {
         CWalletTx wtx(tx);
+        if (fSpendsMine)
+            wtx.fFromMe = true;
         // Get merkle branch if transaction was found in a block
         if (pblock)
             wtx.SetMerkleBranch(pblock);
