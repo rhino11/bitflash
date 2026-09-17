@@ -245,6 +245,10 @@ public:
     char pchMessageStart[MESSAGE_START_SIZE];
     char pchCommand[COMMAND_SIZE];
     unsigned int nMessageSize;
+    // First 4 bytes of Hash(payload). On the wire only when the stream's
+    // version is PROTO_CHECKSUM_VERSION or later; 0.1.0 had no way to tell a
+    // payload from the bytes a peer, or the path to it, had mangled.
+    unsigned int nChecksum;
 
     CMessageHeader()
     {
@@ -252,6 +256,7 @@ public:
         memset(pchCommand, 0, sizeof(pchCommand));
         pchCommand[1] = 1;
         nMessageSize = -1;
+        nChecksum = 0;
     }
 
     CMessageHeader(const char* pszCommand, unsigned int nMessageSizeIn)
@@ -259,6 +264,7 @@ public:
         memcpy(pchMessageStart, ::pchMessageStart, sizeof(pchMessageStart));
         strncpy(pchCommand, pszCommand, COMMAND_SIZE);
         nMessageSize = nMessageSizeIn;
+        nChecksum = 0;
     }
 
     IMPLEMENT_SERIALIZE
@@ -266,7 +272,15 @@ public:
         READWRITE(FLATDATA(pchMessageStart));
         READWRITE(FLATDATA(pchCommand));
         READWRITE(nMessageSize);
+        if (nVersion >= PROTO_CHECKSUM_VERSION)
+            READWRITE(nChecksum);
     )
+
+    // Bytes this header takes on a stream of the given version.
+    static unsigned int SizeOnWire(int nStreamVersion)
+    {
+        return nStreamVersion >= PROTO_CHECKSUM_VERSION ? 24 : 20;
+    }
 
     string GetCommand()
     {
@@ -627,6 +641,17 @@ public:
     CCriticalSection cs_vSend;
     CCriticalSection cs_vRecv;
     unsigned int nPushPos;
+    // Header size and checksum choice of the message being built, fixed at
+    // BeginMessage(): the stream version may change under it (the peer's
+    // version message arrives on another thread) and EndMessage() has to
+    // finish the header it started, not the one the new version would write.
+    unsigned int nPushHeaderSize;
+    bool fPushChecksum;
+    // Misbehavior score, Bitcoin 0.3.x style: garbage costs points, 100 points
+    // disconnects and, for a peer we dialled by .btf address, bans that
+    // address for a day. An inbound onion peer has no address to ban -- Tor
+    // is the whole point -- so for it a ban is a disconnect and nothing more.
+    int nMisbehavior;
     CAddress addr;
     int nVersion;
     bool fClient;
@@ -716,7 +741,15 @@ public:
         strBtfMeeting.clear();
         nStartingHeight = -1;
         strRelease = "";
+        nPushHeaderSize = 0;
+        fPushChecksum = false;
+        nMisbehavior = 0;
         vfSubscribe.assign(256, false);
+        // Nothing is known about the peer yet, so the version message goes
+        // out in the 101 framing every node understands. Both streams move to
+        // the negotiated version when the peer's version message arrives.
+        vSend.SetVersion(PROTO_NO_CHECKSUM_VERSION);
+        vRecv.SetVersion(PROTO_NO_CHECKSUM_VERSION);
 
         // Push a version message
         /// when NTP implemented, change to just nTime = GetAdjustedTime()
@@ -819,7 +852,9 @@ public:
         if (nPushPos != -1)
             AbortMessage();
         nPushPos = vSend.size();
+        fPushChecksum = vSend.GetVersion() >= PROTO_CHECKSUM_VERSION;
         vSend << CMessageHeader(pszCommand, 0);
+        nPushHeaderSize = vSend.size() - nPushPos;
         if (LogAcceptsCategory("net")) printf("sending: %-12s ", pszCommand);
     }
 
@@ -846,9 +881,16 @@ public:
         if (nPushPos == -1)
             return;
 
-        // Patch in the size
-        unsigned int nSize = vSend.size() - nPushPos - sizeof(CMessageHeader);
+        // Patch in the size, and the checksum when the peer can read one
+        unsigned int nSize = vSend.size() - nPushPos - nPushHeaderSize;
         memcpy((char*)&vSend[nPushPos] + offsetof(CMessageHeader, nMessageSize), &nSize, sizeof(nSize));
+        if (fPushChecksum)
+        {
+            uint256 hash = Hash(vSend.begin() + nPushPos + nPushHeaderSize, vSend.end());
+            unsigned int nChecksum = 0;
+            memcpy(&nChecksum, &hash, sizeof(nChecksum));
+            memcpy((char*)&vSend[nPushPos] + offsetof(CMessageHeader, nChecksum), &nChecksum, sizeof(nChecksum));
+        }
 
         if (LogAcceptsCategory("net")) printf("(%d bytes)  ", nSize);
         //for (int i = nPushPos+sizeof(CMessageHeader); i < min(vSend.size(), nPushPos+sizeof(CMessageHeader)+20U); i++)
@@ -863,7 +905,7 @@ public:
     {
         if (nPushPos == -1)
             return;
-        int nSize = vSend.size() - nPushPos - sizeof(CMessageHeader);
+        int nSize = vSend.size() - nPushPos - nPushHeaderSize;
         if (nSize > 0)
             EndMessage();
         else
@@ -1051,7 +1093,18 @@ public:
     void Subscribe(unsigned int nChannel, unsigned int nHops=0);
     void CancelSubscribe(unsigned int nChannel);
     void Disconnect();
+    // Add to the misbehavior score; true when this pushed it over the line
+    // and the peer is now being dropped (and its .btf address banned).
+    bool Misbehaving(int nHowMuch);
 };
+
+static const int BAN_MISBEHAVIOR_THRESHOLD = 100;
+static const int64 BAN_SECONDS = 24 * 60 * 60;
+// .btf addresses we will not dial until the time given. Nothing about an
+// inbound onion peer can be banned, so this only ever holds addresses we
+// chose to connect to.
+bool BtfIsBanned(const std::string& strBtfAddr);
+int BtfBannedCount();
 
 
 

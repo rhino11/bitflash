@@ -4023,6 +4023,283 @@ static int RunSocks5ProxySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// Checksum framing, misbehavior and bans, DoS scores on blocks, the initial
+// block download gate, and confirmation depth in coin selection: the network
+// hardening Bitcoin picked up between 0.2 and 0.3.x, done here in one release.
+static unsigned int FirstFourOfHash(CDataStream::iterator begin, CDataStream::iterator end)
+{
+    uint256 hash = Hash(begin, end);
+    unsigned int n = 0;
+    memcpy(&n, &hash, sizeof(n));
+    return n;
+}
+
+static int RunNetHardeningSelfTest()
+{
+    printf("net-hardening self-test\n");
+    int nFail = 0;
+
+    // ---- framing: 20 bytes before the peer's version message, 24 after
+    {
+        nFail += Check(CMessageHeader::SizeOnWire(PROTO_NO_CHECKSUM_VERSION) == 20 &&
+                       CMessageHeader::SizeOnWire(PROTO_CHECKSUM_VERSION) == 24,
+                       "header is 20 bytes at protocol 101 and 24 at 102") ? 0 : 1;
+        CDataStream ssOld(SER_NETWORK, PROTO_NO_CHECKSUM_VERSION);
+        CDataStream ssNew(SER_NETWORK, PROTO_CHECKSUM_VERSION);
+        ssOld << CMessageHeader("inv", 0);
+        ssNew << CMessageHeader("inv", 0);
+        nFail += Check(ssOld.size() == 20 && ssNew.size() == 24,
+                       "serialization follows the stream version") ? 0 : 1;
+        nFail += Check(VERSION == PROTO_CHECKSUM_VERSION,
+                       "this build announces the checksum protocol") ? 0 : 1;
+    }
+
+    // ---- send side: a fresh node speaks 101 until told otherwise
+    CNode nodeOut(INVALID_SOCKET, CAddress());
+    {
+        CDataStream vHeader(nodeOut.vSend.begin(), nodeOut.vSend.begin() + 20,
+                            SER_NETWORK, PROTO_NO_CHECKSUM_VERSION);
+        CMessageHeader hdr;
+        vHeader >> hdr;
+        nFail += Check(hdr.GetCommand() == "version" && hdr.nMessageSize == nodeOut.vSend.size() - 20,
+                       "the version message leaves in 101 framing before anything is known") ? 0 : 1;
+    }
+    // ... and adds the checksum once the streams are at 102
+    std::vector<char> vGood;
+    {
+        nodeOut.vSend.clear();
+        nodeOut.vSend.SetVersion(PROTO_CHECKSUM_VERSION);
+        std::vector<CInv> vInv(1, CInv(MSG_TX, uint256(12345)));
+        nodeOut.PushMessage("inv", vInv);
+        bool fOk = nodeOut.vSend.size() > 24;
+        CMessageHeader hdr;
+        if (fOk)
+        {
+            CDataStream vHeader(nodeOut.vSend.begin(), nodeOut.vSend.begin() + 24,
+                                SER_NETWORK, PROTO_CHECKSUM_VERSION);
+            vHeader >> hdr;
+            fOk = hdr.GetCommand() == "inv" && hdr.nMessageSize == nodeOut.vSend.size() - 24;
+        }
+        nFail += Check(fOk, "a message at 102 carries the 24-byte header with the right size") ? 0 : 1;
+        nFail += Check(fOk && hdr.nChecksum == FirstFourOfHash(nodeOut.vSend.begin() + 24, nodeOut.vSend.end()),
+                       "its checksum is the first four bytes of Hash(payload)") ? 0 : 1;
+        nFail += Check(fOk && hdr.nChecksum != 0, "and it is not the zero the old header had there") ? 0 : 1;
+        vGood.assign(nodeOut.vSend.begin(), nodeOut.vSend.end());
+    }
+
+    // ---- receive side, through ProcessMessages() itself
+    {
+        CNode nodeIn(INVALID_SOCKET, CAddress());
+        nodeIn.vRecv.SetVersion(PROTO_CHECKSUM_VERSION);
+        nodeIn.vRecv.insert(nodeIn.vRecv.end(), &vGood[0], &vGood[0] + vGood.size());
+        ProcessMessages(&nodeIn);
+        nFail += Check(nodeIn.vRecv.empty() && nodeIn.nMisbehavior == 0,
+                       "a message with a good checksum is consumed and costs nothing") ? 0 : 1;
+
+        std::vector<char> vBad = vGood;
+        vBad[vBad.size() - 1] ^= 0x01;              // one payload bit
+        nodeIn.vRecv.insert(nodeIn.vRecv.end(), &vBad[0], &vBad[0] + vBad.size());
+        ProcessMessages(&nodeIn);
+        nFail += Check(nodeIn.vRecv.empty() && nodeIn.nMisbehavior == 20,
+                       "one flipped payload bit is caught, dropped, and costs 20 points") ? 0 : 1;
+
+        // a peer that never announced 102 still gets the 20-byte framing
+        CNode nodeOld(INVALID_SOCKET, CAddress());
+        nodeOld.vSend.clear();
+        std::vector<CInv> vInv(1, CInv(MSG_TX, uint256(777)));
+        nodeOld.PushMessage("inv", vInv);
+        CNode nodeOldIn(INVALID_SOCKET, CAddress());
+        nodeOldIn.vRecv.insert(nodeOldIn.vRecv.end(), nodeOld.vSend.begin(), nodeOld.vSend.end());
+        ProcessMessages(&nodeOldIn);
+        nFail += Check(nodeOld.vSend.size() == 20 + 1 + 36 && nodeOldIn.vRecv.empty() && nodeOldIn.nMisbehavior == 0,
+                       "101 framing still round-trips, so peers on 1.2.27 and earlier keep talking") ? 0 : 1;
+    }
+
+    // ---- misbehavior and bans
+    {
+        int nBannedBefore = BtfBannedCount();
+        CNode node(INVALID_SOCKET, CAddress());
+        node.strBtfAddr = "selftest-peer-to-ban";
+        bool fFirst = node.Misbehaving(50);
+        nFail += Check(!fFirst && !node.fDisconnect && node.nMisbehavior == 50,
+                       "50 points: noted, still connected") ? 0 : 1;
+        bool fSecond = node.Misbehaving(50);
+        nFail += Check(fSecond && node.fDisconnect,
+                       "100 points: disconnected") ? 0 : 1;
+        nFail += Check(BtfIsBanned("selftest-peer-to-ban") && BtfBannedCount() == nBannedBefore + 1,
+                       "and its .btf address will not be dialled for a day") ? 0 : 1;
+        nFail += Check(!BtfIsBanned("selftest-peer-innocent"),
+                       "other addresses are unaffected") ? 0 : 1;
+
+        CNode inbound(INVALID_SOCKET, CAddress(), true);
+        bool fDrop = inbound.Misbehaving(100);
+        nFail += Check(fDrop && inbound.fDisconnect && BtfBannedCount() == nBannedBefore + 1,
+                       "an inbound onion peer is dropped, and there is nothing to ban") ? 0 : 1;
+        nFail += Check(!node.Misbehaving(0) && node.nMisbehavior == 100,
+                       "zero points change nothing") ? 0 : 1;
+    }
+
+    // ---- DoS scores: what a block failure says about the peer that sent it
+    {
+        CBlock block;
+        CTransaction txCoinbase;
+        txCoinbase.vin.resize(1);
+        txCoinbase.vin[0].prevout.SetNull();
+        txCoinbase.vin[0].scriptSig = CScript() << 1 << 2;
+        txCoinbase.vout.push_back(CTxOut(1, CScript() << OP_TRUE));
+        block.vtx.push_back(txCoinbase);
+        block.nBits = bnProofOfWorkLimit.GetCompact();
+        block.nTime = GetAdjustedTime();
+        block.hashMerkleRoot = block.BuildMerkleTree();
+
+        int nDoS = -1;
+        CBlock bFuture = block;
+        bFuture.nTime = GetAdjustedTime() + 3 * 60 * 60;
+        nFail += Check(!bFuture.CheckBlock(&nDoS) && nDoS == 0,
+                       "a block from the future is refused and costs nothing: clocks differ") ? 0 : 1;
+
+        nDoS = -1;
+        CBlock bTwo = block;
+        bTwo.vtx.push_back(txCoinbase);
+        bTwo.hashMerkleRoot = bTwo.BuildMerkleTree();
+        nFail += Check(!bTwo.CheckBlock(&nDoS) && nDoS == 100,
+                       "two coinbases: 100, no honest node sends that") ? 0 : 1;
+
+        nDoS = -1;
+        CBlock bNoCoinbase = block;
+        bNoCoinbase.vtx[0].vin[0].prevout.hash = 1;
+        bNoCoinbase.hashMerkleRoot = bNoCoinbase.BuildMerkleTree();
+        nFail += Check(!bNoCoinbase.CheckBlock(&nDoS) && nDoS == 100,
+                       "first transaction not a coinbase: 100") ? 0 : 1;
+
+        nDoS = -1;
+        bool fPoW = block.CheckBlock(&nDoS);      // a random header does not meet even the floor
+        nFail += Check(!fPoW && nDoS == 50,
+                       "proof of work that does not match nBits: 50, two of those and it is out") ? 0 : 1;
+
+        // "already have" through ProcessBlock: useless, not malicious
+        nDoS = 0;
+        uint256 hash = block.GetHash();
+        CBlockIndex* pindexFake = new CBlockIndex();
+        mapBlockIndex[hash] = pindexFake;
+        CBlock* pblock = new CBlock(block);
+        bool fDup = ProcessBlock(NULL, pblock, &nDoS);
+        mapBlockIndex.erase(hash);
+        delete pindexFake;
+        delete pblock;
+        nFail += Check(!fDup && nDoS == 0, "a block we already have: refused, no points") ? 0 : 1;
+    }
+
+    // ---- initial block download: peers' heights decide, three blocks of slack
+    CBlockIndex* pindexBestSaved = pindexBest;
+    int nBestHeightSaved = nBestHeight;
+    {
+        CBlockIndex tip;
+        tip.nHeight = 100;
+        pindexBest = &tip;
+        nBestHeight = 100;
+        nFail += Check(!IsInitialBlockDownload(), "alone: not syncing, a lone node must still mine") ? 0 : 1;
+
+        CNode* peer = new CNode(INVALID_SOCKET, CAddress());
+        peer->nStartingHeight = 110;
+        CRITICAL_BLOCK(cs_vNodes)
+            vNodes.push_back(peer);
+        nFail += Check(IsInitialBlockDownload(), "a peer ten blocks ahead: syncing") ? 0 : 1;
+        peer->nStartingHeight = 102;
+        nFail += Check(!IsInitialBlockDownload(), "two blocks ahead is relay lag, not syncing") ? 0 : 1;
+        peer->nStartingHeight = 104;
+        nFail += Check(IsInitialBlockDownload(), "four blocks ahead is syncing") ? 0 : 1;
+        CRITICAL_BLOCK(cs_vNodes)
+            vNodes.erase(std::find(vNodes.begin(), vNodes.end(), peer));
+        delete peer;
+        pindexBest = NULL;
+        nFail += Check(IsInitialBlockDownload(), "no chain at all: syncing") ? 0 : 1;
+    }
+
+    // ---- coin selection: unconfirmed coins from others are not inputs
+    {
+        CKey key;
+        key.MakeNewKey();
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys[key.GetPubKey()] = key.GetPrivKey();
+            mapPubKeys[Hash160(key.GetPubKey())] = key.GetPubKey();
+        }
+        CScript scriptMine = CScript() << key.GetPubKey() << OP_CHECKSIG;
+
+        // a chain of three index entries: 90 -> 99 -> 100 (tip)
+        CBlockIndex idx90, idx99, idx100;
+        idx90.nHeight = 90;  idx99.nHeight = 99;  idx100.nHeight = 100;
+        idx90.pnext = &idx99; idx99.pnext = &idx100; idx99.pprev = &idx90; idx100.pprev = &idx99;
+        pindexBest = &idx100;
+        nBestHeight = 100;
+        uint256 h90(90), h99(99);
+        mapBlockIndex[h90] = &idx90;
+        mapBlockIndex[h99] = &idx99;
+
+        // T1: 5 from somebody else, 11 confirmations, already spent by T3
+        CWalletTx t1;
+        t1.vin.resize(1);
+        t1.vin[0].prevout.hash = 1000;
+        t1.vout.push_back(CTxOut(5 * COIN, scriptMine));
+        t1.hashBlock = h90; t1.nIndex = 0;
+        idx90.hashMerkleRoot = t1.GetHash();     // one-transaction block: root == txid
+        t1.fSpent = true;
+        // T2: 7 from somebody else, unconfirmed
+        CWalletTx t2;
+        t2.vin.resize(1);
+        t2.vin[0].prevout.hash = 2000;
+        t2.vout.push_back(CTxOut(7 * COIN, scriptMine));
+        // T3: our own change, 3, unconfirmed, spends T1
+        CWalletTx t3;
+        t3.vin.resize(1);
+        t3.vin[0].prevout = COutPoint(t1.GetHash(), 0);
+        t3.vout.push_back(CTxOut(3 * COIN, scriptMine));
+
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            mapWallet.clear();
+            mapWallet[t1.GetHash()] = t1;
+            mapWallet[t2.GetHash()] = t2;
+            mapWallet[t3.GetHash()] = t3;
+        }
+        CWalletTx* pt2 = &mapWallet[t2.GetHash()];
+        CWalletTx* pt3 = &mapWallet[t3.GetHash()];
+        nFail += Check(pt3->GetDebit() > 0 && pt2->GetDebit() == 0 && pt2->GetDepthInMainChain() == 0,
+                       "the fixture reads as intended: T3 is ours, T2 is theirs and unconfirmed") ? 0 : 1;
+
+        std::set<CWalletTx*> setCoins;
+        bool fOk = SelectCoins(3 * COIN, setCoins);
+        nFail += Check(fOk && setCoins.size() == 1 && setCoins.count(pt3),
+                       "3 coins: our own unconfirmed change is used") ? 0 : 1;
+        fOk = SelectCoins(6 * COIN, setCoins);
+        nFail += Check(!fOk, "6 coins: refused rather than spend the unconfirmed 7 from somebody else") ? 0 : 1;
+
+        // T2 confirms twice
+        pt2->hashBlock = h99; pt2->nIndex = 0;
+        idx99.hashMerkleRoot = pt2->GetHash();
+        nFail += Check(pt2->GetDepthInMainChain() == 2, "T2 now has two confirmations") ? 0 : 1;
+        fOk = SelectCoins(6 * COIN, setCoins);
+        nFail += Check(fOk && setCoins.count(pt2), "6 coins: the confirmed 7 is now an input") ? 0 : 1;
+
+        mapBlockIndex.erase(h90);
+        mapBlockIndex.erase(h99);
+        CRITICAL_BLOCK(cs_mapWallet)
+            mapWallet.clear();
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(key.GetPubKey());
+            mapPubKeys.erase(Hash160(key.GetPubKey()));
+        }
+    }
+    pindexBest = pindexBestSaved;
+    nBestHeight = nBestHeightSaved;
+
+    printf("\n%s\n", nFail == 0 ? "ALL TESTS PASSED (0 failures)"
+                                 : strprintf("%d FAILURE(S)", nFail).c_str());
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunManagedTorSelfTest()
 {
     printf("managed-tor self-test\n");
@@ -4139,12 +4416,14 @@ int RunSelfTest(const std::string& name)
         return RunScriptEvalSelfTest();
     if (name == "rules-v2")
         return RunRulesV2SelfTest();
+    if (name == "net-hardening")
+        return RunNetHardeningSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, socks5-proxy, managed-tor\n");
     return 1;
 }

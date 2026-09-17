@@ -292,7 +292,16 @@ void GetPoolOperatorStats(int& authorizedMiners, int& blocksFound, uint64& round
 void GetPoolWorkerStats(std::vector<PoolWorkerStatView>& out);
 void GetPendingPayouts(std::vector<PendingPayoutView>& out);
 bool ProcessMessages(CNode* pfrom);
-bool ProcessBlock(CNode* pfrom, CBlock* pblock);
+// pnDoS, when given, receives the misbehavior score a failure is worth: 0 for
+// a block that is merely useless (old, orphan, early), up to 100 for one that
+// no honest node could have sent (bad proof of work, bad merkle root).
+bool ProcessBlock(CNode* pfrom, CBlock* pblock, int* pnDoS=NULL);
+bool SelectCoins(int64 nTargetValue, std::set<CWalletTx*>& setCoinsRet);
+// True while this node is catching up: peers say the chain is well past us.
+// A node in that state neither mines (its template would build on a stale
+// tip -- the Debian node mined a 323-block fork that way) nor announces the
+// blocks it is replaying to everyone else.
+bool IsInitialBlockDownload();
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast);
 extern CCriticalSection cs_mapTransactions;
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv);
@@ -1355,8 +1364,8 @@ public:
     bool ConnectBlock(CTxDB& txdb, CBlockIndex* pindex);
     bool ReadFromDisk(const CBlockIndex* blockindex, bool fReadTransactions);
     bool AddToBlockIndex(unsigned int nFile, unsigned int nBlockPos);
-    bool CheckBlock() const;
-    bool AcceptBlock();
+    bool CheckBlock(int* pnDoS=NULL) const;
+    bool AcceptBlock(int* pnDoS=NULL);
 };
 
 

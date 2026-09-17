@@ -2347,14 +2347,24 @@ bool CBlock::AddToBlockIndex(unsigned int nFile, unsigned int nBlockPos)
 
 
 
-bool CBlock::CheckBlock() const
+// Failure with a misbehavior score attached, for the peer that sent it.
+static bool DoS(int* pnDoS, int nScore, bool fRet)
 {
+    if (pnDoS)
+        *pnDoS = nScore;
+    return fRet;
+}
+
+bool CBlock::CheckBlock(int* pnDoS) const
+{
+    if (pnDoS)
+        *pnDoS = 0;
     // These are checks that are independent of context
     // that can be verified before saving an orphan block.
 
     // Size limits
     if (!CheckSizeLimits())
-        return error("CheckBlock() : size limits failed");
+        return DoS(pnDoS, 100, error("CheckBlock() : size limits failed"));
 
     // Check timestamp
     if (nTime > GetAdjustedTime() + 2 * 60 * 60)
@@ -2362,15 +2372,15 @@ bool CBlock::CheckBlock() const
 
     // First transaction must be coinbase, the rest must not be
     if (vtx.empty() || !vtx[0].IsCoinBase())
-        return error("CheckBlock() : first tx is not coinbase");
+        return DoS(pnDoS, 100, error("CheckBlock() : first tx is not coinbase"));
     for (int i = 1; i < vtx.size(); i++)
         if (vtx[i].IsCoinBase())
-            return error("CheckBlock() : more than one coinbase");
+            return DoS(pnDoS, 100, error("CheckBlock() : more than one coinbase"));
 
     // Check transactions
     foreach(const CTransaction& tx, vtx)
         if (!tx.CheckTransaction())
-            return error("CheckBlock() : CheckTransaction failed");
+            return DoS(pnDoS, 100, error("CheckBlock() : CheckTransaction failed"));
 
     // Cap the work a block can demand. MAX_SIZE bounds the bytes, not the cost:
     // every signature operation is an elliptic-curve verification, and at this
@@ -2380,7 +2390,7 @@ bool CBlock::CheckBlock() const
     foreach(const CTransaction& tx, vtx)
         nSigOps += tx.GetSigOpCount();
     if (nSigOps > MAX_BLOCK_SIGOPS)
-        return error("CheckBlock() : out-of-bounds signature operation count");
+        return DoS(pnDoS, 100, error("CheckBlock() : out-of-bounds signature operation count"));
 
     // Reject blocks carrying the same transaction twice (CVE-2012-2459).
     //
@@ -2394,25 +2404,27 @@ bool CBlock::CheckBlock() const
     {
         uint256 hashTx = tx.GetHash();
         if (setTxHashes.count(hashTx))
-            return error("CheckBlock() : duplicate transaction in block");
+            return DoS(pnDoS, 100, error("CheckBlock() : duplicate transaction in block"));
         setTxHashes.insert(hashTx);
     }
 
     // Check proof of work matches claimed amount (memory-hard RandomX PoW)
     if (CBigNum().SetCompact(nBits) > bnProofOfWorkLimit)
-        return error("CheckBlock() : nBits below minimum work");
+        return DoS(pnDoS, 100, error("CheckBlock() : nBits below minimum work"));
     if (GetPoWHash() > CBigNum().SetCompact(nBits).getuint256())
-        return error("CheckBlock() : RandomX proof-of-work does not match nBits");
+        return DoS(pnDoS, 50, error("CheckBlock() : RandomX proof-of-work does not match nBits"));
 
     // Check merkleroot
     if (hashMerkleRoot != BuildMerkleTree())
-        return error("CheckBlock() : hashMerkleRoot mismatch");
+        return DoS(pnDoS, 100, error("CheckBlock() : hashMerkleRoot mismatch"));
 
     return true;
 }
 
-bool CBlock::AcceptBlock()
+bool CBlock::AcceptBlock(int* pnDoS)
 {
+    if (pnDoS)
+        *pnDoS = 0;
     // Check for duplicate
     uint256 hash = GetHash();
     if (mapBlockIndex.count(hash))
@@ -2430,7 +2442,7 @@ bool CBlock::AcceptBlock()
 
     // Check proof of work
     if (nBits != GetNextWorkRequired(pindexPrev))
-        return error("AcceptBlock() : incorrect proof of work");
+        return DoS(pnDoS, 100, error("AcceptBlock() : incorrect proof of work"));
 
     // Rules v2: the coinbase scriptSig starts with the block height (BIP34).
     // Two coinbases paying the same key with the same value were otherwise
@@ -2442,7 +2454,7 @@ bool CBlock::AcceptBlock()
         CScript expect = CScript() << (pindexPrev->nHeight + 1);
         const CScript& cb = vtx[0].vin[0].scriptSig;
         if (cb.size() < expect.size() || !std::equal(expect.begin(), expect.end(), cb.begin()))
-            return error("AcceptBlock() : coinbase does not start with height %d", pindexPrev->nHeight + 1);
+            return DoS(pnDoS, 100, error("AcceptBlock() : coinbase does not start with height %d", pindexPrev->nHeight + 1));
     }
 
     // Write block to history file
@@ -2453,7 +2465,7 @@ bool CBlock::AcceptBlock()
     if (!AddToBlockIndex(nFile, nBlockPos))
         return error("AcceptBlock() : AddToBlockIndex failed");
 
-    if (hashBestChain == hash)
+    if (hashBestChain == hash && !IsInitialBlockDownload())
         RelayInventory(CInv(MSG_BLOCK, hash));
 
     // // Add atoms to user reviews for coins created
@@ -2468,8 +2480,10 @@ bool CBlock::AcceptBlock()
     return true;
 }
 
-bool ProcessBlock(CNode* pfrom, CBlock* pblock)
+bool ProcessBlock(CNode* pfrom, CBlock* pblock, int* pnDoS)
 {
+    if (pnDoS)
+        *pnDoS = 0;
     // Counted before any check, so the ratio below is against everything that
     // arrived rather than everything that was any good.
     if (pfrom)
@@ -2483,7 +2497,7 @@ bool ProcessBlock(CNode* pfrom, CBlock* pblock)
         return error("ProcessBlock() : already have block (orphan) %s", hash.ToString().substr(0,14).c_str());
 
     // Preliminary checks
-    if (!pblock->CheckBlock())
+    if (!pblock->CheckBlock(pnDoS))
     {
         delete pblock;
         return error("ProcessBlock() : CheckBlock FAILED");
@@ -2512,7 +2526,7 @@ bool ProcessBlock(CNode* pfrom, CBlock* pblock)
     }
 
     // Store to disk
-    if (!pblock->AcceptBlock())
+    if (!pblock->AcceptBlock(pnDoS))
     {
         delete pblock;
         return error("ProcessBlock() : AcceptBlock FAILED");
@@ -2540,6 +2554,21 @@ bool ProcessBlock(CNode* pfrom, CBlock* pblock)
 
     printf("ProcessBlock: ACCEPTED\n");
     return true;
+}
+
+bool IsInitialBlockDownload()
+{
+    if (pindexBest == NULL)
+        return true;
+    // Peers' heights are what they announced at handshake, a floor on where
+    // they are now; so this only ever under-reports how far behind we are.
+    // Three blocks of slack for ordinary relay lag. No peer heights, no
+    // opinion: a node alone is not "downloading", and refusing to mine on a
+    // chain nobody claims to be ahead of would only wedge a stalled network.
+    int nNet = GetPeerMedianHeight();
+    if (nNet < 0)
+        return false;
+    return nBestHeight < nNet - 3;
 }
 
 
@@ -2972,13 +3001,16 @@ bool ProcessMessages(CNode* pfrom)
     loop
     {
         // Scan for message start
+        // 20 bytes until the peer's version message, 24 (with checksum) from
+        // 102 on -- see CMessageHeader.
+        unsigned int nHeaderSize = CMessageHeader::SizeOnWire(vRecv.GetVersion());
         CDataStream::iterator pstart = search(vRecv.begin(), vRecv.end(), BEGIN(pchMessageStart), END(pchMessageStart));
-        if (vRecv.end() - pstart < sizeof(CMessageHeader))
+        if (vRecv.end() - pstart < nHeaderSize)
         {
-            if (vRecv.size() > sizeof(CMessageHeader))
+            if (vRecv.size() > nHeaderSize)
             {
                 if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE MESSAGESTART NOT FOUND\n\n");
-                vRecv.erase(vRecv.begin(), vRecv.end() - sizeof(CMessageHeader));
+                vRecv.erase(vRecv.begin(), vRecv.end() - nHeaderSize);
             }
             break;
         }
@@ -2992,7 +3024,7 @@ bool ProcessMessages(CNode* pfrom)
         // thread. A peer could announce a large payload and drip bytes forever,
         // making every pass pay for an O(n) insert and a 100 ms stall.
         CMessageHeader hdr;
-        CDataStream vHeader(vRecv.begin(), vRecv.begin() + sizeof(CMessageHeader),
+        CDataStream vHeader(vRecv.begin(), vRecv.begin() + nHeaderSize,
                             vRecv.nType, vRecv.nVersion);
         vHeader >> hdr;
         if (!hdr.IsValid())
@@ -3000,15 +3032,16 @@ bool ProcessMessages(CNode* pfrom)
             if (LogAcceptsCategory("net")) printf("\n\nPROCESSMESSAGE: ERRORS IN HEADER %s\n\n\n", hdr.GetCommand().c_str());
             if (hdr.nMessageSize > MAX_PROTOCOL_MESSAGE_SIZE)
                 pfrom->fDisconnect = true;
+            pfrom->Misbehaving(10);
             pfrom->nIncompleteMessageStart = 0;
-            vRecv.ignore(sizeof(CMessageHeader));
+            vRecv.ignore(nHeaderSize);
             continue;
         }
         string strCommand = hdr.GetCommand();
 
         // Message size
         unsigned int nMessageSize = hdr.nMessageSize;
-        unsigned int nPayloadAvailable = vRecv.size() - sizeof(CMessageHeader);
+        unsigned int nPayloadAvailable = vRecv.size() - nHeaderSize;
         if (nMessageSize > nPayloadAvailable)
         {
             if (pfrom->nIncompleteMessageStart == 0 ||
@@ -3034,7 +3067,25 @@ bool ProcessMessages(CNode* pfrom)
         pfrom->nIncompleteMessageStart = 0;
         pfrom->nIncompleteMessageSize = 0;
         pfrom->strIncompleteMessageCommand.clear();
-        vRecv.ignore(sizeof(CMessageHeader));
+        vRecv.ignore(nHeaderSize);
+
+        // Checksum, on streams that carry one. A mismatch is a mangled or
+        // forged payload either way; drop the message rather than parse it.
+        if (vRecv.GetVersion() >= PROTO_CHECKSUM_VERSION)
+        {
+            uint256 hash = Hash(vRecv.begin(), vRecv.begin() + nMessageSize);
+            unsigned int nChecksum = 0;
+            memcpy(&nChecksum, &hash, sizeof(nChecksum));
+            if (nChecksum != hdr.nChecksum)
+            {
+                printf("ProcessMessages(%s, %u bytes) from %s: CHECKSUM ERROR nChecksum=%08x hdr.nChecksum=%08x\n",
+                       strCommand.c_str(), nMessageSize, pfrom->addr.ToString().c_str(),
+                       nChecksum, hdr.nChecksum);
+                vRecv.ignore(nMessageSize);
+                pfrom->Misbehaving(20);
+                continue;
+            }
+        }
 
         // Copy message to its own buffer
         CDataStream vMsg(vRecv.begin(), vRecv.begin() + nMessageSize, vRecv.nType, vRecv.nVersion);
@@ -3102,8 +3153,16 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
                     pfrom->strRelease[i] = '?';
         }
 
-        pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
-        pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
+        // From here on both sides frame with the lower of the two versions.
+        // Our own version message left in 101 framing before this could be
+        // known; the peer's did too, and it is the message being read now, so
+        // the switch is clean on both streams. The send side is locked
+        // because another thread may be mid-PushMessage, and it fixed its
+        // header layout at BeginMessage() for exactly this reason.
+        CRITICAL_BLOCK(pfrom->cs_vSend)
+            pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
+        CRITICAL_BLOCK(pfrom->cs_vRecv)
+            pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
 
         pfrom->fClient = !(pfrom->nServices & NODE_NETWORK);
         if (pfrom->fClient)
@@ -3270,6 +3329,19 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         CInv inv(MSG_TX, tx.GetHash());
         pfrom->AddInventoryKnown(inv);
 
+        // A coinbase on its own, or a transaction that fails the shape checks,
+        // is not something an honest node relays: it validates first.
+        if (tx.IsCoinBase())
+        {
+            pfrom->Misbehaving(100);
+            return error("ProcessMessage(tx) : coinbase as individual tx");
+        }
+        if (!tx.CheckTransaction())
+        {
+            pfrom->Misbehaving(10);
+            return error("ProcessMessage(tx) : CheckTransaction failed");
+        }
+
         bool fMissingInputs = false;
         if (tx.AcceptTransaction(true, &fMissingInputs))
         {
@@ -3342,8 +3414,11 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         CInv inv(MSG_BLOCK, pblock->GetHash());
         pfrom->AddInventoryKnown(inv);
 
-        if (ProcessBlock(pfrom, pblock.release()))
+        int nDoS = 0;
+        if (ProcessBlock(pfrom, pblock.release(), &nDoS))
             mapAlreadyAskedFor.erase(inv);
+        else if (nDoS > 0)
+            pfrom->Misbehaving(nDoS);
     }
 
 
@@ -4299,7 +4374,7 @@ bool BitcoinMiner(int nThreadId)
         // only exit that works the same on both platforms.
         if (fShutdown)
             return true;
-        while (vNodes.empty() && !fSoloMineTest)
+        while ((vNodes.empty() || IsInitialBlockDownload()) && !fSoloMineTest)
         {
             Sleep(1000);
             if (fShutdown)
@@ -4694,7 +4769,14 @@ int64 GetBalance()
 
 
 
-bool SelectCoins(int64 nTargetValue, set<CWalletTx*>& setCoinsRet)
+// Bitcoin 0.3.x's rule. 0.1.0 spent any credit the moment it was in the
+// wallet: a payment somebody had just announced, unconfirmed, was fair input
+// for the next send, and if that payment never made it into a block the send
+// built on it died with it. Coins received from others need nConfTheirs
+// confirmations, our own change needs nConfMine; SelectCoins() below tries
+// the strict pairs first and relaxes only as far as the target requires.
+static bool SelectCoinsMinConf(int64 nTargetValue, int nConfMine, int nConfTheirs,
+                               set<CWalletTx*>& setCoinsRet)
 {
     setCoinsRet.clear();
 
@@ -4710,6 +4792,9 @@ bool SelectCoins(int64 nTargetValue, set<CWalletTx*>& setCoinsRet)
         {
             CWalletTx* pcoin = &(*it).second;
             if (!pcoin->IsFinal() || pcoin->fSpent)
+                continue;
+            int nDepth = pcoin->GetDepthInMainChain();
+            if (nDepth < (pcoin->GetDebit() > 0 ? nConfMine : nConfTheirs))
                 continue;
             int64 n = pcoin->GetCredit();
             if (n <= 0)
@@ -4785,7 +4870,7 @@ bool SelectCoins(int64 nTargetValue, set<CWalletTx*>& setCoinsRet)
                 setCoinsRet.insert(vValue[i].second);
 
         //// debug print
-        if (LogAcceptsCategory("net")) printf("SelectCoins() best subset: ");
+        if (LogAcceptsCategory("net")) printf("SelectCoinsMinConf() best subset: ");
         for (int i = 0; i < vValue.size(); i++)
             if (vfBest[i])
                 if (LogAcceptsCategory("net")) printf("%s ", FormatMoney(vValue[i].first).c_str());
@@ -4793,6 +4878,13 @@ bool SelectCoins(int64 nTargetValue, set<CWalletTx*>& setCoinsRet)
     }
 
     return true;
+}
+
+bool SelectCoins(int64 nTargetValue, set<CWalletTx*>& setCoinsRet)
+{
+    return (SelectCoinsMinConf(nTargetValue, 1, 6, setCoinsRet) ||
+            SelectCoinsMinConf(nTargetValue, 1, 1, setCoinsRet) ||
+            SelectCoinsMinConf(nTargetValue, 0, 1, setCoinsRet));
 }
 
 
