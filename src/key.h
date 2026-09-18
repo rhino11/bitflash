@@ -152,16 +152,51 @@ public:
         return vchPubKey;
     }
 
+    // Signs with a low S: every ECDSA signature has a twin with S' = n - S
+    // that verifies against the same key and hash, and rules v2 accept only
+    // the smaller one, so that a third party cannot rewrite a txid by
+    // swapping them. A low-S signature was always valid, so this is safe
+    // to produce before the switch. OpenSSL emits either at random.
     bool Sign(uint256 hash, vector<unsigned char>& vchSig)
     {
         vchSig.clear();
-        unsigned char pchSig[10000];
-        unsigned int nSize = 0;
-        if (!ECDSA_sign(0, (unsigned char*)&hash, sizeof(hash), pchSig, &nSize, pkey))
+        ECDSA_SIG* sig = ECDSA_do_sign((unsigned char*)&hash, sizeof(hash), pkey);
+        if (!sig)
             return false;
-        vchSig.resize(nSize);
-        memcpy(&vchSig[0], pchSig, nSize);
-        return true;
+        const BIGNUM* r = NULL;
+        const BIGNUM* s = NULL;
+        ECDSA_SIG_get0(sig, &r, &s);
+        BIGNUM* order = BN_new();
+        BIGNUM* half  = BN_new();
+        bool fOk = order && half
+                && EC_GROUP_get_order(EC_KEY_get0_group(pkey), order, NULL)
+                && BN_rshift1(half, order);
+        if (fOk && BN_cmp(s, half) > 0)
+        {
+            BIGNUM* sLow = BN_new();
+            BIGNUM* rDup = BN_dup(r);
+            fOk = sLow && rDup && BN_sub(sLow, order, s)
+               && ECDSA_SIG_set0(sig, rDup, sLow);   // sig owns them now
+            if (!fOk) { BN_free(sLow); BN_free(rDup); }
+        }
+        BN_free(half);
+        BN_free(order);
+        if (fOk)
+        {
+            int nSize = i2d_ECDSA_SIG(sig, NULL);
+            if (nSize > 0)
+            {
+                vchSig.resize(nSize);
+                unsigned char* p = &vchSig[0];
+                fOk = i2d_ECDSA_SIG(sig, &p) == nSize;
+            }
+            else
+                fOk = false;
+        }
+        ECDSA_SIG_free(sig);
+        if (!fOk)
+            vchSig.clear();
+        return fOk;
     }
 
     bool Verify(uint256 hash, const vector<unsigned char>& vchSig)

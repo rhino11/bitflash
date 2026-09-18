@@ -52,6 +52,8 @@ extern int RunPoolStratumSelfTest();
 #include <sys/types.h>
 #include <unistd.h>
 #endif
+#include <randomx.h>
+#include <openssl/sha.h>
 
 static std::string HexStrLocal(const std::vector<unsigned char>& v)
 {
@@ -3174,6 +3176,230 @@ static CBlock MakeSizedConsensusBlock(size_t nScriptBytes)
     return block;
 }
 
+// Turn a low-S DER signature (with hash-type byte) into its high-S twin:
+// S' = n - S. Verifies against the same key and hash; only the encoding
+// rules tell them apart.
+static std::vector<unsigned char> HighSTwin(const std::vector<unsigned char>& sig)
+{
+    static const unsigned char order[32] = {
+        0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFE,
+        0xBA,0xAE,0xDC,0xE6,0xAF,0x48,0xA0,0x3B,0xBF,0xD2,0x5E,0x8C,0xD0,0x36,0x41,0x41 };
+    unsigned int lenR = sig[3];
+    unsigned int lenS = sig[5 + lenR];
+    BIGNUM* n = BN_bin2bn(order, 32, NULL);
+    BIGNUM* s = BN_bin2bn(&sig[6 + lenR], lenS, NULL);
+    BIGNUM* t = BN_new();
+    BN_sub(t, n, s);
+    std::vector<unsigned char> S(BN_num_bytes(t));
+    BN_bn2bin(t, &S[0]);
+    if (S[0] & 0x80) S.insert(S.begin(), 0x00);          // DER positive
+    BN_free(n); BN_free(s); BN_free(t);
+    std::vector<unsigned char> out;
+    out.push_back(0x30); out.push_back((unsigned char)(lenR + S.size() + 4));
+    out.push_back(0x02); out.push_back((unsigned char)lenR);
+    out.insert(out.end(), sig.begin() + 4, sig.begin() + 4 + lenR);
+    out.push_back(0x02); out.push_back((unsigned char)S.size());
+    out.insert(out.end(), S.begin(), S.end());
+    out.push_back(sig.back());                            // hash type
+    return out;
+}
+
+// Rules v2, each rule with a case it accepts and a case it refuses.
+static int RunRulesV2SelfTest()
+{
+    printf("rules-v2 self-test\n");
+    int nFail = 0;
+    unsigned int T = RulesV2Time();
+    nFail += Check(RULES_V2_TIME_TESTNET < RULES_V2_TIME_MAINNET, "testnet switches before mainnet") ? 0 : 1;
+    nFail += Check(RULES_V2_TIME_MAINNET == POW_V2_TIME_MAINNET, "on mainnet rules v2 and PoW v2 switch together") ? 0 : 1;
+    nFail += Check(!RulesV2Active(T - 1) && RulesV2Active(T), "the switch is at the activation time, inclusive") ? 0 : 1;
+
+    // ---- signatures: strict DER, low S, and the wallet producing them
+    CKey key; key.MakeNewKey();
+    CTransaction txFrom;
+    txFrom.vout.resize(1);
+    txFrom.vout[0].nValue = 1 * COIN;
+    txFrom.vout[0].scriptPubKey << OP_DUP << OP_HASH160 << Hash160(key.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+    CTransaction txTo;
+    txTo.vin.resize(1);
+    txTo.vin[0].prevout = COutPoint(txFrom.GetHash(), 0);
+    txTo.vout.resize(1);
+    txTo.vout[0].nValue = 1 * COIN;
+    uint256 hash = SignatureHash(txFrom.vout[0].scriptPubKey, txTo, 0, SIGHASH_ALL);
+
+    int nLow = 0, nDer = 0, nSigs = 200;
+    std::vector<unsigned char> vchSig;
+    for (int i = 0; i < nSigs; i++)
+    {
+        std::vector<unsigned char> s;
+        if (!key.Sign(hash, s)) break;
+        s.push_back((unsigned char)SIGHASH_ALL);
+        if (IsStrictDERSignature(s)) nDer++;
+        if (IsLowSSignature(s)) nLow++;
+        vchSig = s;
+    }
+    nFail += Check(nDer == nSigs, "every signature the wallet makes is strict DER") ? 0 : 1;
+    nFail += Check(nLow == nSigs, "every signature the wallet makes is low S (200 of 200)") ? 0 : 1;
+
+    std::vector<unsigned char> vchHigh = HighSTwin(vchSig);
+    nFail += Check(IsStrictDERSignature(vchHigh) && !IsLowSSignature(vchHigh),
+                   "the high-S twin is well-formed DER but not low S") ? 0 : 1;
+    {
+        std::vector<unsigned char> a(vchSig.begin(), vchSig.end() - 1), b(vchHigh.begin(), vchHigh.end() - 1);
+        nFail += Check(key.Verify(hash, a) && key.Verify(hash, b),
+                       "ECDSA itself accepts both twins -- which is the problem") ? 0 : 1;
+    }
+    txTo.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
+    nFail += Check(VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, true), "the low-S spend verifies under rules v2") ? 0 : 1;
+    txTo.vin[0].scriptSig = CScript() << vchHigh << key.GetPubKey();
+    nFail += Check(VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, false), "the high-S twin verifies under the old rules") ? 0 : 1;
+    nFail += Check(!VerifySignature(txFrom, txTo, 0, SIGHASH_ALL, true), "the high-S twin is refused under rules v2") ? 0 : 1;
+    {
+        // a DER shape OpenSSL tolerates and BIP66 does not: a padded R
+        std::vector<unsigned char> pad = vchSig;
+        pad.insert(pad.begin() + 4, 0x00); pad[3]++; pad[1]++;
+        nFail += Check(!IsStrictDERSignature(pad), "a signature with a padded R is not strict DER") ? 0 : 1;
+        std::vector<unsigned char> neg = vchSig;
+        neg[4] |= 0x80;
+        nFail += Check(!IsStrictDERSignature(neg), "a signature with a negative R is not strict DER") ? 0 : 1;
+    }
+
+    // ---- BIP34: the coinbase this tree's miners write starts with the height
+    {
+        int nHeight = 35061;
+        CScript cb; cb << nHeight << 0x1d00ffff << CBigNum(7);
+        CScript expect = CScript() << nHeight;
+        nFail += Check(cb.size() >= expect.size() && std::equal(expect.begin(), expect.end(), cb.begin()),
+                       "a coinbase written as <height nBits extranonce> starts with the height") ? 0 : 1;
+        CScript old; old << 0x1d00ffff << CBigNum(7);
+        nFail += Check(!(old.size() >= expect.size() && std::equal(expect.begin(), expect.end(), old.begin())),
+                       "a coinbase without the height does not") ? 0 : 1;
+        CScript wrong = CScript() << (nHeight + 1);
+        nFail += Check(!std::equal(wrong.begin(), wrong.end(), cb.begin()),
+                       "a coinbase with the wrong height does not") ? 0 : 1;
+    }
+
+    // ---- retarget: the window covers nInterval intervals from rules v2 on
+    {
+        // 31 blocks, 120 s apart, except the boundary interval, which is
+        // 3600 s wide. Old window (29 intervals) never sees it; the v2
+        // window (30) does, so the two disagree -- and only v2 is right
+        // about how long the 30 blocks actually took.
+        std::vector<CBlockIndex*> v;
+        unsigned int nBits = 0x1e0fffff;            // well inside the limit, so easing is visible
+        for (int i = 0; i < 31; i++)
+        {
+            CBlockIndex* p = new CBlockIndex();
+            p->nHeight = 29 + i;                    // last is height 59 -> next is 60, a retarget
+            p->nBits = nBits;
+            p->pprev = i ? v.back() : NULL;
+            v.push_back(p);
+        }
+        // times: block 0 at t0, block 1 at t0+3600 (the wide interval), then +120 each
+        unsigned int t0 = T + 100000;
+        v[0]->nTime = t0;
+        for (int i = 1; i < 31; i++) v[i]->nTime = v[i-1]->nTime + (i == 1 ? 3600 : 120);
+        unsigned int nV2 = GetNextWorkRequired(v.back());
+        // the same chain, dated before the switch: old window
+        for (int i = 0; i < 31; i++) v[i]->nTime -= 200000;
+        unsigned int nV1 = GetNextWorkRequired(v.back());
+        nFail += Check(nV1 != nV2, "the retarget window changes at the switch") ? 0 : 1;
+        // v2: actual = 29*120 + 3600 = 7080 > target 3600 -> easier (bigger target)
+        nFail += Check(CBigNum().SetCompact(nV2) > CBigNum().SetCompact(nBits),
+                       "rules v2 sees the slow boundary interval and eases difficulty") ? 0 : 1;
+        // v1: actual = 29*120 = 3480 < 3600 -> slightly harder
+        nFail += Check(CBigNum().SetCompact(nV1) < CBigNum().SetCompact(nBits),
+                       "the old window misses it and tightens instead") ? 0 : 1;
+        for (size_t i = 0; i < v.size(); i++) delete v[i];
+    }
+
+    // ---- relay policy
+    {
+        CTransaction tx = txTo;
+        tx.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
+        tx.vout[0].scriptPubKey = txFrom.vout[0].scriptPubKey;
+        nFail += Check(tx.IsStandard(), "a wallet-shaped transaction is standard") ? 0 : 1;
+        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0x42);
+        nFail += Check(!t2.IsStandard(), "an OP_RETURN output is not relayed") ? 0 : 1;
+        CTransaction t3 = tx; t3.vout[0].scriptPubKey = CScript() << OP_1 << OP_CHECKSIG << OP_CHECKSIG;
+        nFail += Check(!t3.IsStandard(), "an output built from bare operators is not relayed") ? 0 : 1;
+        CTransaction t4 = tx; t4.vin[0].scriptSig = CScript() << OP_1 << OP_DROP << vchSig << key.GetPubKey();
+        nFail += Check(!t4.IsStandard(), "a scriptSig with an operator is not relayed") ? 0 : 1;
+        CTransaction t5 = tx;
+        for (int i = 0; i < 3000; i++) t5.vout.push_back(txFrom.vout[0]);
+        nFail += Check(!t5.IsStandard(), "a transaction over 100 kB is not relayed") ? 0 : 1;
+        nFail += Check(MAX_MEMPOOL_TRANSACTIONS >= 1000, "the mempool ceiling leaves room for real traffic") ? 0 : 1;
+    }
+
+    // ---- the clock: peers may nudge it, not set it (last: it moves this process's clock)
+    {
+        int64 before = GetAdjustedTime() - GetTime();
+        for (unsigned int ip = 0x0a000001; ip < 0x0a000006; ip++)
+            AddTimeData(ip, GetTime() + 5 * 3600);       // five peers, all 5 h ahead
+        int64 after = GetAdjustedTime() - GetTime();
+        nFail += Check(before == 0 && after == 0, "five peers five hours ahead move the clock by nothing") ? 0 : 1;
+    }
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+// The script interpreter against the ways a scriptSig can try to skip the
+// scriptPubKey it is supposed to satisfy. scriptSig and scriptPubKey run as
+// one concatenated script (0.1.0), so anything in the scriptSig that changes
+// control flow reaches the output's own checks.
+static int RunScriptEvalSelfTest()
+{
+    printf("script-eval self-test\n");
+    int nFail = 0;
+
+    // An output paid to a fresh key, and a spend of it with no signature.
+    CKey key;
+    key.MakeNewKey();
+    CTransaction txFrom;
+    txFrom.vout.resize(1);
+    txFrom.vout[0].nValue = 1 * COIN;
+    txFrom.vout[0].scriptPubKey << OP_DUP << OP_HASH160 << Hash160(key.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+
+    CTransaction txTo;
+    txTo.vin.resize(1);
+    txTo.vin[0].prevout = COutPoint(txFrom.GetHash(), 0);
+    txTo.vout.resize(1);
+    txTo.vout[0].nValue = 1 * COIN;
+
+    struct Case { const char* name; CScript scriptSig; };
+    std::vector<Case> cases;
+    { CScript s; s << OP_1 << OP_0 << OP_IF;            cases.push_back({"scriptSig ending in an open OP_IF (false branch) cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_1 << OP_NOTIF;         cases.push_back({"scriptSig ending in an open OP_NOTIF cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_0 << OP_IF << OP_ELSE; cases.push_back({"scriptSig ending in an open OP_ELSE cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_RETURN;                cases.push_back({"scriptSig ending in OP_RETURN cannot spend", s}); }
+    { CScript s; s << OP_1;                             cases.push_back({"scriptSig of a bare OP_1 cannot spend", s}); }
+    { CScript s; s << OP_1 << OP_ENDIF;                 cases.push_back({"scriptSig with a stray OP_ENDIF cannot spend", s}); }
+    for (size_t i = 0; i < cases.size(); i++)
+    {
+        txTo.vin[0].scriptSig = cases[i].scriptSig;
+        bool fSpent = VerifySignature(txFrom, txTo, 0, SIGHASH_ALL);
+        nFail += Check(!fSpent, cases[i].name) ? 0 : 1;
+    }
+
+    // And the honest spend still works: sign it.
+    txTo.vin[0].scriptSig = CScript();
+    uint256 hash = SignatureHash(txFrom.vout[0].scriptPubKey, txTo, 0, SIGHASH_ALL);
+    std::vector<unsigned char> vchSig;
+    bool fSigned = key.Sign(hash, vchSig);
+    vchSig.push_back((unsigned char)SIGHASH_ALL);
+    txTo.vin[0].scriptSig << vchSig << key.GetPubKey();
+    nFail += Check(fSigned && VerifySignature(txFrom, txTo, 0, SIGHASH_ALL),
+                   "a properly signed spend verifies") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunConsensusLimitsSelfTest()
 {
     fflush(stdout);
@@ -3250,6 +3476,194 @@ static int RunParseMoneySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+static std::vector<std::string> g_debugLinesSeen;
+static void SelfTestDebugLineSink(const char* pszLine) { g_debugLinesSeen.push_back(pszLine); }
+
+// The accumulator in front of OutputDebugStringA. Driven here against a small
+// buffer with a canary behind it, through the exact sequence that overflowed
+// the real one: a pending tail, a message that does not fit, then more
+// messages. The old code left an unreachable NUL in the buffer at step two,
+// never drained again, and at the first message after the buffer filled
+// wrote past the array (util.h has the full story).
+static int RunDebugLogBufferSelfTest()
+{
+    printf("debug-log-buffer self-test\n");
+    int nFail = 0;
+
+    const size_t CAP = 64;
+    const size_t GUARD = 32;
+    std::vector<char> storage(CAP + GUARD, (char)0xEE);
+    CDebugLineBuffer buf = { &storage[0], CAP, 0 };
+    std::vector<std::string>& seen = g_debugLinesSeen;
+
+    #define CANARY_OK() ([&]{ for (size_t k = CAP; k < CAP + GUARD; k++) if (storage[k] != (char)0xEE) return false; return true; }())
+    #define FEED(str) DebugLineAppend(buf, str, strlen(str), SelfTestDebugLineSink)
+
+    // 1. pieces of a line are held until the '\n', then delivered as one
+    seen.clear();
+    FEED("received: inv (37 bytes)  ");
+    FEED("01 ");
+    FEED("02 ");
+    nFail += Check(seen.empty(), "pieces without a newline are held back") ? 0 : 1;
+    FEED("\n");
+    nFail += Check(seen.size() == 1 && seen[0] == "received: inv (37 bytes)  01 02 \n",
+                   "the newline delivers the assembled line") ? 0 : 1;
+    nFail += Check(buf.nUsed == 0, "nothing pending after a complete line") ? 0 : 1;
+
+    // 2. two lines in one message, plus a tail
+    seen.clear();
+    FEED("a\nb\nc");
+    nFail += Check(seen.size() == 2 && seen[0] == "a\n" && seen[1] == "b\n",
+                   "every complete line in a message is delivered") ? 0 : 1;
+    nFail += Check(buf.nUsed == 1 && storage[0] == 'c', "the tail waits at the front") ? 0 : 1;
+
+    // 3. the wedge sequence: 40 pending bytes, then a message that does not fit
+    seen.clear();
+    buf.nUsed = 0;
+    std::string tail(40, 't');
+    FEED(tail.c_str());
+    std::string big(50, 'B');
+    FEED(big.c_str());
+    nFail += Check(seen.size() == 1 && seen[0] == tail,
+                   "a message that does not fit flushes the pending tail as it is") ? 0 : 1;
+    nFail += Check(buf.nUsed == 50, "the new message is pending in full") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact after the overflowing message") ? 0 : 1;
+    // the old code never recovered from here; this must keep draining
+    seen.clear();
+    FEED("\n");
+    nFail += Check(seen.size() == 1 && seen[0] == big + "\n" && buf.nUsed == 0,
+                   "the buffer keeps draining afterwards") ? 0 : 1;
+
+    // 4. exactly the room left, off by one each way
+    seen.clear();
+    buf.nUsed = 0;
+    std::string fill(CAP - 2, 'f');          // fits: leaves the NUL byte
+    FEED(fill.c_str());
+    nFail += Check(seen.empty() && buf.nUsed == CAP - 2, "a message of exactly the room fits") ? 0 : 1;
+    FEED("x");                               // one more does not
+    nFail += Check(seen.size() == 1 && seen[0] == fill && buf.nUsed == 1,
+                   "one byte over the room flushes and starts over") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact at the boundary") ? 0 : 1;
+
+    // 5. a message larger than the whole buffer goes straight through
+    seen.clear();
+    buf.nUsed = 0;
+    std::string huge(CAP * 3, 'H');
+    FEED(huge.c_str());
+    nFail += Check(seen.size() == 1 && seen[0] == huge && buf.nUsed == 0,
+                   "a message larger than the buffer is delivered directly") ? 0 : 1;
+    nFail += Check(CANARY_OK(), "canary intact after the oversize message") ? 0 : 1;
+
+    // 6. the long run: a full buffer's worth of traffic, many times over
+    seen.clear();
+    for (int i = 0; i < 20000; i++)
+    {
+        char line[96];
+        snprintf(line, sizeof(line), "line %d of %s\n", i, i % 7 == 0 ? "something longer than usual here" : "x");
+        FEED(line);
+    }
+    nFail += Check(seen.size() == 20000, "20000 lines in, 20000 lines out") ? 0 : 1;
+    nFail += Check(buf.nUsed == 0 && CANARY_OK(), "nothing pending and canary intact after the long run") ? 0 : 1;
+
+    #undef FEED
+    #undef CANARY_OK
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
+// PoW v2: the input a RandomX miner hashes, the key it is told, and the
+// switch by block time. The last check is the one that matters: a RandomX
+// VM created here from nothing but the 32-byte seed_hash -- which is all
+// XMRig ever gets -- must reproduce the hash consensus computes.
+static int RunPoWV2SelfTest()
+{
+    printf("pow-v2 self-test\n");
+    int nFail = 0;
+    unsigned int T = PoWV2Time();
+
+    nFail += Check(PoWVersionAt(T - 1) == 1 && PoWVersionAt(T) == 2 && PoWVersionAt(T + 1) == 2,
+                   "the switch is at the activation time, inclusive") ? 0 : 1;
+    nFail += Check(POW_V2_TIME_MAINNET > POW_V2_TIME_TESTNET,
+                   "testnet switches before mainnet") ? 0 : 1;
+
+    unsigned char hdr[80];
+    for (int i = 0; i < 80; i++) hdr[i] = (unsigned char)(0xA0 + i);
+    unsigned char in[POW_INPUT_MAX];
+    size_t n = PoWInputV2(hdr, in);
+    nFail += Check(n == 83, "the v2 input is 83 bytes") ? 0 : 1;
+    nFail += Check(memcmp(in, hdr, 36) == 0, "version and previous hash stay at 0..35") ? 0 : 1;
+    nFail += Check(in[36] == 0 && in[37] == 0 && in[38] == 0, "three zero bytes at 36..38") ? 0 : 1;
+    nFail += Check(memcmp(in + 39, hdr + 76, 4) == 0, "the nonce lands at 39..42, where XMRig writes") ? 0 : 1;
+    nFail += Check(memcmp(in + 43, hdr + 36, 32) == 0, "the merkle root follows at 43..74") ? 0 : 1;
+    nFail += Check(memcmp(in + 75, hdr + 68, 8) == 0, "time and bits close it at 75..82") ? 0 : 1;
+
+    // version selection reads the header's own nTime
+    unsigned char h1[80], h2[80];
+    memcpy(h1, hdr, 80); memcpy(h2, hdr, 80);
+    unsigned int t1 = T - 1, t2 = T;
+    memcpy(h1 + 68, &t1, 4); memcpy(h2 + 68, &t2, 4);
+    int v = 0;
+    unsigned char out[POW_INPUT_MAX];
+    size_t n1 = PoWInputFromHeader(h1, out, &v);
+    nFail += Check(n1 == 80 && v == 1 && memcmp(out, h1, 80) == 0, "a pre-switch header hashes as itself (v1)") ? 0 : 1;
+    size_t n2 = PoWInputFromHeader(h2, out, &v);
+    nFail += Check(n2 == 83 && v == 2, "a post-switch header hashes as the v2 input") ? 0 : 1;
+
+    // the seed is SHA-256 of the v1 key string, 32 bytes
+    unsigned char want[32];
+    const char* k1 = "Bitflash/RandomX/v1/one-cpu-one-vote";
+    SHA256((const unsigned char*)k1, strlen(k1), want);
+    nFail += Check(memcmp(PoWSeedV2(), want, 32) == 0 && PoWSeedV2Hex().size() == 64,
+                   "the v2 seed is SHA-256 of the v1 key, 64 hex chars") ? 0 : 1;
+
+    // consensus hash of each side of the switch equals the raw call
+    uint256 c1 = PoWHashHeader(h1);
+    uint256 c2 = PoWHashHeader(h2);
+    nFail += Check(c1 == RandomXPoWHash(1, h1, 80), "v1 consensus hash is RandomX(v1 key, header)") ? 0 : 1;
+    unsigned char in2[POW_INPUT_MAX];
+    PoWInputV2(h2, in2);
+    nFail += Check(c2 == RandomXPoWHash(2, in2, 83), "v2 consensus hash is RandomX(v2 key, v2 input)") ? 0 : 1;
+    nFail += Check(c1 != c2 && c1 != 0 && c2 != 0, "the two sides of the switch hash differently") ? 0 : 1;
+
+    // a miner VM keyed for v2 agrees with the verifier
+    void* vm = RandomXCreateMinerVM(2);
+    nFail += Check(vm != NULL && PoWHashHeaderWithVM(vm, h2) == c2, "a v2 miner VM agrees with the verifier") ? 0 : 1;
+    RandomXDestroyMinerVM(vm);
+
+    // Independent: RandomX from scratch with only the seed, over the blob.
+    // This is exactly what XMRig does with the job it is sent.
+    randomx_flags flags = randomx_get_flags();
+    randomx_cache* cache = randomx_alloc_cache(flags);
+    bool fIndependent = false;
+    if (cache) {
+        randomx_init_cache(cache, PoWSeedV2(), 32);
+        randomx_vm* xvm = randomx_create_vm(flags, cache, NULL);
+        if (xvm) {
+            unsigned char hash[32];
+            randomx_calculate_hash(xvm, in2, 83, hash);
+            fIndependent = memcmp(hash, &c2, 32) == 0;
+            // and the nonce at 39 is what moves the hash
+            unsigned char in3[POW_INPUT_MAX];
+            memcpy(in3, in2, 83);
+            in3[39] ^= 0x01;
+            unsigned char hash3[32];
+            randomx_calculate_hash(xvm, in3, 83, hash3);
+            fIndependent = fIndependent && memcmp(hash3, hash, 32) != 0;
+            randomx_destroy_vm(xvm);
+        }
+        randomx_release_cache(cache);
+    }
+    nFail += Check(fIndependent, "a fresh RandomX keyed by seed_hash alone reproduces the consensus hash") ? 0 : 1;
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static bool SelfTestReadN(SOCKET s, void* buf, int n)
 {
     char* p = (char*)buf;
@@ -3270,7 +3684,7 @@ static bool SelfTestWriteN(SOCKET s, const void* buf, int n)
     int off = 0;
     while (off < n)
     {
-        int r = send(s, p + off, n - off, 0);
+        int r = send(s, p + off, n - off, BTF_SEND_FLAGS);
         if (r <= 0)
             return false;
         off += r;
@@ -3439,6 +3853,84 @@ static bool RunSocks5HandshakeProbe(std::string& errOut)
     else
         return true;
     return false;
+}
+
+// A write to a peer that has closed must come back as an error, not end the
+// process. This test runs inside the same main() the node runs in, so it
+// exercises both halves of the fix: BTF_SEND_FLAGS on the send, and the
+// SIGPIPE disposition main() sets for writes that do not go through send().
+// On the code before the fix, the plain send below kills the process, and
+// the harness sees a missing "ALL TESTS PASSED" instead of a FAIL line.
+static int RunSigpipeSelfTest()
+{
+    printf("sigpipe self-test\n");
+    int nFail = 0;
+#ifdef _WIN32
+    SelfTestWinsock winsock;
+    nFail += Check(winsock.fStarted, "Winsock started") ? 0 : 1;
+#endif
+    SOCKET listener = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    bool fUp = listener != INVALID_SOCKET
+        && bind(listener, (struct sockaddr*)&addr, sizeof(addr)) == 0
+        && listen(listener, 1) == 0;
+#ifdef _WIN32
+    int addrLen = sizeof(addr);
+#else
+    socklen_t addrLen = sizeof(addr);
+#endif
+    fUp = fUp && getsockname(listener, (struct sockaddr*)&addr, &addrLen) == 0;
+    nFail += Check(fUp, "loopback listener up") ? 0 : 1;
+
+    SOCKET client = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    bool fConn = fUp && client != INVALID_SOCKET
+        && connect(client, (struct sockaddr*)&addr, sizeof(addr)) == 0;
+    SOCKET server = fConn ? accept(listener, NULL, NULL) : INVALID_SOCKET;
+    nFail += Check(fConn && server != INVALID_SOCKET, "client connected, server accepted") ? 0 : 1;
+
+    // The peer goes away.
+    if (server != INVALID_SOCKET)
+        closesocket(server);
+    Sleep(100);
+
+    // Writes into the void: the first may be accepted into the buffer (the
+    // RST arrives after it), the ones after it must fail -- and the process
+    // must still be here to see that.
+    int nErr = 0;
+    int nLastErrno = 0;
+    for (int i = 0; i < 8 && nErr == 0; i++)
+    {
+        char c = 'x';
+        int r = send(client, &c, 1, BTF_SEND_FLAGS);
+        if (r < 0) { nErr++; nLastErrno = WSAGetLastError(); }
+        Sleep(50);
+    }
+    nFail += Check(nErr > 0, "send to a closed peer returns an error with BTF_SEND_FLAGS") ? 0 : 1;
+#ifndef _WIN32
+    nFail += Check(nLastErrno == EPIPE || nLastErrno == ECONNRESET,
+                   "the error is EPIPE or ECONNRESET, not a dead process") ? 0 : 1;
+    // And the same without the flag: only main()'s SIG_IGN stands between
+    // this write and the end of the process.
+    nErr = 0;
+    for (int i = 0; i < 8 && nErr == 0; i++)
+    {
+        char c = 'y';
+        if (send(client, &c, 1, 0) < 0) nErr++;
+        Sleep(50);
+    }
+    nFail += Check(nErr > 0, "a plain send to a closed peer returns an error too (SIGPIPE ignored)") ? 0 : 1;
+#endif
+    if (client != INVALID_SOCKET) closesocket(client);
+    if (listener != INVALID_SOCKET) closesocket(listener);
+
+    printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
 }
 
 static int RunSocks5ProxySelfTest()
@@ -3637,12 +4129,22 @@ int RunSelfTest(const std::string& name)
         return RunPoolStratumSelfTest();
     if (name == "parse-money")
         return RunParseMoneySelfTest();
+    if (name == "debug-log-buffer")
+        return RunDebugLogBufferSelfTest();
+    if (name == "pow-v2")
+        return RunPoWV2SelfTest();
+    if (name == "sigpipe")
+        return RunSigpipeSelfTest();
+    if (name == "script-eval")
+        return RunScriptEvalSelfTest();
+    if (name == "rules-v2")
+        return RunRulesV2SelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, socks5-proxy, managed-tor\n");
     return 1;
 }

@@ -355,13 +355,17 @@ string GetDiagnosticsText()
         str += "  blocks received   0\n";
 
     int nMining = MinersRunningCount();
-    str += strprintf("  proof of work     %s mode%s\n",
-                     RandomXFastReady() ? "fast (2 GB dataset)" : "light (256 MB cache)",
+    int nPoWNow = PoWVersionAt(GetAdjustedTime());
+    str += strprintf("  proof of work     v%d, %s mode%s\n", nPoWNow,
+                     RandomXFastReady(nPoWNow) ? "fast (2 GB dataset)" : "light (256 MB cache)",
                      nMining > 0
                          ? strprintf(", mining on %d thread(s), about %d MB",
                                      nMining,
-                                     (RandomXFastReady() ? 2080 : 256) + 2 * nMining).c_str()
+                                     (RandomXFastReady(nPoWNow) ? 2080 : 256) + 2 * nMining).c_str()
                          : ", not mining");
+    if (nPoWNow == 1)
+        str += strprintf("  PoW v2 switch     block time %u; RandomX miners (xmrig) from then on\n",
+                         PoWV2Time());
     str += strprintf("  large pages       %s\n", RandomXLargePagesStatus());
 
     str += SockAccountingText();
@@ -407,7 +411,7 @@ string GetDiagnosticsText()
     if (!strLastHandshakeTimeout.empty())
         str += strprintf("  last handshake    %s\n", strLastHandshakeTimeout.c_str());
 
-    str += "\n  peer                          dir  height   last recv   last send   unsent  via\n";
+    str += "\n  peer                          dir  height  release   last recv   last send   unsent  via\n";
     foreach(CNode* pnode, vCopy)
     {
         int nSendSize = 0;
@@ -416,10 +420,11 @@ string GetDiagnosticsText()
         string strVia;
         if (!pnode->strBtfMeeting.empty())
             strVia = pnode->strBtfMeeting;
-        str += strprintf("  %-28s %-4s %6d  %10s  %10s  %7d  %s\n",
+        str += strprintf("  %-28s %-4s %6d  %-8s  %10s  %10s  %7d  %s\n",
                          pnode->addr.ToString().substr(0, 28).c_str(),
                          pnode->fInbound ? "in" : "out",
                          pnode->nStartingHeight,
+                         pnode->strRelease.empty() ? "<=1.2.23" : pnode->strRelease.substr(0, 8).c_str(),
                          FormatAge(pnode->nLastRecv ? nNow - pnode->nLastRecv : -1).c_str(),
                          FormatAge(pnode->nLastSend ? nNow - pnode->nLastSend : -1).c_str(),
                          nSendSize,
@@ -473,7 +478,7 @@ bool GetMyExternalIP(unsigned int& ipRet)
         freeaddrinfo(res);
 
         string req = string("GET ") + svc.path + " HTTP/1.0\r\nHost: " + svc.host + "\r\nConnection: close\r\n\r\n";
-        send(hSocket, req.c_str(), (int)req.size(), 0);
+        send(hSocket, req.c_str(), (int)req.size(), BTF_SEND_FLAGS);
 
         // Read response, skip HTTP headers, grab first line of body
         string response;
@@ -690,6 +695,11 @@ struct CachedBtfPeer
     // before peer exchange existed, or resolved through Nostr -- those are
     // still dialable, just not relayable.
     string desc;
+    // True once a connection to this peer actually succeeded. Only these are
+    // handed on to other nodes: a cache entry is otherwise just something we
+    // were told, and passing hearsay along is how one node's mixed cache
+    // becomes everybody's.
+    bool fVerified;
 };
 
 static string BtfPeerCachePath() { return GetAppDir() + "/btfpeers.json"; }
@@ -745,6 +755,7 @@ void LoadCachedBtfPeers(vector<CachedBtfPeer>& out)
             p.lastSeen = o.value("seen", (int64)0);
             if (o.contains("desc") && o["desc"].is_string())
                 p.desc = o["desc"].get<string>();
+            p.fVerified = o.value("ok", false);
             if (nNow - p.lastSeen > CACHED_BTF_PEER_TTL) continue; // long gone
             out.push_back(p);
         }
@@ -784,7 +795,8 @@ bool BtfCachedPeerOnion(const string& strBtfAddr, string& strOnionOut)
 static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
                             const unsigned char enc_pub[32],
                             const string& strDesc = string(),
-                            const string& strOnion = string())
+                            const string& strOnion = string(),
+                            bool fVerified = false)
 {
     CRITICAL_BLOCK(cs_btfPeerCache)
     {
@@ -801,6 +813,10 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
                     strKeepDesc = peers[i].desc;
                 if (strKeepOnion.empty())
                     strKeepOnion = peers[i].onion;
+                // Verified is sticky: a peer that answered once does not become
+                // hearsay again because somebody mentioned it afterwards.
+                if (peers[i].fVerified)
+                    fVerified = true;
                 peers.erase(peers.begin() + i);
                 break;
             }
@@ -812,6 +828,7 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
         p.encHex   = BytesToHex(enc_pub, 32);
         p.lastSeen = GetTime();
         p.desc     = strKeepDesc;
+        p.fVerified = fVerified;
         peers.insert(peers.begin(), p); // most recent first
 
         if (peers.size() > MAX_CACHED_BTF_PEERS)
@@ -829,6 +846,8 @@ static void RememberBtfPeer(const string& strBtfAddr, const string& strMeeting,
             o["seen"]    = q.lastSeen;
             if (!q.desc.empty())
                 o["desc"] = q.desc;
+            if (q.fVerified)
+                o["ok"] = true;
             arr.push_back(o);
         }
         FILE* f = fopen(BtfPeerCachePath().c_str(), "w");
@@ -1114,6 +1133,28 @@ void ThreadReconnectCachedBtfPeers(void* parg)
 // peers that actually answered, so a flood costs a Sybil more than it costs us.
 //
 
+// Does this endpoint plausibly belong to the network this node is on?
+//
+// Belt and braces beside the namespaced announcements: a node still running an
+// older build will keep handing over whatever its cache holds, and the ports are
+// the one thing already in the descriptor that says which network a peer meant.
+// Mainnet's defaults sit in 8433..8443 (p2p, its pool port, the seed), testnet's
+// in 18433..18443. Anything outside both bands is somebody's custom port and is
+// left alone -- this rejects what is provably the other network, not everything
+// unfamiliar.
+static bool BtfEndpointFitsThisNetwork(const string& strOnion)
+{
+    string::size_type colon = strOnion.rfind(':');
+    if (colon == string::npos)
+        return true;                       // no port to judge
+    int nPort = atoi(strOnion.substr(colon + 1).c_str());
+    bool fMainnetBand = (nPort >= 8433 && nPort <= 8443);
+    bool fTestnetBand = (nPort >= 18433 && nPort <= 18443);
+    if (!fMainnetBand && !fTestnetBand)
+        return true;                       // custom port, not ours to judge
+    return IsTestNet() ? fTestnetBand : fMainnetBand;
+}
+
 void BtfPexCollect(vector<string>& vDescOut)
 {
     vDescOut.clear();
@@ -1127,11 +1168,18 @@ void BtfPexCollect(vector<string>& vDescOut)
     CRITICAL_BLOCK(cs_btfPeerCache)
         LoadCachedBtfPeers(peers);
 
-    // Most recently seen first: these answered us, they are not names copied
-    // off a relay listing.
+    // Most recently seen first, and only peers this node actually reached.
+    //
+    // This used to forward the whole cache, including entries that were only
+    // ever heard about. One node with a mixed cache then handed that mix to
+    // everyone it met, and the mix spread faster than any of it could be
+    // verified: a testnet node's cache filled with mainnet peers it could never
+    // handshake, and the reverse. Gossiping only what answered keeps a node's
+    // own experience as the thing it vouches for.
     foreach(const CachedBtfPeer& p, peers)
     {
         if (vDescOut.size() >= MAX_PEX_DESCRIPTORS) break;
+        if (!p.fVerified) continue;                            // heard about, never reached
         if (p.desc.empty()) continue;                          // nothing provable to pass on
         if (p.desc.size() > MAX_PEX_DESCRIPTOR_BYTES) continue;
         vDescOut.push_back(p.desc);
@@ -1178,6 +1226,13 @@ int BtfPexAccept(const vector<string>& vDesc)
         unsigned char enc[32];
         if (!HexToBytes(d.enc, enc, 32))
             continue;
+
+        if (!BtfEndpointFitsThisNetwork(d.onion))
+        {
+            LogPrint("net", "btfpeers: dropping %s at %s -- other network\n",
+                     strAddr.c_str(), d.onion.c_str());
+            continue;
+        }
 
         RememberBtfPeer(strAddr, d.meeting_node, enc, strDesc, d.onion);
         nKept++;
@@ -1235,7 +1290,7 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
                     LogPrint("net", "connected %s via direct onion %s\n",
                              strBtfAddr.c_str(), strOnionNorm.c_str());
                 BtfChurnNoteDialResult(strBtfAddr, strOnionNorm, true);
-                RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm);
+                RememberBtfPeer(strBtfAddr, strMeeting, enc_pub, strDesc, strOnionNorm, true);
 
                 pnode = new CNode(hOnionSocket, addr, false);
                 pnode->strBtfAddr = strBtfAddr;
@@ -1308,6 +1363,20 @@ CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting
     }
     if (BtfLocalAddress() == strBtfAddr)
         return NULL; // ourselves
+
+    // The last place to catch a peer from the other network, and the one that
+    // covers every way it got here: a cache written by an older build, a Nostr
+    // descriptor published under the shared tag before the announcements were
+    // namespaced, a peer exchange from a node still running 1.2.20. Dialling it
+    // spends a Tor circuit and an outbound slot on a handshake the magic bytes
+    // will reject, and the connection sits there at height -1 until it is
+    // reaped.
+    if (!strOnion.empty() && !BtfEndpointFitsThisNetwork(strOnion))
+    {
+        LogPrint("net", "ConnectNodeBtf: skipping %s at %s -- other network\n",
+                 strBtfAddr.c_str(), strOnion.c_str());
+        return NULL;
+    }
     return ConnectNodeBtfTail(strBtfAddr, pk, strMeeting, strOnion, enc_pub, strDesc);
 }
 
@@ -1766,7 +1835,7 @@ void ThreadSocketHandler2(void* parg)
                     CDataStream& vSend = pnode->vSend;
                     if (!vSend.empty())
                     {
-                        int nBytes = send(hSocket, &vSend[0], vSend.size(), 0);
+                        int nBytes = send(hSocket, &vSend[0], vSend.size(), BTF_SEND_FLAGS);
                         if (nBytes > 0)
                         {
                             vSend.erase(vSend.begin(), vSend.begin() + nBytes);

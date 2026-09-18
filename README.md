@@ -305,14 +305,67 @@ See [public pool directory](docs/pool-directory.md) for the website/API shape.
 
 **Participant** — mine to someone else's pool. Enter or select the pool's `.btf` address and enable Start Mining.
 
-The built-in participant miner connects to operator pools through the `.btf`
-path. External miners can use Bitflash as a local Stratum bridge:
+### Mining with ordinary software
+
+From **PoW v2** — mainnet at block time 1789992000 (2026-09-21 12:00 UTC),
+testnet at 1789419600 (2026-09-14 21:00 UTC) — you do not need Bitflash
+installed to mine it. Download **Bitflash Miner** from the releases page
+(`Bitflash-Miner-*-windows.zip` or `-linux.tar.gz`): it is the official XMRig
+build plus a Tor client and a launcher.
+
+```
+mine.cmd YOUR_BTF_ADDRESS        Windows
+./mine.sh YOUR_BTF_ADDRESS       Linux
+```
+
+It starts a private Tor and runs XMRig through it to the pool's onion; Ctrl+C
+stops both. Double-clicked, it asks for the address. Antivirus products flag
+XMRig everywhere — the binary is unchanged, and its hash matches the one on
+XMRig's release page.
+
+Or bring your own XMRig, which has spoken Tor on its own since 5.7.0: run Tor
+(the Tor Browser, open, is enough — its SOCKS port is 9150; a `tor` daemon
+listens on 9050) and point the miner at the pool's onion through it:
+
+```bash
+xmrig -a rx/0 -x 127.0.0.1:9150 -o mddjuyuctouv62eqdaofvwf4timxxmp72d2ghmc6qp5mdey6f5au56id.onion:8436 -u YOUR_BTF_ADDRESS -p x
+```
+
+The pool lives behind a Tor hidden service like every node on this network,
+and nothing in either path touches the clear net; there is no public IP
+anywhere in it to switch off. `YOUR_BTF_ADDRESS` is a Bitflash payment
+address, the kind `-newaddress` prints — not a `.btf` node address. The pool
+pays out to it. Fee 1%. To try PoW v2 before mainnet switches, the testnet
+pool is `vocwzaqll3vzuvs4nkva5fxh6q5odlokkqvfc2uvhcjtmjlygae5l4id.onion:18438`
+(`testnet` as the launcher's second word) and pays a testnet address.
+
+Before the switch the pool refuses these miners with a message that names the
+activation time. Until then, and for anyone who prefers the node's own miner,
+Bitflash mines to the same pool over its own Tor:
+
+```bash
+./bitflash -participant=ygnbd2zwq5wllaafopxa7ccnvnwuen75qt6rqco3x4bx3mfiorbaxei.btf
+```
+
+Why a switch was needed, and what a pool has to send, is in
+[docs/pow-v2.md](docs/pow-v2.md). The 1.2.23 release and earlier could not be
+mined by XMRig at all — the README of that release said otherwise, and it was
+wrong.
+
+The same switch brings the consensus rules Bitcoin adopted after 0.1.0 —
+strict DER and low-S signatures, the height in every coinbase, the retarget
+window that measures what it divides by — see [docs/rules-v2.md](docs/rules-v2.md).
+
+A node can also act as a local stratum bridge for a pool, for miners that
+cannot be given a proxy:
 
 ```bash
 ./bitflash -nogui -stratumbridge=POOL_BTF_ADDRESS -stratumbridgeport=3333
-SRBMiner-MULTI --algorithm randomx --pool 127.0.0.1:3333 --wallet YOUR_BTF_ADDRESS --password x
 xmrig -a rx/0 -o 127.0.0.1:3333 -u YOUR_BTF_ADDRESS -p x
 ```
+
+`-stratumbridgebind=0.0.0.0` opens it to the network; it stays on loopback
+unless asked. Bitflash itself runs no public bridge.
 
 Estimate rewards and electricity cost locally:
 
@@ -560,4 +613,5 @@ ten months rather than four years.
 
 Young network. Keep your node current and don't put in more than you are willing to lose.
 
-MIT. Built on Bitcoin 0.1.0 (Satoshi Nakamoto, 2009).
+MIT. Built on Bitcoin 0.1.0 (Satoshi Nakamoto, 2009). The license covers the code; the name,
+logo and domain are not licensed. See [TRADEMARK.md](TRADEMARK.md).

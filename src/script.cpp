@@ -4,7 +4,7 @@
 
 #include "headers.h"
 
-bool CheckSig(vector<unsigned char> vchSig, vector<unsigned char> vchPubKey, CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType);
+bool CheckSig(vector<unsigned char> vchSig, vector<unsigned char> vchPubKey, CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType, bool fStrictSigs);
 
 
 
@@ -42,7 +42,7 @@ void MakeSameSize(valtype& vch1, valtype& vch2)
 #define altstacktop(i)  (altstack.at(altstack.size()+(i)))
 
 bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nIn, int nHashType,
-                vector<vector<unsigned char> >* pvStackRet)
+                vector<vector<unsigned char> >* pvStackRet, bool fStrictSigs)
 {
     CAutoBN_CTX pctx;
     CScript::const_iterator pc = script.begin();
@@ -744,7 +744,7 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
                 // Drop the signature, since there's no way for a signature to sign itself
                 scriptCode.FindAndDelete(CScript(vchSig));
 
-                bool fSuccess = CheckSig(vchSig, vchPubKey, scriptCode, txTo, nIn, nHashType);
+                bool fSuccess = CheckSig(vchSig, vchPubKey, scriptCode, txTo, nIn, nHashType, fStrictSigs);
 
                 stack.pop_back();
                 stack.pop_back();
@@ -801,7 +801,7 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
                     valtype& vchPubKey = stacktop(-ikey);
 
                     // Check signature
-                    if (CheckSig(vchSig, vchPubKey, scriptCode, txTo, nIn, nHashType))
+                    if (CheckSig(vchSig, vchPubKey, scriptCode, txTo, nIn, nHashType, fStrictSigs))
                     {
                         isig++;
                         nSigsCount--;
@@ -839,6 +839,15 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
             return false;
     }
 
+
+    // A conditional left open is a script that never reached the code after
+    // it. With scriptSig and scriptPubKey running as one script, a scriptSig
+    // ending in <OP_0 OP_IF> parked the whole scriptPubKey -- OP_CHECKSIG
+    // included -- in a branch that never ran, and the final CastToBool saw
+    // whatever the scriptSig had pushed. Anyone could spend anyone's output
+    // without a signature. 0.1.0 never checked this; Bitcoin does.
+    if (!vfExec.empty())
+        return false;
 
     if (pvStackRet)
         *pvStackRet = stack;
@@ -918,9 +927,61 @@ uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int
 }
 
 
-bool CheckSig(vector<unsigned char> vchSig, vector<unsigned char> vchPubKey, CScript scriptCode,
-              const CTransaction& txTo, unsigned int nIn, int nHashType)
+// BIP66, checked byte by byte rather than by asking a parser:
+//   0x30 [total-length] 0x02 [R-length] [R] 0x02 [S-length] [S] [sighash]
+// with R and S positive, minimally encoded, and the lengths adding up.
+bool IsStrictDERSignature(const vector<unsigned char>& sig)
 {
+    if (sig.size() < 9 || sig.size() > 73) return false;
+    if (sig[0] != 0x30) return false;
+    if (sig[1] != sig.size() - 3) return false;
+    unsigned int lenR = sig[3];
+    if (5 + lenR >= sig.size()) return false;
+    unsigned int lenS = sig[5 + lenR];
+    if ((size_t)(lenR + lenS + 7) != sig.size()) return false;
+    if (sig[2] != 0x02) return false;
+    if (lenR == 0) return false;
+    if (sig[4] & 0x80) return false;
+    if (lenR > 1 && sig[4] == 0x00 && !(sig[5] & 0x80)) return false;
+    if (sig[lenR + 4] != 0x02) return false;
+    if (lenS == 0) return false;
+    if (sig[lenR + 6] & 0x80) return false;
+    if (lenS > 1 && sig[lenR + 6] == 0x00 && !(sig[lenR + 7] & 0x80)) return false;
+    return true;
+}
+
+// S must not exceed half the curve order. Assumes the DER shape above.
+bool IsLowSSignature(const vector<unsigned char>& sig)
+{
+    static const unsigned char halfOrder[32] = {
+        0x7F,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,0xFF,
+        0x5D,0x57,0x6E,0x73,0x57,0xA4,0x50,0x1D,0xDF,0xE9,0x2F,0x46,0x68,0x1B,0x20,0xA0 };
+    if (!IsStrictDERSignature(sig)) return false;
+    unsigned int lenR = sig[3];
+    unsigned int lenS = sig[5 + lenR];
+    const unsigned char* S = &sig[6 + lenR];
+    // strip the sign-padding zero a 33-byte S carries
+    if (lenS == 33 && S[0] == 0x00) { S++; lenS = 32; }
+    if (lenS > 32) return false;
+    unsigned char s[32];
+    memset(s, 0, 32);
+    memcpy(s + (32 - lenS), S, lenS);
+    return memcmp(s, halfOrder, 32) <= 0;
+}
+
+
+bool CheckSig(vector<unsigned char> vchSig, vector<unsigned char> vchPubKey, CScript scriptCode,
+              const CTransaction& txTo, unsigned int nIn, int nHashType, bool fStrictSigs)
+{
+    // Rules v2: one encoding per signature. OpenSSL's parser accepts more
+    // than DER -- and how much more has changed between its versions, which
+    // is how two Bitcoin nodes came to disagree on a block in 2015. Low S
+    // closes the other door: every signature has a twin with S' = n - S
+    // that verifies against the same key and hash, so anyone could rewrite
+    // a transaction's txid in flight by swapping them.
+    if (fStrictSigs && (!IsStrictDERSignature(vchSig) || !IsLowSSignature(vchSig)))
+        return false;
+
     CKey key;
     if (!key.SetPubKey(vchPubKey))
         return false;
@@ -1163,7 +1224,7 @@ bool SignSignature(const CTransaction& txFrom, CTransaction& txTo, unsigned int 
 }
 
 
-bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType)
+bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsigned int nIn, int nHashType, bool fStrictSigs)
 {
     assert(nIn < txTo.vin.size());
     const CTxIn& txin = txTo.vin[nIn];
@@ -1174,5 +1235,13 @@ bool VerifySignature(const CTransaction& txFrom, const CTransaction& txTo, unsig
     if (txin.prevout.hash != txFrom.GetHash())
         return false;
 
-    return EvalScript(txin.scriptSig + CScript(OP_CODESEPARATOR) + txout.scriptPubKey, txTo, nIn, nHashType);
+    // The scriptSig supplies data; it does not get to run operators in the
+    // same script as the scriptPubKey it is spending. The open-OP_IF spend
+    // above is one member of that family; this closes the family. Every
+    // scriptSig on both chains was push-only when this was added (44,673
+    // mainnet inputs scanned, 0 exceptions), so it holds from genesis.
+    if (!txin.scriptSig.IsPushOnly())
+        return false;
+
+    return EvalScript(txin.scriptSig + CScript(OP_CODESEPARATOR) + txout.scriptPubKey, txTo, nIn, nHashType, NULL, fStrictSigs);
 }

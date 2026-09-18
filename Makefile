@@ -12,7 +12,7 @@
 ROOT    := $(shell pwd)
 NPROC   := $(shell nproc 2>/dev/null || echo 2)
 SUDO    := $(shell [ "$$(id -u)" = "0" ] && echo "" || echo "sudo")
-VERSION := 1.2.21
+VERSION := 1.2.23
 
 SECP256K1_REPO   := https://github.com/bitcoin-core/secp256k1
 SECP256K1_COMMIT := 7fecac74aed8e1fd9078380d67dd04663705c989
@@ -90,7 +90,14 @@ deps-randomx:
 	  echo "==> RandomX already built"; \
 	fi
 
-appimage: src/bitflash
+# The GUI binary the AppImage packs. A plain file prerequisite here once let
+# `make appimage-tor` pack whatever src/bitflash happened to be lying around;
+# it packed a stale one for six releases. Always rebuild through src/Makefile.
+gui:
+	$(MAKE) -C src -f Makefile bitflash -j$(NPROC)
+	strip src/bitflash
+
+appimage: gui
 	@echo "==> building AppImage"
 	@if [ ! -x /tmp/appimagetool ]; then \
 	  wget -q "https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage" \
@@ -131,7 +138,7 @@ import shutil; shutil.copy('/tmp/bitflash.AppDir/bitflash.png', \
 # Release AppImage: same as `appimage` but with managed Tor and the obfs4 /
 # snowflake pluggable transports bundled in, so it reaches Tor with no system
 # Tor install. This is the artifact that ships.
-appimage-tor: src/bitflash
+appimage-tor: gui
 	$(MAKE) -f Makefile appimage WITH_TOR=1
 
 # ---- Windows (MSYS2 UCRT64) -----------------------------------------------
@@ -230,6 +237,6 @@ sign-checksums:
 verify-release:
 	./scripts/verify-release.sh $(if $(TAG),$(TAG),latest)
 
-.PHONY: linux windows windows-tor clean appimage appimage-tor \
-        tests fuzz-net-message-smoke fuzz-script-smoke ci checksums sign-checksums verify-release \
+.PHONY: linux windows windows-tor clean gui appimage appimage-tor \
+        tests fuzz-net-message-smoke fuzz-script-smoke checksums sign-checksums verify-release \
         deps-linux deps-windows deps-apt deps-secp256k1 deps-randomx

@@ -38,7 +38,7 @@ NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/rpc.o \
             obj/selftest.o obj/bip32.o obj/walletcmd.o obj/wallet_sqlite.o \
-            obj/proxy.o obj/tor.o
+            obj/proxy.o obj/tor.o obj/jsonrpc.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o obj/bitflash_res.o
 
@@ -51,8 +51,8 @@ GUI_OBJS = obj/gui.o obj/main_gui.o obj/bitflash_res.o
 # binary. Nothing crashed here, and nothing would say so if it had.
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
-          randomx_pow.h btfaddr.h btfchan.h btfsock.h market.h \
-          selftest.h walletcmd.h wallet_sqlite.h sockcount.h proxy.h tor.h compat.h font_roboto.h
+          randomx_pow.h consensus.h btfaddr.h btfchan.h btfsock.h market.h \
+          selftest.h walletcmd.h wallet_sqlite.h sockcount.h proxy.h tor.h compat.h font_roboto.h jsonrpc.h
 
 all: bitflash.exe
 
@@ -119,5 +119,10 @@ tests: test_bip32.exe bitflash.exe
 	./bitflash.exe -selftest=network-params
 	./bitflash.exe -selftest=consensus-limits
 	./bitflash.exe -selftest=pool-stratum
+	./bitflash.exe -selftest=debug-log-buffer
+	./bitflash.exe -selftest=pow-v2
+	./bitflash.exe -selftest=sigpipe
+	./bitflash.exe -selftest=script-eval
+	./bitflash.exe -selftest=rules-v2
 	./bitflash.exe -selftest=socks5-proxy
 	./bitflash.exe -selftest=managed-tor

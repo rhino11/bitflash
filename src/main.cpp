@@ -129,6 +129,7 @@ string strPoolRoundsFile;
 double dPoolFeePercent   = 0.0;
 bool   fStratumBridge    = false;
 int    nStratumBridgePort = 3333;
+string strStratumBridgeBind = "127.0.0.1";
 
 static std::atomic<uint64> gParticipantSharesSent{0};
 static std::atomic<uint64> gParticipantSharesAccepted{0};
@@ -1502,6 +1503,11 @@ bool CTransaction::AcceptTransaction(CTxDB& txdb, bool fCheckInputs, bool* pfMis
     if (!CheckTransaction())
         return error("AcceptTransaction() : CheckTransaction failed");
 
+    // Relay policy, not consensus: what this node is willing to hold and
+    // pass on. A block may still carry anything consensus allows.
+    if (!IsStandard())
+        return error("AcceptTransaction() : non-standard transaction %s", GetHash().ToString().substr(0,6).c_str());
+
     // Do we already have it?
     uint256 hash = GetHash();
     CRITICAL_BLOCK(cs_mapTransactions)
@@ -1547,6 +1553,13 @@ bool CTransaction::AcceptTransaction(CTxDB& txdb, bool fCheckInputs, bool* pfMis
     // Store transaction in memory
     CRITICAL_BLOCK(cs_mapTransactions)
     {
+        // The pool is bounded. Past the ceiling only a transaction that
+        // pays the full base fee gets in, so a flood of free ones cannot
+        // grow memory without limit or crowd out the ones that pay.
+        if (fCheckInputs && !ptxOld && mapTransactions.size() >= MAX_MEMPOOL_TRANSACTIONS
+            && nFees < GetMinFee(false))
+            return error("AcceptTransaction() : mempool full (%d), %s pays too little to enter",
+                         (int)mapTransactions.size(), hash.ToString().substr(0,6).c_str());
         if (ptxOld)
         {
             if (LogAcceptsCategory("net")) printf("mapTransaction.erase(%s) replacing with new version\n", ptxOld->GetHash().ToString().c_str());
@@ -1856,8 +1869,15 @@ unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast)
         return pindexLast->nBits;
 
     // Go back by what we want to be 14 days worth of blocks
+    // Go back the whole window from rules v2 on. 0.1.0 walked nInterval-1
+    // blocks, so the timespan it measured was one interval short of the
+    // one it divided by, and the block on the boundary was counted by
+    // neither window -- the gap the time-warp attack drives through.
+    // Bitcoin never fixed this on mainnet; here the window is 30 blocks,
+    // which makes it a proportionally larger lever, so it is fixed.
+    int nWindow = RulesV2Active(pindexLast->nTime) ? nInterval : nInterval-1;
     const CBlockIndex* pindexFirst = pindexLast;
-    for (int i = 0; pindexFirst && i < nInterval-1; i++)
+    for (int i = 0; pindexFirst && i < nWindow; i++)
         pindexFirst = pindexFirst->pprev;
     assert(pindexFirst);
 
@@ -1925,8 +1945,9 @@ bool CTransaction::DisconnectInputs(CTxDB& txdb)
 }
 
 
-bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee)
+bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPool, CDiskTxPos posThisTx, int nHeight, int64& nFees, bool fBlock, bool fMiner, int64 nMinFee, unsigned int nBlockTime)
 {
+    bool fStrictSigs = RulesV2Active(nBlockTime ? nBlockTime : (unsigned int)GetAdjustedTime());
     // Take over previous transactions' spent pointers
     if (!IsCoinBase())
     {
@@ -1982,7 +2003,7 @@ bool CTransaction::ConnectInputs(CTxDB& txdb, map<uint256, CTxIndex>& mapTestPoo
                         return error("ConnectInputs() : tried to spend coinbase at depth %d", nBestHeight - pindex->nHeight);
 
             // Verify signature
-            if (!VerifySignature(txPrev, *this, i))
+            if (!VerifySignature(txPrev, *this, i, 0, fStrictSigs))
                 return error("ConnectInputs() : %s VerifySignature failed", GetHash().ToString().substr(0,6).c_str());
 
             // Check for conflicts
@@ -2106,7 +2127,22 @@ bool CBlock::ConnectBlock(CTxDB& txdb, CBlockIndex* pindex)
         CDiskTxPos posThisTx(pindex->nFile, pindex->nBlockPos, nTxPos);
         nTxPos += ::GetSerializeSize(tx, SER_DISK);
 
-        if (!tx.ConnectInputs(txdb, mapUnused, posThisTx, pindex->nHeight, nFees, true, false))
+        // Rules v2 (BIP30): a transaction whose txid is already in the index
+        // with outputs still unspent cannot be connected -- AddTxPos would
+        // replace the earlier entry and its unspent outputs would be gone.
+        // With the height in every coinbase (above) this cannot happen going
+        // forward; the check is what stops it if something ever does.
+        if (RulesV2Active(nTime))
+        {
+            CTxIndex txindexOld;
+            if (txdb.ReadTxIndex(tx.GetHash(), txindexOld))
+                foreach(const CDiskTxPos& pos, txindexOld.vSpent)
+                    if (pos.IsNull())
+                        return error("ConnectBlock() : tx %s already exists unspent (BIP30)",
+                                     tx.GetHash().ToString().substr(0,10).c_str());
+        }
+
+        if (!tx.ConnectInputs(txdb, mapUnused, posThisTx, pindex->nHeight, nFees, true, false, 0, nTime))
             return false;
     }
 
@@ -2395,6 +2431,19 @@ bool CBlock::AcceptBlock()
     // Check proof of work
     if (nBits != GetNextWorkRequired(pindexPrev))
         return error("AcceptBlock() : incorrect proof of work");
+
+    // Rules v2: the coinbase scriptSig starts with the block height (BIP34).
+    // Two coinbases paying the same key with the same value were otherwise
+    // byte-identical, so the second had the txid of the first and its index
+    // entry overwrote it. Both miners in this tree have written the height
+    // first since before the switch; from here on it is required.
+    if (RulesV2Active(nTime))
+    {
+        CScript expect = CScript() << (pindexPrev->nHeight + 1);
+        const CScript& cb = vtx[0].vin[0].scriptSig;
+        if (cb.size() < expect.size() || !std::equal(expect.begin(), expect.end(), cb.begin()))
+            return error("AcceptBlock() : coinbase does not start with height %d", pindexPrev->nHeight + 1);
+    }
 
     // Write block to history file
     unsigned int nFile;
@@ -3041,6 +3090,17 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
         // -- every node released so far sends the short form.
         if (!vRecv.empty())
             vRecv >> pfrom->nStartingHeight;
+        // Same rule for the release string (1.2.24+). Bounded: it is a peer's
+        // claim, and it only ever reaches a log line and the diagnostics.
+        if (!vRecv.empty())
+        {
+            try { vRecv >> pfrom->strRelease; } catch (...) { pfrom->strRelease = ""; }
+            if (pfrom->strRelease.size() > 32)
+                pfrom->strRelease.resize(32);
+            for (size_t i = 0; i < pfrom->strRelease.size(); i++)
+                if (!isprint((unsigned char)pfrom->strRelease[i]))
+                    pfrom->strRelease[i] = '?';
+        }
 
         pfrom->vSend.SetVersion(min(pfrom->nVersion, VERSION));
         pfrom->vRecv.SetVersion(min(pfrom->nVersion, VERSION));
@@ -3532,7 +3592,7 @@ static bool StratumSendLine(SOCKET s, const json& j)
     std::string line = j.dump() + "\n";
     int sent = 0, total = (int)line.size();
     while (sent < total) {
-        int r = send(s, line.c_str()+sent, total-sent, 0);
+        int r = send(s, line.c_str()+sent, total-sent, BTF_SEND_FLAGS);
         if (r <= 0) return false;
         sent += r;
     }
@@ -3687,19 +3747,22 @@ static bool PoolParticipantMiner()
     // "subscribing", we're genuinely ready to read the reply the instant
     // it arrives.
     // ------------------------------------------------------------------
-    if (!RandomXFastReady()) {
+    // Keyed for the PoW version in force now; a job from the other side of
+    // the switch re-keys in the hashing loop below.
+    int nPoWVersion = PoWVersionAt(GetAdjustedTime());
+    if (!RandomXFastReady(nPoWVersion)) {
         SetParticipantMiningStatus("building RandomX dataset (~2GB, one-time)");
         unsigned int nThreads = std::thread::hardware_concurrency();
-        RandomXInitDataset(nThreads > 0 ? (int)nThreads : 1);
+        RandomXInitDataset(nPoWVersion, nThreads > 0 ? (int)nThreads : 1);
     }
-    void* rxvm = RandomXCreateMinerVM();
+    void* rxvm = RandomXCreateMinerVM(nPoWVersion);
     if (!rxvm) {
         LogPrint("worker", "[worker] failed to create RandomX VM\n");
         SetParticipantMiningStatus("RandomX init failed");
         closesocket(s); return false;
     }
-    LogPrint("worker", "[worker] RandomX VM ready (%s)\n",
-             RandomXFastReady() ? "fast 2GB" : "light 256MB");
+    LogPrint("worker", "[worker] RandomX v%d VM ready (%s)\n", nPoWVersion,
+             RandomXFastReady(nPoWVersion) ? "fast 2GB" : "light 256MB");
 
     // ------------------------------------------------------------------
     // Step 5: Stratum subscribe + authorize. The socket is read from
@@ -3915,7 +3978,22 @@ static bool PoolParticipantMiner()
 
         // -- Hash one nonce --
         memcpy(header+76, &nNonce, 4);
-        uint256 hash = RandomXHashWithVM(rxvm, header, 80);
+        {
+            // The job header carries its own nTime, so it decides the PoW
+            // version. When the pool crosses the switch, re-key once.
+            unsigned int nJobTime; memcpy(&nJobTime, header+68, 4);
+            int v = PoWVersionAt(nJobTime);
+            if (v != nPoWVersion) {
+                LogPrint("worker", "[worker] job is PoW v%d, re-keying RandomX\n", v);
+                RandomXDestroyMinerVM(rxvm);
+                unsigned int nThreads = std::thread::hardware_concurrency();
+                RandomXInitDataset(v, nThreads > 0 ? (int)nThreads : 1);
+                rxvm = RandomXCreateMinerVM(v);
+                if (!rxvm) { SetParticipantMiningStatus("RandomX re-key failed"); break; }
+                nPoWVersion = v;
+            }
+        }
+        uint256 hash = PoWHashHeaderWithVM(rxvm, header);
         hashesSinceSample++;
         gParticipantHashes.fetch_add(1);
         if ((hashesSinceSample & 0x3ff) == 0)
@@ -3977,7 +4055,7 @@ static bool BridgeSendAll(SOCKET s, const char* p, int n)
     int off = 0;
     while (off < n)
     {
-        int r = send(s, p + off, n - off, 0);
+        int r = send(s, p + off, n - off, BTF_SEND_FLAGS);
         if (r <= 0)
             return false;
         off += r;
@@ -4103,19 +4181,33 @@ void ThreadStratumBridge(void*)
     sockaddr_in addr;
     memset(&addr, 0, sizeof(addr));
     addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(0x7f000001);
+    // Loopback unless told otherwise. The bridge is the one piece of this node
+    // meant to face the clear network -- a public stratum door so ordinary
+    // miners can reach a pool that itself lives behind Tor -- but it still has
+    // to be asked for. A bridge that opened up on its own would hand every
+    // user a listening port they did not know they had.
+    unsigned long nBind = inet_addr(strStratumBridgeBind.c_str());
+    if (nBind == INADDR_NONE)
+    {
+        printf("Stratum bridge: -stratumbridgebind=%s is not a usable IPv4 address\n",
+               strStratumBridgeBind.c_str());
+        BtfCloseSocket(listener);
+        return;
+    }
+    addr.sin_addr.s_addr = nBind;
     addr.sin_port = htons((unsigned short)nStratumBridgePort);
 
     if (bind(listener, (sockaddr*)&addr, sizeof(addr)) != 0 ||
         listen(listener, 16) != 0)
     {
-        printf("Stratum bridge: could not listen on 127.0.0.1:%d\n",
-               nStratumBridgePort);
+        printf("Stratum bridge: could not listen on %s:%d\n",
+               strStratumBridgeBind.c_str(), nStratumBridgePort);
         BtfCloseSocket(listener);
         return;
     }
 
-    printf("Stratum bridge: listening on 127.0.0.1:%d for pool %s\n",
+    printf("Stratum bridge: listening on %s:%d for pool %s\n",
+           strStratumBridgeBind.c_str(),
            nStratumBridgePort, strParticipantPool.c_str());
 
     while (!fShutdown)
@@ -4182,9 +4274,9 @@ bool BitcoinMiner(int nThreadId)
 
     // Build the fast (~2 GB dataset) RandomX mode once, up front, so we're
     // not stuck mining in the much slower light/cache-only mode forever.
-    if (!RandomXFastReady()) {
+    if (!RandomXFastReady(PoWVersionAt(GetAdjustedTime()))) {
         unsigned int nThreads = std::thread::hardware_concurrency();
-        RandomXInitDataset(nThreads > 0 ? (int)nThreads : 1);
+        RandomXInitDataset(PoWVersionAt(GetAdjustedTime()), nThreads > 0 ? (int)nThreads : 1);
     }
 
     // Drawn from the pool, so it is already in wallet.dat before a single hash
@@ -4288,7 +4380,7 @@ bool BitcoinMiner(int nThreadId)
                     int64 nMinFee = tx.GetMinFee(pblock->vtx.size() < 100);
 
                     map<uint256, CTxIndex> mapTestPoolTmp(mapTestPool);
-                    if (!tx.ConnectInputs(txdb, mapTestPoolTmp, CDiskTxPos(1,1,1), 0, nFees, false, true, nMinFee))
+                    if (!tx.ConnectInputs(txdb, mapTestPoolTmp, CDiskTxPos(1,1,1), 0, nFees, false, true, nMinFee, pblock->nTime))
                         continue;
                     swap(mapTestPool, mapTestPoolTmp);
 
@@ -4317,7 +4409,15 @@ bool BitcoinMiner(int nThreadId)
         //
         // Search (memory-hard RandomX PoW) -- each thread uses its own VM
         //
-        void* rxvm = RandomXCreateMinerVM();
+        // Keyed for the version this block's nTime selects. The first block
+        // after the switch pays for the other dataset once.
+        int nPoWVersion = PoWVersionAt(pblock->nTime);
+        if (!RandomXFastReady(nPoWVersion))
+        {
+            unsigned int nThreads = std::thread::hardware_concurrency();
+            RandomXInitDataset(nPoWVersion, nThreads > 0 ? (int)nThreads : 1);
+        }
+        void* rxvm = RandomXCreateMinerVM(nPoWVersion);
         if (!rxvm)
         {
             LogPrint("net", "BitcoinMiner: failed to create RandomX VM\n");
@@ -4327,15 +4427,14 @@ bool BitcoinMiner(int nThreadId)
         // The thread number is in the line on purpose: every miner would
         // otherwise print the same text, and the dedup filter would fold them
         // into one, leaving no way to tell four threads from one.
-        LogPrint("net", "BitcoinMiner: thread %d hashing with RandomX (%s)\n",
-               nThreadId, RandomXFastReady() ? "fast 2GB" : "light 256MB");
+        LogPrint("net", "BitcoinMiner: thread %d hashing with RandomX v%d (%s)\n",
+               nThreadId, nPoWVersion, RandomXFastReady(nPoWVersion) ? "fast 2GB" : "light 256MB");
 
         unsigned int nStart = GetTime();
         uint256 hashTarget = CBigNum().SetCompact(pblock->nBits).getuint256();
         loop
         {
-            uint256 hash = RandomXHashWithVM(rxvm, (const void*)BEGIN(pblock->nVersion),
-                                             END(pblock->nNonce) - BEGIN(pblock->nVersion));
+            uint256 hash = PoWHashHeaderWithVM(rxvm, (const unsigned char*)BEGIN(pblock->nVersion));
 
             if (hash <= hashTarget)
             {
@@ -4407,6 +4506,8 @@ bool BitcoinMiner(int nThreadId)
                 if (!fGenerateBitcoins)
                     break;
                 pblock->nTime = max(pindexPrev->GetMedianTimePast()+1, GetAdjustedTime());
+                if (PoWVersionAt(pblock->nTime) != nPoWVersion)
+                    break;          // the switch happened under us: rebuild, keyed for v2
             }
         }
         RandomXDestroyMinerVM(rxvm);

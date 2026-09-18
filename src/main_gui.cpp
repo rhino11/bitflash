@@ -6,6 +6,7 @@
 #include "selftest.h"
 #include "tor.h"
 #include "walletcmd.h"
+#include "jsonrpc.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
 #ifndef _WIN32
 #include <csignal>
@@ -118,13 +119,16 @@ static void PrintUsage()
     printf("            wallet-crypto, wallet-encrypt, wallet-portability,\n");
     printf("            net-message,\n");
     printf("            consensus-limits, pool-stratum,\n");
-    printf("            parse-money, network-params, socks5-proxy, or managed-tor\n");
+    printf("            parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, network-params, socks5-proxy,\n");
+    printf("            or managed-tor\n");
     printf("\n");
     printf("Mining mode:\n");
     printf("  /operator\n");
     printf("  /participant=POOL_BTF_ADDRESS\n");
     printf("  /stratumbridge=POOL_BTF_ADDRESS\n");
-    printf("  /stratumbridgeport=N       (default 3333; listen on 127.0.0.1)\n");
+    printf("  /stratumbridgeport=N       (default 3333)\n");
+    printf("  /stratumbridgebind=IP      (bridge listen address, default 127.0.0.1;\n");
+    printf("                              0.0.0.0 to offer a public stratum door)\n");
     printf("  /solomine\n");
     printf("  /genproclimit=N            (mining threads; 0 or absent = every core but one)\n");
     printf("  /nolargepages              (do not ask for 2 MB pages for the RandomX\n");
@@ -145,6 +149,9 @@ static void PrintUsage()
     printf("Network:\n");
     printf("  /testnet                   (isolated test network genesis, datadir, port, and magic)\n");
     printf("  /port=N                    (P2P listen port, default 8433; testnet 18433)\n");
+    printf("  /rpcuser=U /rpcpassword=P  (start JSON-RPC on 127.0.0.1 -- both required;\n");
+    printf("                              this is what an exchange integrates against)\n");
+    printf("  /rpcport=N                 (JSON-RPC port, default 8432; testnet 18432)\n");
     printf("  /bindaddr=IP               (listen on this address instead of loopback;\n");
     printf("                              only for a Tor running on another machine --\n");
     printf("                              a reachable plain port exposes this node's onion)\n");
@@ -218,6 +225,8 @@ static void StartupRefuse(const string& strWhat, const string& strFix)
     fflush(stderr);
     exit(1);
 }
+
+static bool fJsonRpc = false;
 
 static void ParseStartupArguments(int argc, char* argv[])
 {
@@ -302,6 +311,9 @@ static void ParseStartupArguments(int argc, char* argv[])
         if (nPort > 0 && nPort <= 65535)
             nStratumBridgePort = nPort;
     }
+    string bridgeBind = argval2(argc, argv, "/stratumbridgebind", "-stratumbridgebind");
+    if (!bridgeBind.empty())
+        strStratumBridgeBind = bridgeBind;
 
     string poolName = argval2(argc, argv, "/poolname", "-poolname");
     if (!poolName.empty())
@@ -361,6 +373,26 @@ static void ParseStartupArguments(int argc, char* argv[])
     string strBindAddr = argval2(argc, argv, "/bindaddr", "-bindaddr");
     if (!strBindAddr.empty())
         BtfSetListenBindAddress(strBindAddr);
+
+    // -rpcpassword=@FILE reads the secret from a file, the same shape the
+    // wallet passphrase options already use, so it never shows up in the
+    // process list of a machine other people can log into -- which is what an
+    // exchange's box is. A literal still works, because every RPC client ever
+    // written expects it to, but it is the form the docs steer away from.
+    string strRpcPassword = argval2(argc, argv, "/rpcpassword", "-rpcpassword");
+    if (!strRpcPassword.empty() && strRpcPassword[0] == '@')
+    {
+        // Separate in and out: ReadPassphraseArgument clears its output before
+        // it looks at its input, so handing it one string for both empties
+        // the "@FILE" and it falls through to reading stdin.
+        string strFromFile, strErr;
+        if (!ReadPassphraseArgument(strRpcPassword, strFromFile, strErr))
+            StartupRefuse("could not read -rpcpassword file: " + strErr, "");
+        strRpcPassword = strFromFile;
+    }
+    fJsonRpc = JsonRpcConfigure(argval2(argc, argv, "/rpcuser", "-rpcuser"),
+                                strRpcPassword,
+                                argval2(argc, argv, "/rpcport", "-rpcport"));
 
     // Commands that do their work and exit have no use for Tor, and starting it
     // for them costs more than the wasted seconds: the child outlives the parent
@@ -602,6 +634,11 @@ static BOOL WINAPI HeadlessConsoleCtrlHandler(DWORD dwCtrlType)
 
 int main(int argc, char* argv[])
 {
+#ifndef _WIN32
+    // See BTF_SEND_FLAGS in compat.h: the signal would end the process on the
+    // first write to a peer that has gone, and not every write is a send().
+    signal(SIGPIPE, SIG_IGN);
+#endif
     if (arg(argc,argv,"/help") || arg(argc,argv,"-help") ||
         arg(argc,argv,"--help") || arg(argc,argv,"/?"))
     {
@@ -1153,6 +1190,10 @@ int main(int argc, char* argv[])
     if (fStratumBridge) {
         if (_beginthread(ThreadStratumBridge, 0, NULL) == (uintptr_t)-1)
             printf("Error: _beginthread(ThreadStratumBridge) failed\n");
+    }
+    if (fJsonRpc) {
+        if (_beginthread(ThreadJsonRpcServer, 0, NULL) == (uintptr_t)-1)
+            printf("Error: _beginthread(ThreadJsonRpcServer) failed\n");
     }
     if (fGenerateBitcoins)
         StartMinerThreads();

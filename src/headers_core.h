@@ -4,7 +4,7 @@
 // The one place the human-readable release version lives -- bump it at release.
 // It is what the About dialog shows. Protocol and transaction versions elsewhere
 // (nVersion fields) are unrelated and must not be changed for a release.
-#define BITFLASH_VERSION_STRING "1.2.21"
+#define BITFLASH_VERSION_STRING "1.2.23"
 
 #ifdef _MSC_VER
 #pragma warning(disable:4786)
@@ -26,6 +26,20 @@ inline int _mkdir(const char* p) { return ::mkdir(p); }
 #else
 #include "compat.h"
 #endif
+
+// Flag for send() to any socket. On POSIX a write to a peer that has closed
+// raises SIGPIPE, whose default action ends the process with no core and no
+// log line; MSG_NOSIGNAL turns that into EPIPE, which every send path already
+// treats as "gone". Windows raises no signal and has no flag. main() also
+// ignores SIGPIPE outright, for the writes that do not go through send() --
+// OpenSSL's, on the Nostr connections. Reported, with the first patch, by
+// mischelf.
+#ifdef _WIN32
+#define BTF_SEND_FLAGS 0
+#else
+#define BTF_SEND_FLAGS MSG_NOSIGNAL
+#endif
+
 
 #include <openssl/ecdsa.h>
 #include <openssl/evp.h>
@@ -70,6 +84,7 @@ inline typename std::common_type<T1,T2>::type max(const T1& a, const T2& b)
 #include "net.h"
 #include "nostr.h"
 #include "randomx_pow.h"
+#include "consensus.h"
 #include "main.h"
 #include "market.h"
 
