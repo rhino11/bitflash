@@ -1320,6 +1320,23 @@ public:
             return error("CBlock::WriteToDisk() : ftell failed");
         fileout << *this;
 
+        // The index entry written next (a database with its own sync) will
+        // point at these bytes. Left in the stdio buffer and the page cache,
+        // they are what a hard reset loses first, and the node then fails to
+        // start with "Cannot read the block index: end of file" -- three
+        // nodes on the 202 did, 2026-09-17. Flush always; sync to the
+        // platter unless replaying history, where every 500th block will do
+        // (Bitcoin 0.3.x did the same).
+        fflush(fileout);
+        if (!IsInitialBlockDownload() || (nBestHeight + 1) % 500 == 0)
+        {
+#ifdef _WIN32
+            FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(fileout)));
+#else
+            fsync(fileno(fileout));
+#endif
+        }
+
         return true;
     }
 
