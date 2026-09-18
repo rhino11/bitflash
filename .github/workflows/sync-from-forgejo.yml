@@ -36,4 +36,5 @@ jobs:
           chmod +x scripts/sync-from-forgejo.sh
           ./scripts/sync-from-forgejo.sh
           git push origin main
-          git push origin --tags
+          # Forgejo is SoT for release tags; allow retarget when tags move upstream.
+          git push origin --tags --force

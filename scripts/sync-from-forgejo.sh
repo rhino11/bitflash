@@ -11,7 +11,7 @@ if ! git remote get-url "$REMOTE_NAME" >/dev/null 2>&1; then
   git remote add "$REMOTE_NAME" "$FORGEJO_URL"
 fi
 
-git fetch "$REMOTE_NAME" --tags
+git fetch "$REMOTE_NAME" --tags --force
 git checkout main
 git pull --ff-only origin main 2>/dev/null || true
 
