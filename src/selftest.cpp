@@ -4603,6 +4603,57 @@ static int RunManagedTorSelfTest()
                            "finds the transport next to the managed Tor binary") ? 0 : 1;
             nFail += Check(BtfResolveObfs4Path(found) && found == ptFile,
                            "lyrebird serves obfs4 too") ? 0 : 1;
+            nFail += Check(BtfResolveTransportPath("webtunnel", found) && found == ptFile &&
+                           BtfResolveTransportPath("meek_lite", found) && found == ptFile,
+                           "webtunnel and meek_lite resolve to lyrebird") ? 0 : 1;
+            nFail += Check(!BtfResolveTransportPath("conjure", found),
+                           "conjure needs its own client, absent here") ? 0 : 1;
+
+            // The ladder without pt_config.json: the built-in Snowflake set.
+            std::vector<BtfBridgeRung> rungs = BtfBundledBridgeRungs();
+            nFail += Check(rungs.size() == 1 && rungs[0].name == "snowflake" && rungs[0].lines.size() == 2,
+                           "without pt_config.json the ladder is the built-in Snowflake rung") ? 0 : 1;
+
+            // With Tor Browser's pt_config.json beside the transports: rungs
+            // in survival order, conjure left out, meek's transport meek_lite.
+            WriteTextFile(ptDir + "/pt_config.json",
+                "{\"bridges\":{\"meek\":[\"meek_lite 192.0.2.20:80 url=https://x front=y\"],"
+                "\"obfs4\":[\"obfs4 10.0.0.1:443 AAAA cert=BBBB iat-mode=0\",\"obfs4 10.0.0.2:443 CCCC cert=DDDD iat-mode=0\"],"
+                "\"snowflake\":[\"snowflake 192.0.2.3:80 EEEE url=https://b/\"],"
+                "\"conjure\":[\"conjure 192.0.2.5:80 FFFF\"],"
+                "\"webtunnel\":[\"webtunnel [2001:db8::1]:443 GGGG url=https://w/ ver=0.0.1\"]}}");
+            rungs = BtfBundledBridgeRungs();
+            nFail += Check(rungs.size() == 4 && rungs[0].name == "snowflake" && rungs[1].name == "obfs4" &&
+                           rungs[2].name == "webtunnel" && rungs[3].name == "meek",
+                           "pt_config.json rungs come in survival order, conjure left out") ? 0 : 1;
+            nFail += Check(rungs.size() == 4 && rungs[1].lines.size() == 2 &&
+                           rungs[0].lines[0] == "snowflake 192.0.2.3:80 EEEE url=https://b/",
+                           "rung lines are the file's lines") ? 0 : 1;
+            nFail += Check(BtfDefaultBridges().size() == 2,
+                           "-torbridges keeps the built-in Snowflake set") ? 0 : 1;
+            remove((ptDir + "/pt_config.json").c_str());
+
+            // Bridge lines as people paste them.
+            std::vector<std::string> lines = BtfParseBridgeLines(
+                "# from the bot\r\n  Bridge obfs4 1.2.3.4:1 AAAA cert=x iat-mode=0  \n\nsnowflake 192.0.2.3:80 BBBB\nbridge webtunnel [::1]:443 CC\n");
+            nFail += Check(lines.size() == 3 && lines[0] == "obfs4 1.2.3.4:1 AAAA cert=x iat-mode=0" &&
+                           lines[1] == "snowflake 192.0.2.3:80 BBBB" && lines[2] == "webtunnel [::1]:443 CC",
+                           "parses pasted bridge lines: comments, blanks, CRLF, Bridge prefix") ? 0 : 1;
+
+            // Configuring: a transport without a binary is refused whole.
+            std::string cfgErr;
+            nFail += Check(!BtfConfigureBridges(std::vector<std::string>(1, "conjure 192.0.2.5:80 FFFF"), "user", cfgErr) &&
+                           cfgErr.find("conjure") != std::string::npos,
+                           "refuses a bridge whose transport binary is missing") ? 0 : 1;
+            nFail += Check(!BtfTorBridgesConfigured() && BtfTorTransportMode() == "direct",
+                           "a refused configuration leaves the mode direct") ? 0 : 1;
+            nFail += Check(BtfConfigureBridges(lines, "user", cfgErr) && BtfTorBridgesConfigured() &&
+                           BtfTorTransportMode() == "user",
+                           "configures the pasted lines under mode user") ? 0 : 1;
+            BtfSetTorBridges(std::vector<std::string>(), std::map<std::string, std::string>());
+            nFail += Check(BtfTorTransportMode() == "direct",
+                           "no bridges means direct") ? 0 : 1;
+
             BtfSetManagedTorPath("");
             remove(ptFile.c_str());
             rmdir(ptDir.c_str());

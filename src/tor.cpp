@@ -5,6 +5,11 @@
 #include "tor.h"
 #include "nostr.h"
 #include "proxy.h"
+// util.h's snprintf macro breaks nlohmann/json (see nostr.cpp).
+#ifdef snprintf
+#undef snprintf
+#endif
+#include <nlohmann/json.hpp>
 
 #include <errno.h>
 
@@ -28,8 +33,13 @@ static std::string g_managedTorOnion;
 static std::string g_managedTorStatus;
 static std::vector<std::string> g_torBridges;              // bridge lines
 int nTorBridgeFallbackSecs = 4 * 60;
+int nTorBridgeRungSecs = 6 * 60;
 static int64 g_managedTorStartedAt = 0;
-static bool g_fTorFallbackDone = false;
+static std::string g_torMode = "direct";     // "direct", "user", or a rung name
+static bool g_fTorLadderExhausted = false;
+static bool g_fTorFirstPeerSeen = false;
+static int g_torBootstrapPct = -1;           // -1: not polled yet
+static std::string g_torBootstrapLine;
 static std::map<std::string, std::string> g_torPtExec;     // transport -> PT binary
 #ifdef _WIN32
 static PROCESS_INFORMATION g_managedTorProcess;
@@ -369,6 +379,76 @@ done:
     return ok;
 }
 
+// GETINFO status/bootstrap-phase over the control port. Tor answers with
+// one line like
+//   250-status/bootstrap-phase=NOTICE BOOTSTRAP PROGRESS=25 TAG=requesting_status SUMMARY="Asking for networkstatus consensus"
+// The watchdog polls this so the node can tell "Tor cannot even reach a
+// directory" from "Tor is fine, nobody answers".
+static bool QueryManagedTorBootstrap(int& pctOut, std::string& summaryOut)
+{
+    std::string dataDir;
+    unsigned short controlPort = 0;
+    CRITICAL_BLOCK(cs_managedTor)
+    {
+        dataDir = g_managedTorDataDir;
+        controlPort = g_managedTorControlPort;
+    }
+    if (controlPort == 0 || dataDir.empty())
+        return false;
+    std::string err;
+    std::vector<unsigned char> cookie;
+    if (!ReadBinaryFile(PathJoin(dataDir, "control_auth_cookie"), cookie, err))
+        return false;
+    SOCKET s = ConnectLoopback(controlPort, err);
+    if (s == INVALID_SOCKET)
+        return false;
+    bool ok = false;
+    std::string auth = "AUTHENTICATE " + HexStr(cookie.begin(), cookie.end(), false) + "\r\n";
+    if (SendAll(s, auth) && ReadPositiveTorControlReply(s, err) &&
+        SendAll(s, "GETINFO status/bootstrap-phase\r\n"))
+    {
+        std::string line;
+        for (int i = 0; i < 8 && RecvControlLine(s, line); i++)
+        {
+            size_t p = line.find("PROGRESS=");
+            if (p != std::string::npos)
+            {
+                pctOut = atoi(line.c_str() + p + 9);
+                size_t q = line.find("SUMMARY=\"");
+                summaryOut.clear();
+                if (q != std::string::npos)
+                {
+                    size_t e = line.find('"', q + 9);
+                    summaryOut = line.substr(q + 9, e == std::string::npos ? std::string::npos : e - (q + 9));
+                }
+                ok = true;
+            }
+            if (line == "250 OK" || (line.size() >= 4 && line[3] == ' '))
+                break;
+        }
+    }
+    CloseLoopback(s);
+    return ok;
+}
+
+int BtfManagedTorBootstrapPercent()
+{
+    CRITICAL_BLOCK(cs_managedTor)
+        return g_torBootstrapPct;
+    return -1;
+}
+
+std::string BtfManagedTorBootstrapLine()
+{
+    CRITICAL_BLOCK(cs_managedTor)
+    {
+        if (g_torBootstrapPct < 0)
+            return "";
+        return strprintf("%d%% %s", g_torBootstrapPct, g_torBootstrapLine.c_str());
+    }
+    return "";
+}
+
 static bool ReadOneLine(const std::string& path, std::string& out)
 {
     out.clear();
@@ -540,31 +620,223 @@ void BtfSetManagedTorPath(const std::string& torPath)
         g_managedTorPath = torPath;
 }
 
-// The bundled bridges with the transports they need, if the binaries are
-// here. Empty when they are not: then there is nothing to fall back to.
-static std::vector<std::string> DefaultBridgesWithTransports(std::map<std::string, std::string>& ptExecOut)
+std::string BtfTorTransportMode()
 {
-    std::vector<std::string> bridges = BtfDefaultBridges();
+    CRITICAL_BLOCK(cs_managedTor)
+        return g_torBridges.empty() ? std::string("direct") : g_torMode;
+    return "direct";
+}
+
+bool BtfConfigureBridges(const std::vector<std::string>& lines, const std::string& mode,
+                         std::string& errOut)
+{
+    std::map<std::string, std::string> ptExec;
     std::vector<std::string> usable;
-    ptExecOut.clear();
-    for (size_t i = 0; i < bridges.size(); i++)
+    for (size_t i = 0; i < lines.size(); i++)
     {
-        std::string tr = BtfBridgeTransport(bridges[i]);
-        std::string path;
-        bool ok = false;
-        if (ptExecOut.count(tr))
-            ok = true;
-        else if (tr == "obfs4")
-            ok = BtfResolveObfs4Path(path);
-        else if (tr == "snowflake")
-            ok = BtfResolveSnowflakePath(path);
-        if (!ok)
+        std::string tr = BtfBridgeTransport(lines[i]);
+        if (tr.empty())
             continue;
-        if (!path.empty())
-            ptExecOut[tr] = path;
-        usable.push_back(bridges[i]);
+        if (!ptExec.count(tr))
+        {
+            std::string path;
+            if (!BtfResolveTransportPath(tr, path))
+            {
+                errOut = strprintf("no pluggable-transport binary for '%s'", tr.c_str());
+                return false;
+            }
+            ptExec[tr] = path;
+        }
+        usable.push_back(lines[i]);
     }
-    return usable;
+    if (usable.empty())
+    {
+        errOut = "no usable bridge line";
+        return false;
+    }
+    BtfSetTorBridges(usable, ptExec);
+    CRITICAL_BLOCK(cs_managedTor)
+        g_torMode = mode;
+    return true;
+}
+
+std::vector<std::string> BtfParseBridgeLines(const std::string& text)
+{
+    std::vector<std::string> out;
+    std::string line;
+    for (size_t i = 0; i <= text.size(); i++)
+    {
+        char c = i < text.size() ? text[i] : '\n';
+        if (c != '\n' && c != '\r')
+        {
+            line += c;
+            continue;
+        }
+        size_t a = line.find_first_not_of(" \t");
+        size_t b = line.find_last_not_of(" \t");
+        std::string t = a == std::string::npos ? "" : line.substr(a, b - a + 1);
+        line.clear();
+        if (t.empty() || t[0] == '#')
+            continue;
+        if (t.size() > 7 && (t.substr(0, 7) == "Bridge " || t.substr(0, 7) == "bridge "))
+        {
+            t = t.substr(7);
+            a = t.find_first_not_of(" \t");
+            t = a == std::string::npos ? "" : t.substr(a);
+        }
+        if (!t.empty())
+            out.push_back(t);
+    }
+    return out;
+}
+
+std::string BtfUserBridgesPath()
+{
+    return PathJoin(GetAppDir(), "bridges.txt");
+}
+
+std::vector<std::string> BtfLoadUserBridges()
+{
+    std::vector<unsigned char> data;
+    std::string err;
+    FILE* f = fopen(BtfUserBridgesPath().c_str(), "rb");
+    if (!f)
+        return std::vector<std::string>();
+    std::string text;
+    char buf[1024];
+    size_t n;
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 65536)
+        text.append(buf, n);
+    fclose(f);
+    return BtfParseBridgeLines(text);
+}
+
+bool BtfSaveUserBridges(const std::string& text, std::string& errOut)
+{
+    std::vector<std::string> lines = BtfParseBridgeLines(text);
+    std::string body = "# Bridge lines for reaching Tor where it is blocked, one per line.\n"
+                       "# From https://bridges.torproject.org, bridges@torproject.org or the\n"
+                       "# Telegram bot @GetBridgesBot. Read when Bitflash starts.\n";
+    for (size_t i = 0; i < lines.size(); i++)
+        body += lines[i] + "\n";
+    return WriteTextFile(BtfUserBridgesPath(), body, errOut);
+}
+
+// What reached the network last time lives in managed-tor/last-working, so
+// the next start does not spend four minutes finding out again.
+static std::string LastWorkingPath()
+{
+    return PathJoin(PathJoin(GetAppDir(), "managed-tor"), "last-working");
+}
+
+std::string BtfLastWorkingTransport()
+{
+    std::string s;
+    if (!ReadOneLine(LastWorkingPath(), s))
+        return "";
+    return s;
+}
+
+void BtfForgetLastWorkingTransport()
+{
+    remove(LastWorkingPath().c_str());
+}
+
+static std::string NoFallbackPath()
+{
+    return PathJoin(PathJoin(GetAppDir(), "managed-tor"), "no-fallback");
+}
+
+bool BtfTorFallbackDisabledByFile()
+{
+    FILE* f = fopen(NoFallbackPath().c_str(), "rb");
+    if (!f)
+        return false;
+    fclose(f);
+    return true;
+}
+
+void BtfSetTorFallbackEnabled(bool fEnabled)
+{
+    if (fEnabled)
+    {
+        remove(NoFallbackPath().c_str());
+        if (nTorBridgeFallbackSecs <= 0)
+            nTorBridgeFallbackSecs = 4 * 60;
+        return;
+    }
+    std::string err;
+    EnsureDir(PathJoin(GetAppDir(), "managed-tor"), err);
+    WriteTextFile(NoFallbackPath(), "# Bitflash: do not switch to bridges on its own. Delete to re-enable.\n", err);
+    nTorBridgeFallbackSecs = 0;
+}
+
+static void RememberWorkingTransport(const std::string& mode)
+{
+    if (mode == "direct")
+    {
+        BtfForgetLastWorkingTransport();
+        return;
+    }
+    std::string err;
+    WriteTextFile(LastWorkingPath(), mode + "\n", err);
+}
+
+// The rung after the current mode: the first one when on direct or on the
+// user's own bridges, else the next in the ladder. Empty name: none left.
+static BtfBridgeRung NextRung()
+{
+    std::vector<BtfBridgeRung> rungs = BtfBundledBridgeRungs();
+    std::string mode;
+    CRITICAL_BLOCK(cs_managedTor)
+        mode = g_torBridges.empty() ? std::string("direct") : g_torMode;
+    BtfBridgeRung none;
+    if (rungs.empty())
+        return none;
+    if (mode == "direct" || mode == "user")
+        return rungs[0];
+    for (size_t i = 0; i + 1 < rungs.size(); i++)
+        if (rungs[i].name == mode)
+            return rungs[i + 1];
+    return none;
+}
+
+// Restart the managed Tor with the given bridge lines under the given mode.
+// Keeps the onion (same hidden-service directory).
+static bool RestartManagedTorWithBridges(const std::vector<std::string>& lines,
+                                         const std::string& mode, std::string& errOut)
+{
+    std::string torPath;
+    CRITICAL_BLOCK(cs_managedTor)
+        torPath = g_managedTorPath;
+    BtfStopManagedTor();
+    if (!BtfConfigureBridges(lines, mode, errOut))
+        return false;
+    return BtfStartManagedTor(torPath, errOut);
+}
+
+bool BtfTryBridgesNow(std::string& errOut)
+{
+    if (!BtfManagedTorEnabled())
+    {
+        errOut = "managed Tor is not running";
+        return false;
+    }
+    std::vector<std::string> user = BtfLoadUserBridges();
+    if (!user.empty() && BtfTorTransportMode() != "user")
+    {
+        printf("managed Tor: switching to your bridges (%d line(s) in bridges.txt)\n", (int)user.size());
+        return RestartManagedTorWithBridges(user, "user", errOut);
+    }
+    BtfBridgeRung rung = NextRung();
+    if (rung.name.empty())
+    {
+        errOut = "every bundled transport has been tried; put bridges of your own in bridges.txt";
+        return false;
+    }
+    printf("managed Tor: switching to the bundled %s bridges (%d line(s))\n",
+           rung.name.c_str(), (int)rung.lines.size());
+    return RestartManagedTorWithBridges(rung.lines, rung.name, errOut);
 }
 
 std::string BtfBridgeTransport(const std::string& bridgeLine)
@@ -650,6 +922,116 @@ bool BtfResolveSnowflakePath(std::string& pathOut)
     c.push_back("/usr/bin/lyrebird");
 #endif
     return ResolvePtFrom(c, pathOut);
+}
+
+bool BtfResolveTransportPath(const std::string& transport, std::string& pathOut)
+{
+    if (transport == "snowflake")
+        return BtfResolveSnowflakePath(pathOut);
+    if (transport == "conjure")
+    {
+        std::vector<std::string> dirs = PtDirs();
+        std::vector<std::string> c;
+        for (size_t i = 0; i < dirs.size(); i++)
+#ifdef _WIN32
+            c.push_back(PathJoin(dirs[i], "conjure-client.exe"));
+#else
+            c.push_back(PathJoin(dirs[i], "conjure-client"));
+#endif
+        return ResolvePtFrom(c, pathOut);
+    }
+    // obfs4, meek_lite, webtunnel, scramblesuit, obfs2/3: all lyrebird.
+    return BtfResolveObfs4Path(pathOut);
+}
+
+// Tor Browser's bridge list ships beside the transports as pt_config.json.
+// Read it when it is there so the set stays as fresh as the Tor bundle;
+// the built-in Snowflake lines cover a bundle without it.
+static bool ReadPtConfigBridges(std::map<std::string, std::vector<std::string> >& out)
+{
+    std::vector<std::string> dirs = PtDirs();
+    for (size_t d = 0; d < dirs.size(); d++)
+    {
+        FILE* f = fopen(PathJoin(dirs[d], "pt_config.json").c_str(), "rb");
+        if (!f)
+            continue;
+        std::string text;
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof(buf), f)) > 0 && text.size() < 262144)
+            text.append(buf, n);
+        fclose(f);
+        try
+        {
+            nlohmann::json j = nlohmann::json::parse(text);
+            if (!j.contains("bridges") || !j["bridges"].is_object())
+                continue;
+            for (nlohmann::json::iterator it = j["bridges"].begin(); it != j["bridges"].end(); ++it)
+            {
+                if (!it.value().is_array())
+                    continue;
+                std::vector<std::string> lines;
+                for (size_t i = 0; i < it.value().size(); i++)
+                    if (it.value()[i].is_string())
+                        lines.push_back(it.value()[i].get<std::string>());
+                if (!lines.empty())
+                    out[it.key()] = lines;
+            }
+            return !out.empty();
+        }
+        catch (...)
+        {
+            continue;
+        }
+    }
+    return false;
+}
+
+std::vector<BtfBridgeRung> BtfBundledBridgeRungs()
+{
+    std::map<std::string, std::vector<std::string> > sets;
+    ReadPtConfigBridges(sets);
+    if (!sets.count("snowflake"))
+    {
+        std::vector<std::string> b = BtfDefaultBridges();
+        sets["snowflake"] = b;
+    }
+    // Order of survival under blocking: Snowflake (volunteer WebRTC, CDN
+    // broker) first, obfs4 (fixed IPs, blocked one by one) second,
+    // webtunnel (looks like HTTPS to a real site) and meek (CDN fronting)
+    // after, whatever else the file lists last. Only rungs whose transport
+    // binary is here.
+    static const char* order[] = { "snowflake", "obfs4", "webtunnel", "meek" };
+    std::vector<BtfBridgeRung> rungs;
+    std::set<std::string> taken;
+    for (size_t o = 0; o < sizeof(order) / sizeof(order[0]); o++)
+    {
+        std::map<std::string, std::vector<std::string> >::const_iterator it = sets.find(order[o]);
+        if (it == sets.end())
+            continue;
+        std::string path;
+        if (!BtfResolveTransportPath(BtfBridgeTransport(it->second[0]), path))
+            continue;
+        BtfBridgeRung r;
+        r.name = it->first;
+        r.lines = it->second;
+        rungs.push_back(r);
+        taken.insert(it->first);
+    }
+    for (std::map<std::string, std::vector<std::string> >::const_iterator it = sets.begin();
+         it != sets.end(); ++it)
+    {
+        if (taken.count(it->first) || it->first == "conjure")
+            continue;
+        std::string path;
+        if (!BtfResolveTransportPath(BtfBridgeTransport(it->second[0]), path))
+            continue;
+        BtfBridgeRung r;
+        r.name = it->first;
+        r.lines = it->second;
+        rungs.push_back(r);
+    }
+    return rungs;
 }
 
 std::vector<std::string> BtfDefaultBridges()
@@ -914,40 +1296,83 @@ static void ThreadManagedTorWatchdog(void*)
             return;
         }
 
-        // Tor up but nobody reached: a firewall that blocks Tor's public
-        // relays looks like this. Once, with the bundled bridges -- the
-        // same ones -torbridges turns on -- if the transports are here.
-        if (nTorBridgeFallbackSecs > 0 && !g_fTorFallbackDone && g_torBridges.empty() &&
-            g_managedTorStartedAt && GetTime() - g_managedTorStartedAt > nTorBridgeFallbackSecs)
+        // Tor's own view: how far it got. Cheap, local, every 5 s.
         {
-            bool fAnyPeer = false;
-            CRITICAL_BLOCK(cs_vNodes)
-                fAnyPeer = !vNodes.empty();
-            if (!fAnyPeer)
-            {
-                g_fTorFallbackDone = true;
-                std::map<std::string, std::string> ptExec;
-                std::vector<std::string> bridges = DefaultBridgesWithTransports(ptExec);
-                if (bridges.empty())
-                {
-                    printf("managed Tor: no peer after %d s and no pluggable transports bundled; nothing to fall back to\n",
-                           nTorBridgeFallbackSecs);
-                    continue;
-                }
-                printf("managed Tor: no peer after %d s -- Tor's public relays may be blocked here. "
-                       "Restarting Tor with the bundled bridges (%d line(s)); -notorfallback disables this.\n",
-                       nTorBridgeFallbackSecs, (int)bridges.size());
-                std::string torPath;
+            int pct = -1;
+            std::string summary;
+            if (QueryManagedTorBootstrap(pct, summary))
                 CRITICAL_BLOCK(cs_managedTor)
-                    torPath = g_managedTorPath;
-                BtfStopManagedTor();
-                BtfSetTorBridges(bridges, ptExec);
-                std::string strError;
-                if (!BtfStartManagedTor(torPath, strError))
-                    printf("managed Tor: restart with bridges failed: %s\n", strError.c_str());
-                return;   // the new Tor has its own watchdog
-            }
+                {
+                    g_torBootstrapPct = pct;
+                    g_torBootstrapLine = summary;
+                }
         }
+
+        bool fAnyPeer = false;
+        CRITICAL_BLOCK(cs_vNodes)
+            fAnyPeer = !vNodes.empty();
+        std::string mode = BtfTorTransportMode();
+
+        if (fAnyPeer)
+        {
+            if (!g_fTorFirstPeerSeen)
+            {
+                g_fTorFirstPeerSeen = true;
+                printf("managed Tor: network reached via %s\n",
+                       mode == "direct" ? "direct Tor" :
+                       mode == "user" ? "your bridges" : (mode + " bridges").c_str());
+                RememberWorkingTransport(mode);
+            }
+            continue;
+        }
+
+        // Nobody reached. A firewall that blocks Tor's public relays looks
+        // like this; so does a bridge that died. Climb the ladder: direct ->
+        // snowflake -> obfs4 -> webtunnel -> meek, each given its time, the
+        // direct rung cut short when Tor cannot even fetch a consensus.
+        if (nTorBridgeFallbackSecs <= 0 || g_fTorLadderExhausted || g_fTorFirstPeerSeen ||
+            !g_managedTorStartedAt)
+            continue;
+        int64 waited = GetTime() - g_managedTorStartedAt;
+        int pct = BtfManagedTorBootstrapPercent();
+        bool fDue;
+        if (mode == "direct")
+            fDue = waited > nTorBridgeFallbackSecs ||
+                   (pct >= 0 && pct < 10 && waited > 90);   // no directory in 90 s: blocked
+        else
+            fDue = waited > nTorBridgeRungSecs;
+        if (!fDue)
+            continue;
+
+        BtfBridgeRung rung = NextRung();
+        if (rung.name.empty())
+        {
+            g_fTorLadderExhausted = true;
+            if (mode == "direct")
+                printf("managed Tor: no peer after %d s and no pluggable transports bundled; nothing to fall back to\n",
+                       (int)waited);
+            else
+                printf("managed Tor: no peer after %d s on %s and every bundled transport has been tried. "
+                       "Get bridges of your own (https://bridges.torproject.org, bridges@torproject.org, "
+                       "Telegram @GetBridgesBot) and put them in %s\n",
+                       (int)waited, mode == "user" ? "your bridges" : (mode + " bridges").c_str(),
+                       BtfUserBridgesPath().c_str());
+            continue;
+        }
+        if (mode == "direct")
+            printf("managed Tor: no peer after %d s (Tor bootstrap %s) -- Tor's public relays may be blocked here. "
+                   "Restarting Tor with the bundled %s bridges (%d line(s)); -notorfallback disables this.\n",
+                   (int)waited, BtfManagedTorBootstrapLine().empty() ? "unknown" : BtfManagedTorBootstrapLine().c_str(),
+                   rung.name.c_str(), (int)rung.lines.size());
+        else
+            printf("managed Tor: no peer after %d s on %s (Tor bootstrap %s). Trying the bundled %s bridges (%d line(s)).\n",
+                   (int)waited, mode == "user" ? "your bridges" : (mode + " bridges").c_str(),
+                   BtfManagedTorBootstrapLine().empty() ? "unknown" : BtfManagedTorBootstrapLine().c_str(),
+                   rung.name.c_str(), (int)rung.lines.size());
+        std::string strError;
+        if (!RestartManagedTorWithBridges(rung.lines, rung.name, strError))
+            printf("managed Tor: restart with bridges failed: %s\n", strError.c_str());
+        return;   // the new Tor has its own watchdog
     }
 }
 
@@ -1005,6 +1430,12 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
     }
 
     g_managedTorStartedAt = GetTime();
+    g_fTorFirstPeerSeen = false;
+    CRITICAL_BLOCK(cs_managedTor)
+    {
+        g_torBootstrapPct = -1;
+        g_torBootstrapLine.clear();
+    }
     std::string root = PathJoin(GetAppDir(), "managed-tor");
     std::string dataDir = PathJoin(root, "data");
     std::string hsDir = PathJoin(root, "onion-service");
@@ -1162,7 +1593,15 @@ std::string BtfManagedTorStatus()
     {
         if (!g_fManagedTor && g_managedTorStatus.empty())
             return "disabled";
-        return g_managedTorStatus;
+        std::string s = g_managedTorStatus;
+        if (g_fManagedTor)
+        {
+            if (!g_torBridges.empty())
+                s += ", via " + (g_torMode == "user" ? std::string("your bridges") : g_torMode + " bridges");
+            if (g_torBootstrapPct >= 0 && g_torBootstrapPct < 100)
+                s += strprintf(", Tor bootstrap %d%% (%s)", g_torBootstrapPct, g_torBootstrapLine.c_str());
+        }
+        return s;
     }
     return "disabled";
 }

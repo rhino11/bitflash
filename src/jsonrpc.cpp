@@ -20,6 +20,7 @@
 #include "headers.h"
 #include "btfsock.h"
 #include "jsonrpc.h"
+#include "tor.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -1023,17 +1024,98 @@ static json rpc_sendrawtransaction(const json& p)
     return hash.GetHex();
 }
 
+// Tor as the node sees it: transport in use, Tor's own bootstrap, the
+// rungs the ladder still has, what worked last time. For the operator on a
+// blocked network who has only a terminal.
+static json rpc_gettorinfo(const json&)
+{
+    json j;
+    j["managed"]   = BtfManagedTorEnabled();
+    j["status"]    = BtfManagedTorStatus();
+    j["transport"] = BtfTorTransportMode();
+    int pct = BtfManagedTorBootstrapPercent();
+    j["bootstrap"] = pct < 0 ? json(nullptr) : json(pct);
+    j["bootstrapline"] = BtfManagedTorBootstrapLine();
+    j["autobridges"] = nTorBridgeFallbackSecs > 0;
+    j["fallbacksecs"] = nTorBridgeFallbackSecs;
+    j["rungsecs"]  = nTorBridgeRungSecs;
+    json rungs = json::array();
+    std::vector<BtfBridgeRung> v = BtfBundledBridgeRungs();
+    for (size_t i = 0; i < v.size(); i++)
+    {
+        json r;
+        r["name"] = v[i].name;
+        r["lines"] = (int)v[i].lines.size();
+        rungs.push_back(r);
+    }
+    j["ladder"] = rungs;
+    j["userbridges"] = (int)BtfLoadUserBridges().size();
+    j["userbridgesfile"] = BtfUserBridgesPath();
+    std::string last = BtfLastWorkingTransport();
+    j["lastworking"] = last.empty() ? json(nullptr) : json(last);
+    int nConnections = 0;
+    CRITICAL_BLOCK(cs_vNodes)
+        nConnections = (int)vNodes.size();
+    j["connections"] = nConnections;
+    return j;
+}
+
+// settorbridges ["line", ...]   -- save to bridges.txt and switch Tor to
+// them now; [] clears the file. settorbridges "now" -- climb to the next
+// bundled rung right away instead of waiting for the watchdog.
+static json rpc_settorbridges(const json& p)
+{
+    if (p.size() < 1)
+        throw runtime_error("settorbridges [\"bridge line\", ...] | \"now\" | \"forget\"");
+    std::string err;
+    json j;
+    if (p[0].is_string() && p[0].get<std::string>() == "forget")
+    {
+        BtfForgetLastWorkingTransport();
+        j["forgotten"] = true;
+        return j;
+    }
+    if (p[0].is_array())
+    {
+        std::string text;
+        for (size_t i = 0; i < p[0].size(); i++)
+        {
+            if (!p[0][i].is_string())
+                throw runtime_error("bridge lines must be strings");
+            text += p[0][i].get<std::string>() + "\n";
+        }
+        if (!BtfSaveUserBridges(text, err))
+            throw runtime_error(err);
+        j["saved"] = (int)BtfParseBridgeLines(text).size();
+        if (j["saved"].get<int>() == 0)
+        {
+            j["switched"] = false;
+            return j;
+        }
+    }
+    else if (!(p[0].is_string() && p[0].get<std::string>() == "now"))
+        throw runtime_error("settorbridges [\"bridge line\", ...] | \"now\" | \"forget\"");
+    if (!BtfTryBridgesNow(err))
+        throw runtime_error(err);
+    j["switched"] = true;
+    j["transport"] = BtfTorTransportMode();
+    return j;
+}
+
 static json rpc_help(const json&)
 {
     return "getinfo getblockcount getblockhash getblock getnewaddress validateaddress "
            "getbalance sendtoaddress gettransaction listtransactions listsinceblock "
            "createmultisig addmultisigaddress decodescript listunspent createrawtransaction "
-           "decoderawtransaction getrawtransaction signrawtransaction sendrawtransaction help";
+           "decoderawtransaction getrawtransaction signrawtransaction sendrawtransaction "
+           "gettorinfo settorbridges help";
 }
 
 struct RpcEntry { const char* name; RpcMethod fn; };
 static const RpcEntry kMethods[] = {
     { "getinfo",          rpc_getinfo },
+    { "gettorinfo",       rpc_gettorinfo },
+    { "settorbridges",    rpc_settorbridges },
     { "getblockcount",    rpc_getblockcount },
     { "getblockhash",     rpc_getblockhash },
     { "getblock",         rpc_getblock },

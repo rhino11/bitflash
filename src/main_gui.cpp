@@ -159,8 +159,10 @@ static void PrintUsage()
     printf("  /tor[=HOST:PORT]           (Tor mode; default SOCKS5 proxy is 127.0.0.1:9050)\n");
     printf("  /managedtor[=PATH]         (start Tor, create a hidden service, advertise its onion)\n");
     printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
-    printf("  /torbridges                (reach Tor via obfs4 bridges where Tor is blocked)\n");
-    printf("  /torbridge=LINE            (add one obfs4 bridge line; repeatable via config)\n");
+    printf("  /torbridges                (reach Tor via the bundled Snowflake bridges where Tor is blocked)\n");
+    printf("  /torbridge=LINE            (add one obfs4/snowflake/webtunnel/meek bridge line; or put\n");
+    printf("                              lines in bridges.txt in the data directory)\n");
+    printf("  /torrung=SECS              (time given to each bundled bridge transport before the next; 360)\n");
     printf("  /notorfallback             (do not switch to the bundled bridges on your own when\n");
     printf("                              no peer is reached in four minutes; /torfallback=SECS\n");
     printf("                              changes the wait)\n");
@@ -438,16 +440,23 @@ static void ParseStartupArguments(int argc, char* argv[])
         // without our rendezvous relays. -torbridges uses the built-in default
         // (Snowflake, no infra needed); -torbridge=<line> adds an obfs4 or
         // snowflake bridge. We resolve a PT binary for each transport present.
-        if (arg(argc, argv, "/notorfallback") || arg(argc, argv, "-notorfallback"))
+        if (arg(argc, argv, "/notorfallback") || arg(argc, argv, "-notorfallback") ||
+            BtfTorFallbackDisabledByFile())
             nTorBridgeFallbackSecs = 0;
         string strFallback = argval2(argc, argv, "/torfallback", "-torfallback");
         if (!strFallback.empty())
             nTorBridgeFallbackSecs = atoi(strFallback.c_str());
         string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
         BtfSetManagedTorPath(torPath);   // the transports are looked up beside it too
+        string strRung = argval2(argc, argv, "/torrung", "-torrung");
+        if (!strRung.empty())
+            nTorBridgeRungSecs = atoi(strRung.c_str());
         bool fTorBridges = arg(argc, argv, "/torbridges") || arg(argc, argv, "-torbridges");
         string customBridge = argval2(argc, argv, "/torbridge", "-torbridge");
-        if (fTorBridges || !customBridge.empty())
+        // The user's own bridges.txt in the data directory counts as asking,
+        // the same as -torbridge on the command line.
+        std::vector<std::string> userBridges = BtfLoadUserBridges();
+        if (fTorBridges || !customBridge.empty() || !userBridges.empty())
         {
             std::vector<std::string> bridges;
             if (fTorBridges)
@@ -457,47 +466,44 @@ static void ParseStartupArguments(int argc, char* argv[])
             }
             if (!customBridge.empty())
                 bridges.push_back(customBridge);
+            bridges.insert(bridges.end(), userBridges.begin(), userBridges.end());
 
-            std::map<std::string, std::string> ptExec;
-            for (size_t i = 0; i < bridges.size(); i++)
+            string strErr;
+            if (!BtfConfigureBridges(bridges, (fTorBridges && customBridge.empty() && userBridges.empty())
+                                                  ? "snowflake" : "user", strErr))
             {
-                string tr = BtfBridgeTransport(bridges[i]);
-                if (tr.empty() || ptExec.count(tr))
-                    continue;
-                string path;
-                bool ok = false;
-                if (tr == "obfs4")          ok = BtfResolveObfs4Path(path);
-                else if (tr == "snowflake") ok = BtfResolveSnowflakePath(path);
-                if (ok)
-                    ptExec[tr] = path;
-                else
-                {
-                    // Not a warning. Bridges are asked for by somebody on a
-                    // network that blocks Tor; carrying on without them means
-                    // dialling the directory authorities in the clear, which is
-                    // the observable act they were avoiding.
-                    StartupRefuse(
-                        strprintf("no pluggable-transport binary for '%s', so the bridges you asked for cannot be used",
-                                  tr.c_str()),
-                        "Install the transport (the release packages ship it under tor/pluggable_transports/),\n"
-                        "or drop the bridge options to reach Tor directly -- but only if direct Tor is safe where you are.");
-                }
-            }
-
-            if (bridges.empty() || ptExec.empty())
+                // Not a warning. Bridges are asked for by somebody on a
+                // network that blocks Tor; carrying on without them means
+                // dialling the directory authorities in the clear, which is
+                // the observable act they were avoiding.
                 StartupRefuse(
-                    "Tor bridges were requested but none could be configured",
-                    "Check the bridge line passed to -torbridge, or drop the bridge options to reach\n"
-                    "Tor directly -- but only if direct Tor is safe where you are.");
+                    strprintf("%s, so the bridges you asked for cannot be used", strErr.c_str()),
+                    "Install the transport (the release packages ship it under tor/pluggable_transports/),\n"
+                    "check the bridge lines (-torbridge, bridges.txt in the data directory), or drop\n"
+                    "the bridge options to reach Tor directly -- but only if direct Tor is safe where you are.");
+            }
             else
+                fprintf(stderr, "Tor bridges enabled (%d bridge%s%s)\n", (int)bridges.size(),
+                        bridges.size() == 1 ? "" : "s",
+                        userBridges.empty() ? "" : ", bridges.txt read");
+        }
+        else if (nTorBridgeFallbackSecs > 0)
+        {
+            // Nothing asked for, but last time only bridges reached the
+            // network: start on them, do not spend the four minutes again.
+            string last = BtfLastWorkingTransport();
+            if (!last.empty() && last != "direct" && last != "user")
             {
-                BtfSetTorBridges(bridges, ptExec);
-                fprintf(stderr, "Tor bridges enabled (%d bridge%s;", (int)bridges.size(),
-                        bridges.size() == 1 ? "" : "s");
-                for (std::map<std::string, std::string>::const_iterator it = ptExec.begin();
-                     it != ptExec.end(); ++it)
-                    fprintf(stderr, " %s=%s", it->first.c_str(), it->second.c_str());
-                fprintf(stderr, ")\n");
+                std::vector<BtfBridgeRung> rungs = BtfBundledBridgeRungs();
+                for (size_t i = 0; i < rungs.size(); i++)
+                    if (rungs[i].name == last)
+                    {
+                        string strErr;
+                        if (BtfConfigureBridges(rungs[i].lines, rungs[i].name, strErr))
+                            fprintf(stderr, "Tor: last time only the %s bridges reached the network; starting on them "
+                                            "(delete managed-tor/last-working to try direct Tor again)\n", last.c_str());
+                        break;
+                    }
             }
         }
 

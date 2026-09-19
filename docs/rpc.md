@@ -61,6 +61,8 @@ null.
 | `gettransaction` | `txid` | amount, confirmations, block, `details` per output |
 | `listtransactions` | `[count=10]` | the last `count` wallet transactions, oldest first |
 | `listsinceblock` | `[blockhash]` | every wallet transaction in blocks after that one, plus unconfirmed, and `lastblock` |
+| `gettorinfo` | — | `transport` (`direct`, `user`, or a bundled rung such as `snowflake`), Tor's `bootstrap` percent and `bootstrapline`, the `ladder` of bundled rungs, `userbridges` count and file, `lastworking`, `connections` |
+| `settorbridges` | `["line", ...]` \| `"now"` \| `"forget"` | lines: save to `bridges.txt` and switch Tor to them now; `now`: climb to the next bundled rung right away; `forget`: next start tries direct Tor first again |
 
 `amount` and `balance` are BTF as JSON numbers. `sendtoaddress` accepts the
 amount as a number or as a string.
