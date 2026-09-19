@@ -1128,6 +1128,69 @@ std::string BtfBuildManagedTorrcForTest(const std::string& dataDir,
     return s;
 }
 
+// The pid of the Tor we started, kept beside the torrc. A node that dies
+// without a clean shutdown leaves its Tor running; that Tor holds the data
+// directory, and the next start's own Tor exits 1 while the orphan keeps
+// the onion up with a SOCKS port nobody uses. So before starting, a stale
+// pid that is still a Tor on our torrc is killed.
+static std::string TorPidPath(const std::string& torrcPath)
+{
+    return torrcPath.substr(0, torrcPath.size() - std::string("torrc").size()) + "tor.pid";
+}
+
+static void RecordTorPid(const std::string& torrcPath, long pid)
+{
+    std::string err;
+    WriteTextFile(TorPidPath(torrcPath), strprintf("%ld\n", pid), err);
+}
+
+static void KillStaleManagedTor(const std::string& torrcPath)
+{
+    std::string s;
+    if (!ReadOneLine(TorPidPath(torrcPath), s))
+        return;
+    long pid = atol(s.c_str());
+    remove(TorPidPath(torrcPath).c_str());
+    if (pid <= 1)
+        return;
+#ifdef _WIN32
+    HANDLE h = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_TERMINATE | SYNCHRONIZE, FALSE, (DWORD)pid);
+    if (!h)
+        return;
+    char name[MAX_PATH] = {0};
+    DWORD len = MAX_PATH;
+    bool fTor = QueryFullProcessImageNameA(h, 0, name, &len) && len >= 7 &&
+                _stricmp(name + len - 7, "tor.exe") == 0;
+    if (fTor)
+    {
+        printf("managed Tor: a Tor from an earlier run (pid %ld) still holds the data directory; stopping it\n", pid);
+        TerminateProcess(h, 0);
+        WaitForSingleObject(h, 5000);
+    }
+    CloseHandle(h);
+#else
+    std::string cmdline;
+    {
+        FILE* f = fopen(strprintf("/proc/%ld/cmdline", pid).c_str(), "rb");
+        if (!f)
+            return;
+        char buf[4096];
+        size_t n = fread(buf, 1, sizeof(buf), f);
+        fclose(f);
+        for (size_t i = 0; i < n; i++)
+            cmdline += buf[i] == 0 ? ' ' : buf[i];
+    }
+    if (cmdline.find(torrcPath) == std::string::npos)
+        return;   // pid reused by something else
+    printf("managed Tor: a Tor from an earlier run (pid %ld) still holds the data directory; stopping it\n", pid);
+    kill((pid_t)pid, SIGTERM);
+    for (int i = 0; i < 50 && kill((pid_t)pid, 0) == 0; i++)
+        Sleep(100);
+    if (kill((pid_t)pid, 0) == 0)
+        kill((pid_t)pid, SIGKILL);
+#endif
+}
+
 static bool StartTorProcess(const std::string& torPath, const std::string& torrcPath,
                             std::string& errOut)
 {
@@ -1146,6 +1209,7 @@ static bool StartTorProcess(const std::string& torPath, const std::string& torrc
                            torPath.c_str(), (unsigned long)GetLastError());
         return false;
     }
+    RecordTorPid(torrcPath, (long)g_managedTorProcess.dwProcessId);
     return true;
 #else
     // The Tor Expert Bundle's tor carries no RUNPATH: it expects the launcher
@@ -1198,6 +1262,7 @@ static bool StartTorProcess(const std::string& torPath, const std::string& torrc
                    const_cast<char* const*>(&envpTor[0]));
         _exit(127);
     }
+    RecordTorPid(torrcPath, (long)g_managedTorPid);
     return true;
 #endif
 }
@@ -1451,6 +1516,7 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
         return false;
 
     unsigned short p2pPort = ntohs(nListenPort);
+    KillStaleManagedTor(torrcPath);
     std::string torrc = BtfBuildManagedTorrcForTest(dataDir, hsDir, socksPort,
                                                    controlPort, p2pPort,
                                                    g_torBridges, g_torPtExec);
@@ -1570,6 +1636,8 @@ void BtfStopManagedTor()
         g_managedTorPid = -1;
     }
 #endif
+    // Our Tor is gone; the pid file is only for the run that never got here.
+    remove(TorPidPath(PathJoin(PathJoin(GetAppDir(), "managed-tor"), "torrc")).c_str());
     CRITICAL_BLOCK(cs_managedTor)
     {
         g_managedTorStatus = "stopped";
