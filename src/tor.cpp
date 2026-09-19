@@ -27,6 +27,9 @@ static std::string g_managedTorHiddenServiceDir;
 static std::string g_managedTorOnion;
 static std::string g_managedTorStatus;
 static std::vector<std::string> g_torBridges;              // bridge lines
+int nTorBridgeFallbackSecs = 4 * 60;
+static int64 g_managedTorStartedAt = 0;
+static bool g_fTorFallbackDone = false;
 static std::map<std::string, std::string> g_torPtExec;     // transport -> PT binary
 #ifdef _WIN32
 static PROCESS_INFORMATION g_managedTorProcess;
@@ -526,6 +529,44 @@ void BtfSetTorBridges(const std::vector<std::string>& bridges,
     g_torPtExec = ptExecByTransport;
 }
 
+bool BtfTorBridgesConfigured()
+{
+    return !g_torBridges.empty();
+}
+
+void BtfSetManagedTorPath(const std::string& torPath)
+{
+    CRITICAL_BLOCK(cs_managedTor)
+        g_managedTorPath = torPath;
+}
+
+// The bundled bridges with the transports they need, if the binaries are
+// here. Empty when they are not: then there is nothing to fall back to.
+static std::vector<std::string> DefaultBridgesWithTransports(std::map<std::string, std::string>& ptExecOut)
+{
+    std::vector<std::string> bridges = BtfDefaultBridges();
+    std::vector<std::string> usable;
+    ptExecOut.clear();
+    for (size_t i = 0; i < bridges.size(); i++)
+    {
+        std::string tr = BtfBridgeTransport(bridges[i]);
+        std::string path;
+        bool ok = false;
+        if (ptExecOut.count(tr))
+            ok = true;
+        else if (tr == "obfs4")
+            ok = BtfResolveObfs4Path(path);
+        else if (tr == "snowflake")
+            ok = BtfResolveSnowflakePath(path);
+        if (!ok)
+            continue;
+        if (!path.empty())
+            ptExecOut[tr] = path;
+        usable.push_back(bridges[i]);
+    }
+    return usable;
+}
+
 std::string BtfBridgeTransport(const std::string& bridgeLine)
 {
     std::string t;
@@ -551,16 +592,39 @@ static bool ResolvePtFrom(const std::vector<std::string>& candidates, std::strin
     return false;
 }
 
+// Where the transports may sit: next to us under tor/, and next to the
+// Tor we were pointed at (-managedtor=PATH), which carries its own.
+static std::vector<std::string> PtDirs()
+{
+    std::vector<std::string> dirs;
+    dirs.push_back(PathJoin(ExecutableDir(), "tor/pluggable_transports"));
+    std::string torPath;
+    CRITICAL_BLOCK(cs_managedTor)
+        torPath = g_managedTorPath;
+    if (!torPath.empty())
+    {
+        size_t cut = torPath.find_last_of("/\\");
+        std::string torDir = cut == std::string::npos ? "." : torPath.substr(0, cut);
+        dirs.push_back(PathJoin(torDir, "pluggable_transports"));
+    }
+    return dirs;
+}
+
 bool BtfResolveObfs4Path(std::string& pathOut)
 {
-    std::string exeDir = ExecutableDir();
+    std::vector<std::string> dirs = PtDirs();
     std::vector<std::string> c;
+    for (size_t i = 0; i < dirs.size(); i++)
+    {
 #ifdef _WIN32
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy.exe"));
+        c.push_back(PathJoin(dirs[i], "lyrebird.exe"));
+        c.push_back(PathJoin(dirs[i], "obfs4proxy.exe"));
 #else
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/obfs4proxy"));
+        c.push_back(PathJoin(dirs[i], "lyrebird"));
+        c.push_back(PathJoin(dirs[i], "obfs4proxy"));
+#endif
+    }
+#ifndef _WIN32
     c.push_back("/usr/bin/lyrebird");
     c.push_back("/usr/bin/obfs4proxy");
 #endif
@@ -569,14 +633,19 @@ bool BtfResolveObfs4Path(std::string& pathOut)
 
 bool BtfResolveSnowflakePath(std::string& pathOut)
 {
-    std::string exeDir = ExecutableDir();
+    std::vector<std::string> dirs = PtDirs();
     std::vector<std::string> c;
+    for (size_t i = 0; i < dirs.size(); i++)
+    {
 #ifdef _WIN32
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird.exe"));
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client.exe"));
+        c.push_back(PathJoin(dirs[i], "lyrebird.exe"));
+        c.push_back(PathJoin(dirs[i], "snowflake-client.exe"));
 #else
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/lyrebird"));
-    c.push_back(PathJoin(exeDir, "tor/pluggable_transports/snowflake-client"));
+        c.push_back(PathJoin(dirs[i], "lyrebird"));
+        c.push_back(PathJoin(dirs[i], "snowflake-client"));
+#endif
+    }
+#ifndef _WIN32
     c.push_back("/usr/bin/snowflake-client");
     c.push_back("/usr/bin/lyrebird");
 #endif
@@ -844,6 +913,41 @@ static void ThreadManagedTorWatchdog(void*)
             }
             return;
         }
+
+        // Tor up but nobody reached: a firewall that blocks Tor's public
+        // relays looks like this. Once, with the bundled bridges -- the
+        // same ones -torbridges turns on -- if the transports are here.
+        if (nTorBridgeFallbackSecs > 0 && !g_fTorFallbackDone && g_torBridges.empty() &&
+            g_managedTorStartedAt && GetTime() - g_managedTorStartedAt > nTorBridgeFallbackSecs)
+        {
+            bool fAnyPeer = false;
+            CRITICAL_BLOCK(cs_vNodes)
+                fAnyPeer = !vNodes.empty();
+            if (!fAnyPeer)
+            {
+                g_fTorFallbackDone = true;
+                std::map<std::string, std::string> ptExec;
+                std::vector<std::string> bridges = DefaultBridgesWithTransports(ptExec);
+                if (bridges.empty())
+                {
+                    printf("managed Tor: no peer after %d s and no pluggable transports bundled; nothing to fall back to\n",
+                           nTorBridgeFallbackSecs);
+                    continue;
+                }
+                printf("managed Tor: no peer after %d s -- Tor's public relays may be blocked here. "
+                       "Restarting Tor with the bundled bridges (%d line(s)); -notorfallback disables this.\n",
+                       nTorBridgeFallbackSecs, (int)bridges.size());
+                std::string torPath;
+                CRITICAL_BLOCK(cs_managedTor)
+                    torPath = g_managedTorPath;
+                BtfStopManagedTor();
+                BtfSetTorBridges(bridges, ptExec);
+                std::string strError;
+                if (!BtfStartManagedTor(torPath, strError))
+                    printf("managed Tor: restart with bridges failed: %s\n", strError.c_str());
+                return;   // the new Tor has its own watchdog
+            }
+        }
     }
 }
 
@@ -900,6 +1004,7 @@ bool BtfStartManagedTor(const std::string& torPathOpt, std::string& errOut)
         }
     }
 
+    g_managedTorStartedAt = GetTime();
     std::string root = PathJoin(GetAppDir(), "managed-tor");
     std::string dataDir = PathJoin(root, "data");
     std::string hsDir = PathJoin(root, "onion-service");

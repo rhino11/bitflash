@@ -161,6 +161,9 @@ static void PrintUsage()
     printf("  /nomanagedtor              (disable automatic bundled Tor startup)\n");
     printf("  /torbridges                (reach Tor via obfs4 bridges where Tor is blocked)\n");
     printf("  /torbridge=LINE            (add one obfs4 bridge line; repeatable via config)\n");
+    printf("  /notorfallback             (do not switch to the bundled bridges on your own when\n");
+    printf("                              no peer is reached in four minutes; /torfallback=SECS\n");
+    printf("                              changes the wait)\n");
     printf("  /btfseed=ADDRESS:ENCHEX    (extra bootstrap peer, repeatable)\n");
     printf("\n");
     printf("Wallet:\n");
@@ -435,6 +438,13 @@ static void ParseStartupArguments(int argc, char* argv[])
         // without our rendezvous relays. -torbridges uses the built-in default
         // (Snowflake, no infra needed); -torbridge=<line> adds an obfs4 or
         // snowflake bridge. We resolve a PT binary for each transport present.
+        if (arg(argc, argv, "/notorfallback") || arg(argc, argv, "-notorfallback"))
+            nTorBridgeFallbackSecs = 0;
+        string strFallback = argval2(argc, argv, "/torfallback", "-torfallback");
+        if (!strFallback.empty())
+            nTorBridgeFallbackSecs = atoi(strFallback.c_str());
+        string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
+        BtfSetManagedTorPath(torPath);   // the transports are looked up beside it too
         bool fTorBridges = arg(argc, argv, "/torbridges") || arg(argc, argv, "-torbridges");
         string customBridge = argval2(argc, argv, "/torbridge", "-torbridge");
         if (fTorBridges || !customBridge.empty())
@@ -491,7 +501,6 @@ static void ParseStartupArguments(int argc, char* argv[])
             }
         }
 
-        string torPath = fManagedTor ? argval2(argc, argv, "/managedtor", "-managedtor") : bundledTorPath;
         string err;
         if (!BtfStartManagedTor(torPath, err))
         {

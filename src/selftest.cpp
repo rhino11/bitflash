@@ -4574,6 +4574,45 @@ static int RunManagedTorSelfTest()
     nFail += Check(BtfManagedTorStatus() == "disabled",
                    "managed Tor starts disabled") ? 0 : 1;
 
+    // Bridge fallback policy: on by default, four minutes, and the transports
+    // are looked up beside the Tor we were pointed at as well as beside us.
+    nFail += Check(nTorBridgeFallbackSecs == 4 * 60,
+                   "bridge fallback defaults to four minutes") ? 0 : 1;
+    nFail += Check(!BtfTorBridgesConfigured(),
+                   "no bridges configured until asked") ? 0 : 1;
+    {
+        std::string tmp;
+        if (MakeTempDir(tmp))
+        {
+            std::string torDir = tmp + "/tordir";
+            std::string ptDir = torDir + "/pluggable_transports";
+            MakeDirLocal(torDir);
+            MakeDirLocal(ptDir);
+#ifdef _WIN32
+            std::string ptFile = ptDir + "/lyrebird.exe";
+#else
+            std::string ptFile = ptDir + "/lyrebird";
+#endif
+            WriteTextFile(ptFile, "#!/bin/sh\n");
+#ifndef _WIN32
+            chmod(ptFile.c_str(), 0755);
+#endif
+            std::string found;
+            BtfSetManagedTorPath(torDir + "/tor");
+            nFail += Check(BtfResolveSnowflakePath(found) && found == ptFile,
+                           "finds the transport next to the managed Tor binary") ? 0 : 1;
+            nFail += Check(BtfResolveObfs4Path(found) && found == ptFile,
+                           "lyrebird serves obfs4 too") ? 0 : 1;
+            BtfSetManagedTorPath("");
+            remove(ptFile.c_str());
+            rmdir(ptDir.c_str());
+            rmdir(torDir.c_str());
+            rmdir(tmp.c_str());
+        }
+        else
+            nFail += Check(false, "temp dir for the transport lookup") ? 0 : 1;
+    }
+
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");
     fflush(stdout);

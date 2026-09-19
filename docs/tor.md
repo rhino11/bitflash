@@ -67,6 +67,12 @@ transport is missing, **the node refuses to start** rather than reaching Tor
 directly — that fallback would perform the exact observable act you were trying
 to avoid, while reporting success.
 
+Without any bridge option, managed Tor falls back to the bundled Snowflake set
+on its own when it has reached no peer in four minutes; `-notorfallback`
+disables that, `-torfallback=SECS` changes the wait. More in
+[censored-networks.md](censored-networks.md), including the onion download
+mirror for when the sites themselves are blocked.
+
 ## What to test
 
 Use the public status page only as a rough health check. To prove the local node

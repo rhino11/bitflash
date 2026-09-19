@@ -29,6 +29,15 @@ bool BtfResolveSnowflakePath(std::string& pathOut);
 // Built-in bridge lines used by -torbridges: the standard Snowflake bridge,
 // which needs no infrastructure of ours and no curation.
 std::vector<std::string> BtfDefaultBridges();
+// Watchdog policy: with no peer reached this long after managed Tor came
+// up, and no bridges configured, restart Tor with the bundled bridges. A
+// network that blocks Tor's public relays looks exactly like this from the
+// inside. 0 disables (-notorfallback).
+extern int nTorBridgeFallbackSecs;
+bool BtfTorBridgesConfigured();
+// Tell the transport lookup where Tor lives before it is started (empty:
+// the bundled one).
+void BtfSetManagedTorPath(const std::string& torPath);
 // Transport name (first token) of a bridge line, e.g. "obfs4" or "snowflake".
 std::string BtfBridgeTransport(const std::string& bridgeLine);
 

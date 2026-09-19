@@ -439,7 +439,12 @@ Bridges are for networks that block Tor itself: `-torbridges` uses the built-in
 Snowflake set, `-torbridge=LINE` adds an obfs4 or snowflake bridge of your own.
 If you ask for bridges and the pluggable-transport binary is missing, the node
 refuses to start rather than quietly reaching Tor directly — that fallback would
-be the exact thing you were avoiding.
+be the exact thing you were avoiding. With no bridges asked for, a managed Tor
+that reaches no peer in four minutes is restarted once with the bundled
+Snowflake set (`-notorfallback` turns that off). Where the download sites are
+blocked too, the releases are served over Tor at
+`http://rqzruhh4sm2s3fl6b4mpselkqsaaxebnyptpqhdpt236g57lof7j7sid.onion/`; see
+[docs/censored-networks.md](docs/censored-networks.md).
 
 The desktop app starts a managed Tor automatically when no other Tor option is
 set, so onion transport works out of the box; `-nomanagedtor` turns that off.
