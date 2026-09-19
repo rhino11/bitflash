@@ -1082,6 +1082,7 @@ const char* GetTxnOutputType(txnouttype t)
     case TX_PUBKEYHASH: return "pubkeyhash";
     case TX_SCRIPTHASH: return "scripthash";
     case TX_MULTISIG: return "multisig";
+    case TX_NULL_DATA: return "nulldata";
     }
     return NULL;
 }
@@ -1095,6 +1096,19 @@ bool SolverTyped(const CScript& scriptPubKey, txnouttype& typeRet, vector<valtyp
     {
         typeRet = TX_SCRIPTHASH;
         vSolutionsRet.push_back(valtype(scriptPubKey.begin() + 2, scriptPubKey.begin() + 22));
+        return true;
+    }
+    if (scriptPubKey.IsNullData())
+    {
+        typeRet = TX_NULL_DATA;
+        valtype vch;
+        if (scriptPubKey.size() > 1)
+        {
+            CScript::const_iterator pc = scriptPubKey.begin() + 1;
+            opcodetype opcode;
+            scriptPubKey.GetOp(pc, opcode, vch);
+        }
+        vSolutionsRet.push_back(vch);
         return true;
     }
 

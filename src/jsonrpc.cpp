@@ -205,6 +205,10 @@ static json ScriptToJson(const CScript& script)
             j["address"] = PubKeyToAddress(vSolutions[0]);
         else if (whichType == TX_SCRIPTHASH)
             j["address"] = Hash160ToScriptAddress(uint160(vSolutions[0]));
+        else if (whichType == TX_NULL_DATA)
+        {
+            j["data"] = HexStr(vSolutions[0].begin(), vSolutions[0].end(), false);
+        }
         else if (whichType == TX_MULTISIG)
         {
             j["reqSigs"] = (int)vSolutions.front()[0];
@@ -758,6 +762,24 @@ static json rpc_createrawtransaction(const json& p)
             throw runtime_error("duplicated output: " + strKey);
         setSeen.insert(strKey);
         CScript scriptPubKey;
+        if (strKey.compare(0, 5, "data:") == 0)
+        {
+            // A burn: OP_RETURN <data>. The amount is what is destroyed.
+            string strHex = strKey.substr(5);
+            if (!IsHex(strHex) && !strHex.empty())
+                throw runtime_error("data: must be followed by hex");
+            vector<unsigned char> vch = ParseHex(strHex);
+            if (vch.size() > MAX_OP_RETURN_RELAY)
+                throw runtime_error(strprintf("data: at most %u bytes", MAX_OP_RETURN_RELAY));
+            scriptPubKey << OP_RETURN;
+            if (!vch.empty())
+                scriptPubKey << vch;
+            int64 nBurn = AmountFromValue(it.value());
+            if (nBurn < 0)
+                throw runtime_error("amount must not be negative");
+            tx.vout.push_back(CTxOut(nBurn, scriptPubKey));
+            continue;
+        }
         if (strKey.compare(0, 7, "script:") == 0)
         {
             string strHex = strKey.substr(7);

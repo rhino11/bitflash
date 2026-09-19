@@ -611,6 +611,21 @@ public:
     // spending rule itself (the serialized script is run, not just hashed)
     // arrives with the rules v3 switch. Until then an output of this shape is
     // anyone-can-spend on this network, and the wallet refuses to pay to one.
+    // OP_RETURN alone, or OP_RETURN followed by exactly one push
+    bool IsNullData() const
+    {
+        if (empty() || (*this)[0] != OP_RETURN)
+            return false;
+        if (size() == 1)
+            return true;
+        const_iterator pc = begin() + 1;
+        opcodetype opcode;
+        vector<unsigned char> vch;
+        if (!GetOp(pc, opcode, vch) || opcode > OP_PUSHDATA4)
+            return false;
+        return pc == end();
+    }
+
     bool IsPayToScriptHash() const
     {
         return size() == 23 && (*this)[0] == OP_HASH160 && (*this)[1] == 0x14 && (*this)[22] == OP_EQUAL;
@@ -715,7 +730,11 @@ enum txnouttype
     TX_PUBKEYHASH,
     TX_SCRIPTHASH,
     TX_MULTISIG,
+    // OP_RETURN <data>: provably unspendable, the coins are gone. The
+    // burn stamp of btfchat (docs/btfchat.md); up to 80 bytes of data.
+    TX_NULL_DATA,
 };
+static const unsigned int MAX_OP_RETURN_RELAY = 80;
 const char* GetTxnOutputType(txnouttype t);
 // vSolutionsRet: TX_PUBKEY [pubkey]; TX_PUBKEYHASH [hash160]; TX_SCRIPTHASH
 // [hash160]; TX_MULTISIG [m, key1..keyn, n] with m and n as one-byte vectors.

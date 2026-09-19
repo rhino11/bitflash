@@ -4380,6 +4380,34 @@ static int RunMultisigSelfTest()
         txStd.vout[0].scriptPubKey = p2pkh;
         txStd.vin[0].scriptSig = CScript() << OP_0 << std::vector<unsigned char>(72, 1) << std::vector<unsigned char>(72, 2) << std::vector<unsigned char>(72, 3);
         nFail += Check(txStd.IsStandard(), "a scriptSig with three signatures fits the relay limit") ? 0 : 1;
+
+        // ---- the burn: OP_RETURN
+        CScript burn; burn << OP_RETURN << std::vector<unsigned char>(32, 0xAB);
+        nFail += Check(SolverTyped(burn, t, sol) && t == TX_NULL_DATA && sol[0].size() == 32 && burn.IsNullData(),
+                       "OP_RETURN <32 bytes> is recognized as nulldata with its data") ? 0 : 1;
+        CScript burnBare; burnBare << OP_RETURN;
+        nFail += Check(burnBare.IsNullData() && SolverTyped(burnBare, t, sol) && t == TX_NULL_DATA && sol[0].empty(),
+                       "a bare OP_RETURN is nulldata too") ? 0 : 1;
+        CTransaction txSpend;
+        txSpend.vin.push_back(CTxIn(COutPoint(uint256(1), 0)));
+        txSpend.vin[0].scriptSig = CScript() << std::vector<unsigned char>(72, 1);
+        txSpend.vout.push_back(CTxOut(1, burn));
+        nFail += Check(!EvalScript(txSpend.vin[0].scriptSig + CScript(OP_CODESEPARATOR) + burn, txSpend, 0),
+                       "and no scriptSig can spend it: the coins are gone") ? 0 : 1;
+        txStd.vout.push_back(CTxOut(1 * COIN / 1000, burn));
+        nFail += Check(txStd.IsStandard(), "a transaction with one burn output is relayed") ? 0 : 1;
+        txStd.vout.push_back(CTxOut(0, burnBare));
+        nFail += Check(!txStd.IsStandard(), "two OP_RETURN outputs are not") ? 0 : 1;
+        txStd.vout.pop_back();
+        CScript burnBig; burnBig << OP_RETURN << std::vector<unsigned char>(81, 1);
+        txStd.vout.back().scriptPubKey = burnBig;
+        nFail += Check(!txStd.IsStandard(), "81 bytes of data is over the relay limit") ? 0 : 1;
+        CScript burn80; burn80 << OP_RETURN << std::vector<unsigned char>(80, 1);
+        txStd.vout.back().scriptPubKey = burn80;
+        nFail += Check(txStd.IsStandard(), "80 bytes is exactly the limit") ? 0 : 1;
+        CScript burnTwoPush; burnTwoPush << OP_RETURN << std::vector<unsigned char>(4, 1) << std::vector<unsigned char>(4, 2);
+        nFail += Check(!burnTwoPush.IsNullData(), "OP_RETURN with two pushes is not the shape") ? 0 : 1;
+        txStd.vout.pop_back();
     }
 
     // ---- spending a bare 2-of-3

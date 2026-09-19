@@ -752,6 +752,7 @@ public:
             if (txin.scriptSig.size() > 500 || !txin.scriptSig.IsPushOnly())
                 return false;
         }
+        int nNullData = 0;
         foreach(const CTxOut& txout, vout)
         {
             const CScript& s = txout.scriptPubKey;
@@ -761,6 +762,16 @@ public:
                        && s[s.size() - 1] == OP_CHECKSIG;
             if (fP2PKH || fP2PK)
                 continue;
+            // One OP_RETURN output per transaction, up to 80 bytes of data:
+            // the burn. Unspendable since 0.1.0 (OP_RETURN fails the
+            // script), relayed from 1.2.28. One, so a transaction cannot be
+            // used as a bulletin board; 80 bytes holds a hash and a tag.
+            if (s.IsNullData())
+            {
+                if (++nNullData > 1 || s.size() > MAX_OP_RETURN_RELAY + 3)
+                    return false;
+                continue;
+            }
             // Bare m-of-n multisig, n <= 3: valid since genesis, relayed from
             // 1.2.28. Pay-to-script-hash is deliberately NOT here until the
             // rules v3 switch makes it something other than anyone-can-spend.
