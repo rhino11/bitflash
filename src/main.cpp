@@ -3552,7 +3552,15 @@ bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv)
 bool SendMessages(CNode* pto)
 {
     CheckForShutdown(2);
-    CRITICAL_BLOCK(cs_main)
+    // Try, not take. The message thread arrives here holding this peer's
+    // cs_vSend; a thread that holds cs_main and pushes a message to this
+    // peer -- an RPC call relaying the transaction it just made, a block
+    // being relayed -- takes cs_main first and cs_vSend second. Blocking on
+    // cs_main here with cs_vSend held is a deadlock with that thread, and
+    // it was reached: an RPC chatsend and the message thread stopped each
+    // other on the 202 (2026-09-19). Bitcoin 0.3.x made the same change.
+    // When cs_main is busy, this round is skipped; the next comes in 100 ms.
+    TRY_CRITICAL_BLOCK(cs_main)
     {
         // Don't send anything until we get their version message
         if (pto->nVersion == 0)
