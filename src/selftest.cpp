@@ -3319,8 +3319,8 @@ static int RunRulesV2SelfTest()
         tx.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
         tx.vout[0].scriptPubKey = txFrom.vout[0].scriptPubKey;
         nFail += Check(tx.IsStandard(), "a wallet-shaped transaction is standard") ? 0 : 1;
-        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0x42);
-        nFail += Check(!t2.IsStandard(), "an OP_RETURN output is not relayed") ? 0 : 1;
+        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_TRUE;
+        nFail += Check(!t2.IsStandard(), "an output of an unknown shape is not relayed") ? 0 : 1;
         CTransaction t3 = tx; t3.vout[0].scriptPubKey = CScript() << OP_1 << OP_CHECKSIG << OP_CHECKSIG;
         nFail += Check(!t3.IsStandard(), "an output built from bare operators is not relayed") ? 0 : 1;
         CTransaction t4 = tx; t4.vin[0].scriptSig = CScript() << OP_1 << OP_DROP << vchSig << key.GetPubKey();
