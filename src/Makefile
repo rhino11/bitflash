@@ -53,7 +53,7 @@ LIBS = -L$(SECP_LIB) -lsecp256k1 \
 HEADERS = headers_core.h headers.h util.h main.h serialize.h uint256.h \
           key.h bignum.h script.h db.h base58.h net.h nostr.h \
           randomx_pow.h consensus.h btfaddr.h btfchan.h btfsock.h market.h \
-          selftest.h walletcmd.h wallet_sqlite.h compat.h sockcount.h proxy.h tor.h font_roboto.h
+          selftest.h walletcmd.h wallet_sqlite.h compat.h sockcount.h proxy.h tor.h treasury.h font_roboto.h
 
 IMGUI_OBJS = obj/imgui.o obj/imgui_draw.o obj/imgui_tables.o \
              obj/imgui_widgets.o obj/imgui_impl_glfw.o obj/imgui_impl_opengl3.o
@@ -62,7 +62,7 @@ NODE_OBJS = obj/util.o obj/script.o obj/db.o obj/net.o obj/main.o \
             obj/market.o obj/sha.o obj/nostr.o obj/randomx_pow.o \
             obj/btfaddr.o obj/btfchan.o obj/rpc.o \
             obj/selftest.o obj/bip32.o obj/walletcmd.o obj/wallet_sqlite.o \
-            obj/proxy.o obj/tor.o obj/jsonrpc.o
+            obj/proxy.o obj/tor.o obj/jsonrpc.o obj/treasury.o
 
 GUI_OBJS = obj/gui.o obj/main_gui.o
 
@@ -206,5 +206,6 @@ tests: test_bip32 bitflash-node
 	./bitflash-node -selftest=multisig
 	./bitflash-node -selftest=socks5-proxy
 	./bitflash-node -selftest=managed-tor
+	./bitflash-node -selftest=treasury
 
 .PHONY: tests fuzz-net-message-smoke fuzz-script-smoke

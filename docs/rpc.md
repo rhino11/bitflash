@@ -63,9 +63,13 @@ null.
 | `listsinceblock` | `[blockhash]` | every wallet transaction in blocks after that one, plus unconfirmed, and `lastblock` |
 | `gettorinfo` | — | `transport` (`direct`, `user`, or a bundled rung such as `snowflake`), Tor's `bootstrap` percent and `bootstrapline`, the `ladder` of bundled rungs, `userbridges` count and file, `lastworking`, `connections` |
 | `settorbridges` | `["line", ...]` \| `"now"` \| `"forget"` | lines: save to `bridges.txt` and switch Tor to them now; `now`: climb to the next bundled rung right away; `forget`: next start tries direct Tor first again |
+| `gettreasuryinfo` | — | `configured`, `network`, `page`; when configured: `required`, `keys`, the `script` decoded, `howToPay`, this node's `treasuryShare` and `poolFeeTo` |
+| `donate` | `amount` | txid of a transaction paying the treasury; the same as `sendtoaddress treasury <amount>` |
 
 `amount` and `balance` are BTF as JSON numbers. `sendtoaddress` accepts the
-amount as a number or as a string.
+amount as a number or as a string. The word `treasury` stands for the
+treasury's multisig script wherever an address is taken (`sendtoaddress`,
+`createrawtransaction` outputs); `docs/treasury.md`.
 
 ## The loop an exchange runs
 

@@ -35,11 +35,18 @@ def hash160(b):
     return hashlib.new("ripemd160", hashlib.sha256(b).digest()).digest()
 
 
+# The treasury's output script, hex, when given with --treasury: its outputs
+# are labelled so a reader can tell a share to the fund from any other multisig.
+TREASURY_HEX = None
+
+
 def spk_info(script_hex):
     try:
         spk = bytes.fromhex(script_hex)
     except ValueError:
         return {"type": "malformed", "hex": script_hex[:80]}
+    if TREASURY_HEX and script_hex == TREASURY_HEX:
+        return {"type": "treasury", "address": "treasury"}
     if (
         len(spk) == 25 and spk[0] == 0x76 and spk[1] == 0xA9
         and spk[2] == 0x14 and spk[23] == 0x88 and spk[24] == 0xAC
@@ -52,6 +59,14 @@ def spk_info(script_hex):
         if spk[0] == 0x21 and len(spk) == 35:
             pk = spk[1:34]
             return {"type": "p2pk", "pubkey": pk.hex(), "address": b58check(hash160(pk))}
+    # bare m-of-n multisig: m, n pushes of 33 or 65 bytes, n, OP_CHECKMULTISIG
+    if len(spk) >= 37 and spk[-1] == 0xAE and 0x51 <= spk[0] <= 0x60 and 0x51 <= spk[-2] <= 0x60:
+        m, n, i, keys = spk[0] - 0x50, spk[-2] - 0x50, 1, 0
+        while i < len(spk) - 2 and spk[i] in (33, 65):
+            i += 1 + spk[i]
+            keys += 1
+        if i == len(spk) - 2 and keys == n and 1 <= m <= n:
+            return {"type": "multisig", "address": "multisig %d-of-%d" % (m, n)}
     return {"type": "other", "hex": script_hex[:80]}
 
 
@@ -78,9 +93,13 @@ def parse_args(argv):
     ap.add_argument("--datadir", help="Bitflash data directory containing blk*.dat")
     ap.add_argument("--max-blocks", type=int, default=0,
                     help="number of blocks to scan; 0 means all block files")
+    ap.add_argument("--treasury", default=None,
+                    help="the treasury output script, hex: its outputs are labelled 'treasury'")
     ap.add_argument("paths", nargs="+",
                     help="with --datadir: <out-dir>; otherwise: <blk*.dat>... <out-dir>")
     args = ap.parse_args(argv)
+    global TREASURY_HEX
+    TREASURY_HEX = args.treasury.lower() if args.treasury else None
     if args.datadir:
         if len(args.paths) != 1:
             raise SystemExit("usage with --datadir: build-explorer.py --datadir DATADIR <out-dir>")
@@ -320,6 +339,9 @@ function ioSide(title, items, render){
   return side;
 }
 function openBlock(h){
+  h = parseInt(h, 10);
+  if(!(h >= 0)) return;
+  if(location.hash !== '#block/'+h) history.replaceState(null, '', '#block/'+h);
   fetch('block/'+Math.floor(h/1000)+'.json').then(function(r){return r.json();}).then(function(chunk){
     var b=chunk[h];
     if(!b){var dd=document.getElementById('detail');clear(dd);append(dd,E('h2','','Block '+h+' not found'));return;}
@@ -374,11 +396,18 @@ document.getElementById('home').onclick=function(){
   document.getElementById('detail').hidden = true;
   document.getElementById('listview').hidden = false;
   this.hidden = true;
+  history.replaceState(null, '', location.pathname);
 };
+function openFromHash(){
+  var m = /^#block\/(\d+)$/.exec(location.hash);
+  if(m) openBlock(m[1]);
+}
+window.addEventListener('hashchange', openFromHash);
 document.getElementById('q').oninput=function(){ renderList(this.value); };
 fetch('blocks.json').then(function(r){return r.json();}).then(function(d){
   SUM=d.blocks; document.getElementById('tip').textContent='tip height '+d.tipHeight+' - '+d.count+' blocks';
   renderList('');
+  openFromHash();
 });
 """
 

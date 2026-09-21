@@ -20,6 +20,7 @@
 #pragma pop_macro("snprintf")
 
 #include "headers.h"
+#include "treasury.h"
 #ifdef snprintf
 #undef snprintf
 #endif
@@ -256,6 +257,8 @@ struct PendingPayout {
     PendingPayout() : blockHeight(0), matureAtHeight(0), nextAttempt(0) {}
 };
 static std::vector<PendingPayout> gPendingPayouts;
+// The name under which the treasury appears among a round's recipients.
+static const char* const TREASURY_RECIPIENT = "treasury";
 static std::mutex                 gPayoutLedgerMutex;
 
 struct PoolRoundProof {
@@ -662,6 +665,15 @@ static void QueuePayouts(int blockHeight,
     round.skippedDust = skipped;
     round.forfeitedBadAddress = burned;
 
+    // The operator's cut goes to the treasury when so configured: one more
+    // recipient in the same round, paid, recorded and recovered like any
+    // miner, under the name the payout thread turns into the script.
+    if (fPoolFeeToTreasury && operatorCut >= CENT && treasury::Configured())
+    {
+        pp.amounts[TREASURY_RECIPIENT] = operatorCut;
+        round.payouts[TREASURY_RECIPIENT] = operatorCut;
+    }
+
     {
         std::lock_guard<std::mutex> lk(gPayoutLedgerMutex);
         gPendingPayouts.push_back(pp);
@@ -744,15 +756,21 @@ static void PayoutThreadFn(void*)
                 if (alreadyPaid)
                     continue;
 
+                CScript sc;
                 uint160 h160;
-                if (!AddressToHash160(kv.first, h160)) {
+                if (kv.first == TREASURY_RECIPIENT) {
+                    if (!treasury::Script(sc)) {
+                        LogPrint("payout", "[payout] SKIPPED treasury: not configured on this network\n");
+                        continue;
+                    }
+                } else if (!AddressToHash160(kv.first, h160)) {
                     // Should not happen -- bad addresses are filtered in QueuePayouts
                     LogPrint("payout", "[payout] SKIPPED bad address '%s'\n",
                              kv.first.c_str());
                     continue;
+                } else {
+                    sc << OP_DUP << OP_HASH160 << h160 << OP_EQUALVERIFY << OP_CHECKSIG;
                 }
-                CScript sc;
-                sc << OP_DUP << OP_HASH160 << h160 << OP_EQUALVERIFY << OP_CHECKSIG;
                 CWalletTx wtx;
                 wtx.mapValue["comment"] = strprintf("Pool payout height %d", ppQueued.matureAtHeight);
                 wtx.mapValue["pool_payout_id"] = ppQueued.id;
@@ -885,6 +903,7 @@ static void WritePoolStatusJsonLocked()
         {"name", strPoolName},
         {"btfAddress", BtfLocalAddress()},
         {"feePercent", dPoolFeePercent},
+        {"feeTo", fPoolFeeToTreasury && treasury::Configured() ? "treasury" : "operator"},
         {"dashboardUrl", strPoolDashboardUrl},
         {"roundsFile", "pool_rounds.json"}
     };

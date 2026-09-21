@@ -608,6 +608,7 @@ windows-tor` to require the extra signature check.
 | P2P port | 8433 (testnet 18433) |
 | Addressing | `.btf` over Tor onion services — see the caveats above |
 | Premine | None |
+| Treasury | A 2-of-3 multisig on the chain that pays for the first exchange listing; opt-in only (`donate`, `-treasuryshare`, `-poolfeeto=treasury`); balance and every movement at [bitflash.network/treasury](https://bitflash.network/treasury) — see [docs/treasury.md](docs/treasury.md) |
 | Pool server | Built-in — second port on the node's own onion |
 | Wallet recovery | Twelve-word phrase (BIP39 + BIP32 + BIP44, coin type 4346950), plus file backup |
 | Wallet storage | SQLite `wallet.sqlite` by default, or Berkeley DB `wallet.dat` |

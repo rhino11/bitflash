@@ -15,6 +15,7 @@
 #endif
 #include "sockcount.h"
 #include "tor.h"
+#include "treasury.h"
 #include "walletcmd.h"
 #include "wallet_sqlite.h"
 
@@ -4514,6 +4515,73 @@ static int RunMultisigSelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// The treasury: the script the keys in treasury.cpp make, what pays it, and
+// the coinbase split. Runs against both networks' tables; mainnet may be
+// unconfigured, and then everything that would pay it must say so.
+static int RunTreasurySelfTest()
+{
+    printf("treasury self-test\n");
+    int nFail = 0;
+    bool fWasTestNet = IsTestNet();
+
+    for (int net = 0; net < 2; net++)
+    {
+        bool fTest = net == 1;
+        SelectNetworkParams(fTest);
+        printf("  -- %s\n", fTest ? "testnet" : "mainnet");
+        CScript s;
+        bool fHave = treasury::Script(s);
+        nFail += Check(fHave == treasury::Configured(), "Script() and Configured() agree") ? 0 : 1;
+        nFail += Check(treasury::Keys().size() == (fHave ? 3u : 0u), "three keys when configured, none otherwise") ? 0 : 1;
+        nFail += Check((treasury::ScriptHex().empty()) == !fHave, "ScriptHex() is empty exactly when not configured") ? 0 : 1;
+        if (!fHave)
+        {
+            nFail += Check(treasury::ShareOf(50 * COIN, 10) == 0, "no share is taken for an unconfigured treasury") ? 0 : 1;
+            nFail += Check(!treasury::IsTreasury(CScript()), "nothing is the treasury when there is none") ? 0 : 1;
+            continue;
+        }
+        txnouttype t; std::vector<std::vector<unsigned char> > sol;
+        nFail += Check(SolverTyped(s, t, sol) && t == TX_MULTISIG && sol.size() == 5 && sol[0][0] == treasury::REQUIRED && sol[4][0] == 3,
+                       "the script is a bare 2-of-3 multisig") ? 0 : 1;
+        std::vector<std::string> keys = treasury::Keys();
+        bool fKeysMatch = sol.size() == 5;
+        for (size_t i = 0; fKeysMatch && i < 3; i++)
+            fKeysMatch = HexStr(sol[i + 1].begin(), sol[i + 1].end(), false) == keys[i];
+        nFail += Check(fKeysMatch, "the keys in the script are the keys listed, in order") ? 0 : 1;
+        nFail += Check(treasury::IsTreasury(s), "the script is recognized as the treasury") ? 0 : 1;
+        CScript other; other.SetMultisig(2, std::vector<std::vector<unsigned char> >(3, ParseHex(keys[0])));
+        nFail += Check(!treasury::IsTreasury(other), "another 2-of-3 is not") ? 0 : 1;
+        CTransaction txPay; txPay.vin.resize(1); txPay.vout.push_back(CTxOut(COIN, s));
+        nFail += Check(txPay.IsStandard(), "a transaction paying it passes the relay policy") ? 0 : 1;
+        nFail += Check(treasury::ScriptHex() == HexStr(s.begin(), s.end(), false), "ScriptHex() is the script") ? 0 : 1;
+
+        // the coinbase split
+        nFail += Check(treasury::ShareOf(50 * COIN, 10) == 5 * COIN, "10% of 50 BTF is 5 BTF") ? 0 : 1;
+        nFail += Check(treasury::ShareOf(50 * COIN, 0) == 0, "0% is nothing") ? 0 : 1;
+        nFail += Check(treasury::ShareOf(50 * COIN, treasury::SHARE_MAX_PERCENT + 1) == 0, "above the cap is nothing, not everything") ? 0 : 1;
+        nFail += Check(treasury::ShareOf(50 * COIN, -5) == 0, "a negative share is nothing") ? 0 : 1;
+        nFail += Check(treasury::ShareOf(1, 1) == 0 && treasury::ShareOf(0, 50) == 0, "a share below one satoshi is nothing") ? 0 : 1;
+        int64 v = 50 * COIN + 12345;
+        for (int pct = 1; pct <= treasury::SHARE_MAX_PERCENT; pct++)
+        {
+            int64 share = treasury::ShareOf(v, pct);
+            if (share <= 0 || share > v || v - share <= 0)
+            {
+                nFail += Check(false, "every share leaves the miner something and the sum intact") ? 0 : 1;
+                break;
+            }
+            if (pct == treasury::SHARE_MAX_PERCENT)
+                nFail += Check(true, "every share leaves the miner something and the sum intact") ? 0 : 1;
+        }
+    }
+    SelectNetworkParams(fWasTestNet);
+    printf("%s (%d failure%s)
+", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
+           nFail, nFail == 1 ? "" : "s");
+    fflush(stdout);
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunManagedTorSelfTest()
 {
     printf("managed-tor self-test\n");
@@ -4728,8 +4796,10 @@ int RunSelfTest(const std::string& name)
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
+    if (name == "treasury")
+        return RunTreasurySelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, multisig, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, multisig, socks5-proxy, managed-tor, treasury\n");
     return 1;
 }

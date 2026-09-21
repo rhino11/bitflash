@@ -21,6 +21,7 @@
 #include "btfsock.h"
 #include "jsonrpc.h"
 #include "tor.h"
+#include "treasury.h"
 
 #ifndef _WIN32
 #include <sys/socket.h>
@@ -122,11 +123,19 @@ static string Base64Decode(const string& in)
 
 static CScript ScriptForAddress(const string& strAddr)
 {
+    CScript s;
+    // The word "treasury" stands for the treasury's multisig script wherever
+    // an address is taken, so any wallet can pay it without pasting a script.
+    if (strAddr == "treasury")
+    {
+        if (!treasury::Script(s))
+            throw runtime_error("there is no treasury on this network yet");
+        return s;
+    }
     uint160 hash160;
     bool fScript = false;
     if (!DecodeAnyAddress(strAddr, hash160, fScript))
         throw runtime_error("invalid Bitflash address");
-    CScript s;
     if (fScript)
     {
         // Until the rules v3 switch a pay-to-script-hash output is spendable
@@ -536,6 +545,46 @@ static json rpc_sendtoaddress(const json& p)
     if (!SendMoney(scriptPubKey, nValue, wtx))
         throw runtime_error("send failed: insufficient balance once the fee is counted");
     return wtx.GetHash().GetHex();
+}
+
+// donate <amount>: pay the treasury. Exactly sendtoaddress treasury <amount>,
+// under the name people will look for.
+static json rpc_donate(const json& p)
+{
+    if (p.size() < 1)
+        throw runtime_error("donate <amount>");
+    if (IsWalletLocked())
+        throw runtime_error("wallet is locked");
+    CScript scriptPubKey;
+    if (!treasury::Script(scriptPubKey))
+        throw runtime_error("there is no treasury on this network yet");
+    int64 nValue = AmountFromValue(p[0]);
+    CWalletTx wtx;
+    wtx.mapValue["comment"] = "Donation to the Bitflash treasury";
+    if (!SendMoney(scriptPubKey, nValue, wtx))
+        throw runtime_error("send failed: insufficient balance once the fee is counted");
+    return wtx.GetHash().GetHex();
+}
+
+// gettreasuryinfo: the script, its keys, and where to watch it.
+static json rpc_gettreasuryinfo(const json&)
+{
+    json j;
+    j["configured"] = treasury::Configured();
+    j["network"] = IsTestNet() ? "testnet" : "mainnet";
+    j["page"] = treasury::PAGE;
+    if (!treasury::Configured())
+        return j;
+    CScript s;
+    treasury::Script(s);
+    j["required"] = treasury::REQUIRED;
+    j["keys"] = treasury::Keys();
+    j["script"] = ScriptToJson(s);
+    j["howToPay"] = "sendtoaddress treasury <amount>, donate <amount>, or an output {\"treasury\": amount} in createrawtransaction";
+    j["mining"] = "-treasuryshare=PCT (solo), -poolfeeto=treasury (pool operator)";
+    j["treasuryShare"] = nTreasurySharePercent;
+    j["poolFeeTo"] = fPoolFeeToTreasury ? "treasury" : "operator";
+    return j;
 }
 
 static json rpc_gettransaction(const json& p)
@@ -1108,7 +1157,7 @@ static json rpc_help(const json&)
            "getbalance sendtoaddress gettransaction listtransactions listsinceblock "
            "createmultisig addmultisigaddress decodescript listunspent createrawtransaction "
            "decoderawtransaction getrawtransaction signrawtransaction sendrawtransaction "
-           "gettorinfo settorbridges help";
+           "gettorinfo settorbridges gettreasuryinfo donate help";
 }
 
 struct RpcEntry { const char* name; RpcMethod fn; };
@@ -1123,6 +1172,8 @@ static const RpcEntry kMethods[] = {
     { "validateaddress",  rpc_validateaddress },
     { "getbalance",       rpc_getbalance },
     { "sendtoaddress",    rpc_sendtoaddress },
+    { "donate",           rpc_donate },
+    { "gettreasuryinfo",  rpc_gettreasuryinfo },
     { "gettransaction",   rpc_gettransaction },
     { "listtransactions", rpc_listtransactions },
     { "listsinceblock",   rpc_listsinceblock },
