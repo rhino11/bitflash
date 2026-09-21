@@ -323,8 +323,12 @@ string GetDiagnosticsText()
                          nBestHeight, nMedian,
                          nBestHeight >= nMedian ? "level or ahead"
                                                 : strprintf("behind by %d", nMedian - nBestHeight).c_str());
+    if (IsInitialBlockDownload())
+        str += "  syncing           yes  (not mining, not announcing blocks until level)\n";
     str += strprintf("  peers held        %d  (%d inbound, %d outbound)\n",
                      nHeld, nInbound, nHeld - nInbound);
+    if (BtfBannedCount() > 0)
+        str += strprintf("  banned            %d .btf address(es), 24 h each\n", BtfBannedCount());
 
     // The number that would have made the deafness obvious. Anything held but
     // not watched is a socket this node will never read again.
@@ -411,7 +415,7 @@ string GetDiagnosticsText()
     if (!strLastHandshakeTimeout.empty())
         str += strprintf("  last handshake    %s\n", strLastHandshakeTimeout.c_str());
 
-    str += "\n  peer                          dir  height  release   last recv   last send   unsent  via\n";
+    str += "\n  peer                          dir  height  release   proto  last recv   last send   unsent  via\n";
     foreach(CNode* pnode, vCopy)
     {
         int nSendSize = 0;
@@ -420,11 +424,12 @@ string GetDiagnosticsText()
         string strVia;
         if (!pnode->strBtfMeeting.empty())
             strVia = pnode->strBtfMeeting;
-        str += strprintf("  %-28s %-4s %6d  %-8s  %10s  %10s  %7d  %s\n",
+        str += strprintf("  %-28s %-4s %6d  %-8s  %5d  %10s  %10s  %7d  %s\n",
                          pnode->addr.ToString().substr(0, 28).c_str(),
                          pnode->fInbound ? "in" : "out",
                          pnode->nStartingHeight,
                          pnode->strRelease.empty() ? "<=1.2.23" : pnode->strRelease.substr(0, 8).c_str(),
+                         pnode->nVersion,
                          FormatAge(pnode->nLastRecv ? nNow - pnode->nLastRecv : -1).c_str(),
                          FormatAge(pnode->nLastSend ? nNow - pnode->nLastSend : -1).c_str(),
                          nSendSize,
@@ -1317,6 +1322,62 @@ static CNode* ConnectNodeBtfTail(const string& strBtfAddr, const unsigned char p
 // Connect to a peer by its `.btf` address: resolve the self-certified
 // descriptor over Nostr, then tunnel through its meeting node with the
 // end-to-end channel. Neither side ever learns the other's IP.
+static map<string, int64> mapBtfBanned;
+static CCriticalSection cs_mapBtfBanned;
+
+bool BtfIsBanned(const string& strBtfAddr)
+{
+    if (strBtfAddr.empty())
+        return false;
+    CRITICAL_BLOCK(cs_mapBtfBanned)
+    {
+        map<string, int64>::iterator it = mapBtfBanned.find(strBtfAddr);
+        if (it == mapBtfBanned.end())
+            return false;
+        if (GetTime() < it->second)
+            return true;
+        mapBtfBanned.erase(it);
+    }
+    return false;
+}
+
+int BtfBannedCount()
+{
+    int n = 0;
+    int64 nNow = GetTime();
+    CRITICAL_BLOCK(cs_mapBtfBanned)
+        for (map<string, int64>::iterator it = mapBtfBanned.begin(); it != mapBtfBanned.end(); ++it)
+            if (nNow < it->second)
+                n++;
+    return n;
+}
+
+bool CNode::Misbehaving(int nHowMuch)
+{
+    if (nHowMuch <= 0)
+        return false;
+    nMisbehavior += nHowMuch;
+    if (nMisbehavior < BAN_MISBEHAVIOR_THRESHOLD)
+    {
+        LogPrint("net", "misbehaving peer %s%s%s: %d points\n",
+                 addr.ToString().c_str(),
+                 strBtfAddr.empty() ? "" : " ", strBtfAddr.c_str(), nMisbehavior);
+        return false;
+    }
+    if (!strBtfAddr.empty())
+    {
+        CRITICAL_BLOCK(cs_mapBtfBanned)
+            mapBtfBanned[strBtfAddr] = GetTime() + BAN_SECONDS;
+        printf("banned %s for %d hours: misbehavior score %d\n",
+               strBtfAddr.c_str(), (int)(BAN_SECONDS / 3600), nMisbehavior);
+    }
+    else
+        printf("disconnecting %s: misbehavior score %d (inbound, nothing to ban)\n",
+               addr.ToString().c_str(), nMisbehavior);
+    fDisconnect = true;
+    return true;
+}
+
 CNode* ConnectNodeBtf(const string& strBtfAddr)
 {
     unsigned char pk[32];
@@ -1327,6 +1388,11 @@ CNode* ConnectNodeBtf(const string& strBtfAddr)
     }
     if (BtfLocalAddress() == strBtfAddr)
         return NULL; // ourselves
+    if (BtfIsBanned(strBtfAddr))
+    {
+        LogPrint("net", "ConnectNodeBtf: %s is banned, not dialling\n", strBtfAddr.c_str());
+        return NULL;
+    }
 
     if (fDebug)
         LogPrint("net", "trying %s\n", strBtfAddr.c_str());
@@ -1359,6 +1425,11 @@ CNode* ConnectNodeBtfResolved(const string& strBtfAddr, const string& strMeeting
     if (!btf::ParseAddress(strBtfAddr, pk))
     {
         LogPrint("net", "ConnectNodeBtf: invalid address %s\n", strBtfAddr.c_str());
+        return NULL;
+    }
+    if (BtfIsBanned(strBtfAddr))
+    {
+        LogPrint("net", "ConnectNodeBtf: %s is banned, not dialling\n", strBtfAddr.c_str());
         return NULL;
     }
     if (BtfLocalAddress() == strBtfAddr)

@@ -22,6 +22,7 @@
 #include <thread>
 #include "bip32.h"
 #include "walletcmd.h"
+#include "tor.h"
 #include "font_roboto.h"
 
 // ---------------------------------------------------------------------------
@@ -78,6 +79,10 @@ static char        g_poolName[128]        = {};
 static char        g_poolFee[32]          = {};
 static char        g_poolDash[256]        = {};
 static int         g_mineRadio            = 0;
+static bool        g_torAutoBridges       = true;
+static char        g_bridgeText[4096]     = {};
+static std::string g_bridgeTextLoaded;
+static std::string g_torActionMsg;
 
 struct TxRow { std::string date, desc; int64 amount; int depth; };
 static std::vector<TxRow> g_txRows;
@@ -805,10 +810,20 @@ static void DrawOptionsDialog()
         strncpy(g_poolName, strPoolName.c_str(), sizeof(g_poolName)-1);
         snprintf(g_poolFee, sizeof(g_poolFee), "%.2f", dPoolFeePercent);
         strncpy(g_poolDash, strPoolDashboardUrl.c_str(), sizeof(g_poolDash)-1);
+        g_torAutoBridges = nTorBridgeFallbackSecs > 0;
+        {
+            std::vector<std::string> lines = BtfLoadUserBridges();
+            std::string text;
+            for (size_t i = 0; i < lines.size(); i++)
+                text += lines[i] + "\n";
+            strncpy(g_bridgeText, text.c_str(), sizeof(g_bridgeText)-1);
+            g_bridgeTextLoaded = text;
+        }
+        g_torActionMsg.clear();
     }
     wasOpen = true;
 
-    ImGui::SetNextWindowSize(ImVec2(540.0f, 385.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 560.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("Options", &g_showOptions,
@@ -881,8 +896,56 @@ static void DrawOptionsDialog()
             }
         }
 
+        // Tor and censorship: what Tor is doing, the automatic climb to
+        // bridges, and the user's own bridge lines for where the bundled
+        // ones are blocked too.
+        ImGui::SeparatorText("Tor & Censorship");
+        {
+            std::string mode = BtfTorTransportMode();
+            std::string boot = BtfManagedTorBootstrapLine();
+            std::string line = !BtfManagedTorEnabled() ? std::string("managed Tor is off")
+                             : mode == "direct" ? std::string("direct Tor")
+                             : mode == "user"   ? std::string("your bridges")
+                             : "bundled " + mode + " bridges";
+            if (!boot.empty() && BtfManagedTorBootstrapPercent() < 100)
+                line += ", Tor bootstrap " + boot;
+            ImGui::TextWrapped("Now: %s", line.c_str());
+        }
+        ImGui::Checkbox("Switch to bridges on my own when no peer is reached in four minutes", &g_torAutoBridges);
+        ImGui::Text("Your bridge lines (bridges.torproject.org, Telegram @GetBridgesBot):");
+        ImGui::InputTextMultiline("##bridgelines", g_bridgeText, sizeof(g_bridgeText), ImVec2(-1.0f, 64.0f));
+        if (ImGui::Button("Use bridges now")) {
+            std::string err;
+            if (std::string(g_bridgeText) != g_bridgeTextLoaded) {
+                if (BtfSaveUserBridges(g_bridgeText, err))
+                    g_bridgeTextLoaded = g_bridgeText;
+            }
+            if (err.empty() && BtfTryBridgesNow(err))
+                g_torActionMsg = "Tor is restarting with bridges; the onion stays the same.";
+            else
+                g_torActionMsg = err;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Forget what worked")) {
+            BtfForgetLastWorkingTransport();
+            g_torActionMsg = "Next start tries direct Tor first again.";
+        }
+        if (!g_torActionMsg.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+            ImGui::TextWrapped("%s", g_torActionMsg.c_str());
+            ImGui::PopStyleColor();
+        }
+
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         if (ImGui::Button("OK", ImVec2(90.0f, 0.0f))) {
+            if (std::string(g_bridgeText) != g_bridgeTextLoaded) {
+                std::string err;
+                if (BtfSaveUserBridges(g_bridgeText, err))
+                    g_bridgeTextLoaded = g_bridgeText;
+            }
+            if (g_torAutoBridges != (nTorBridgeFallbackSecs > 0))
+                BtfSetTorFallbackEnabled(g_torAutoBridges);
+
             int64 fee = 0;
             if (ParseMoney(feeStr, fee)) {
                 nTransactionFee = fee;

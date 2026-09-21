@@ -3319,8 +3319,8 @@ static int RunRulesV2SelfTest()
         tx.vin[0].scriptSig = CScript() << vchSig << key.GetPubKey();
         tx.vout[0].scriptPubKey = txFrom.vout[0].scriptPubKey;
         nFail += Check(tx.IsStandard(), "a wallet-shaped transaction is standard") ? 0 : 1;
-        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_RETURN << std::vector<unsigned char>(20, 0x42);
-        nFail += Check(!t2.IsStandard(), "an OP_RETURN output is not relayed") ? 0 : 1;
+        CTransaction t2 = tx; t2.vout[0].scriptPubKey = CScript() << OP_TRUE;
+        nFail += Check(!t2.IsStandard(), "an output of an unknown shape is not relayed") ? 0 : 1;
         CTransaction t3 = tx; t3.vout[0].scriptPubKey = CScript() << OP_1 << OP_CHECKSIG << OP_CHECKSIG;
         nFail += Check(!t3.IsStandard(), "an output built from bare operators is not relayed") ? 0 : 1;
         CTransaction t4 = tx; t4.vin[0].scriptSig = CScript() << OP_1 << OP_DROP << vchSig << key.GetPubKey();
@@ -4023,6 +4023,497 @@ static int RunSocks5ProxySelfTest()
     return nFail == 0 ? 0 : 1;
 }
 
+// Checksum framing, misbehavior and bans, DoS scores on blocks, the initial
+// block download gate, and confirmation depth in coin selection: the network
+// hardening Bitcoin picked up between 0.2 and 0.3.x, done here in one release.
+static unsigned int FirstFourOfHash(CDataStream::iterator begin, CDataStream::iterator end)
+{
+    uint256 hash = Hash(begin, end);
+    unsigned int n = 0;
+    memcpy(&n, &hash, sizeof(n));
+    return n;
+}
+
+static int RunNetHardeningSelfTest()
+{
+    printf("net-hardening self-test\n");
+    int nFail = 0;
+
+    // ---- framing: 20 bytes before the peer's version message, 24 after
+    {
+        nFail += Check(CMessageHeader::SizeOnWire(PROTO_NO_CHECKSUM_VERSION) == 20 &&
+                       CMessageHeader::SizeOnWire(PROTO_CHECKSUM_VERSION) == 24,
+                       "header is 20 bytes at protocol 101 and 24 at 102") ? 0 : 1;
+        CDataStream ssOld(SER_NETWORK, PROTO_NO_CHECKSUM_VERSION);
+        CDataStream ssNew(SER_NETWORK, PROTO_CHECKSUM_VERSION);
+        ssOld << CMessageHeader("inv", 0);
+        ssNew << CMessageHeader("inv", 0);
+        nFail += Check(ssOld.size() == 20 && ssNew.size() == 24,
+                       "serialization follows the stream version") ? 0 : 1;
+        nFail += Check(VERSION == PROTO_CHECKSUM_VERSION,
+                       "this build announces the checksum protocol") ? 0 : 1;
+    }
+
+    // ---- send side: a fresh node speaks 101 until told otherwise
+    CNode nodeOut(INVALID_SOCKET, CAddress());
+    {
+        CDataStream vHeader(nodeOut.vSend.begin(), nodeOut.vSend.begin() + 20,
+                            SER_NETWORK, PROTO_NO_CHECKSUM_VERSION);
+        CMessageHeader hdr;
+        vHeader >> hdr;
+        nFail += Check(hdr.GetCommand() == "version" && hdr.nMessageSize == nodeOut.vSend.size() - 20,
+                       "the version message leaves in 101 framing before anything is known") ? 0 : 1;
+    }
+    // ... and adds the checksum once the streams are at 102
+    std::vector<char> vGood;
+    {
+        nodeOut.vSend.clear();
+        nodeOut.vSend.SetVersion(PROTO_CHECKSUM_VERSION);
+        std::vector<CInv> vInv(1, CInv(MSG_TX, uint256(12345)));
+        nodeOut.PushMessage("inv", vInv);
+        bool fOk = nodeOut.vSend.size() > 24;
+        CMessageHeader hdr;
+        if (fOk)
+        {
+            CDataStream vHeader(nodeOut.vSend.begin(), nodeOut.vSend.begin() + 24,
+                                SER_NETWORK, PROTO_CHECKSUM_VERSION);
+            vHeader >> hdr;
+            fOk = hdr.GetCommand() == "inv" && hdr.nMessageSize == nodeOut.vSend.size() - 24;
+        }
+        nFail += Check(fOk, "a message at 102 carries the 24-byte header with the right size") ? 0 : 1;
+        nFail += Check(fOk && hdr.nChecksum == FirstFourOfHash(nodeOut.vSend.begin() + 24, nodeOut.vSend.end()),
+                       "its checksum is the first four bytes of Hash(payload)") ? 0 : 1;
+        nFail += Check(fOk && hdr.nChecksum != 0, "and it is not the zero the old header had there") ? 0 : 1;
+        vGood.assign(nodeOut.vSend.begin(), nodeOut.vSend.end());
+    }
+
+    // ---- receive side, through ProcessMessages() itself
+    {
+        CNode nodeIn(INVALID_SOCKET, CAddress());
+        nodeIn.vRecv.SetVersion(PROTO_CHECKSUM_VERSION);
+        nodeIn.vRecv.insert(nodeIn.vRecv.end(), &vGood[0], &vGood[0] + vGood.size());
+        ProcessMessages(&nodeIn);
+        nFail += Check(nodeIn.vRecv.empty() && nodeIn.nMisbehavior == 0,
+                       "a message with a good checksum is consumed and costs nothing") ? 0 : 1;
+
+        std::vector<char> vBad = vGood;
+        vBad[vBad.size() - 1] ^= 0x01;              // one payload bit
+        nodeIn.vRecv.insert(nodeIn.vRecv.end(), &vBad[0], &vBad[0] + vBad.size());
+        ProcessMessages(&nodeIn);
+        nFail += Check(nodeIn.vRecv.empty() && nodeIn.nMisbehavior == 20,
+                       "one flipped payload bit is caught, dropped, and costs 20 points") ? 0 : 1;
+
+        // a peer that never announced 102 still gets the 20-byte framing
+        CNode nodeOld(INVALID_SOCKET, CAddress());
+        nodeOld.vSend.clear();
+        std::vector<CInv> vInv(1, CInv(MSG_TX, uint256(777)));
+        nodeOld.PushMessage("inv", vInv);
+        CNode nodeOldIn(INVALID_SOCKET, CAddress());
+        nodeOldIn.vRecv.insert(nodeOldIn.vRecv.end(), nodeOld.vSend.begin(), nodeOld.vSend.end());
+        ProcessMessages(&nodeOldIn);
+        nFail += Check(nodeOld.vSend.size() == 20 + 1 + 36 && nodeOldIn.vRecv.empty() && nodeOldIn.nMisbehavior == 0,
+                       "101 framing still round-trips, so peers on 1.2.27 and earlier keep talking") ? 0 : 1;
+    }
+
+    // ---- misbehavior and bans
+    {
+        int nBannedBefore = BtfBannedCount();
+        CNode node(INVALID_SOCKET, CAddress());
+        node.strBtfAddr = "selftest-peer-to-ban";
+        bool fFirst = node.Misbehaving(50);
+        nFail += Check(!fFirst && !node.fDisconnect && node.nMisbehavior == 50,
+                       "50 points: noted, still connected") ? 0 : 1;
+        bool fSecond = node.Misbehaving(50);
+        nFail += Check(fSecond && node.fDisconnect,
+                       "100 points: disconnected") ? 0 : 1;
+        nFail += Check(BtfIsBanned("selftest-peer-to-ban") && BtfBannedCount() == nBannedBefore + 1,
+                       "and its .btf address will not be dialled for a day") ? 0 : 1;
+        nFail += Check(!BtfIsBanned("selftest-peer-innocent"),
+                       "other addresses are unaffected") ? 0 : 1;
+
+        CNode inbound(INVALID_SOCKET, CAddress(), true);
+        bool fDrop = inbound.Misbehaving(100);
+        nFail += Check(fDrop && inbound.fDisconnect && BtfBannedCount() == nBannedBefore + 1,
+                       "an inbound onion peer is dropped, and there is nothing to ban") ? 0 : 1;
+        nFail += Check(!node.Misbehaving(0) && node.nMisbehavior == 100,
+                       "zero points change nothing") ? 0 : 1;
+    }
+
+    // ---- DoS scores: what a block failure says about the peer that sent it
+    {
+        CBlock block;
+        CTransaction txCoinbase;
+        txCoinbase.vin.resize(1);
+        txCoinbase.vin[0].prevout.SetNull();
+        txCoinbase.vin[0].scriptSig = CScript() << 1 << 2;
+        txCoinbase.vout.push_back(CTxOut(1, CScript() << OP_TRUE));
+        block.vtx.push_back(txCoinbase);
+        block.nBits = bnProofOfWorkLimit.GetCompact();
+        block.nTime = GetAdjustedTime();
+        block.hashMerkleRoot = block.BuildMerkleTree();
+
+        int nDoS = -1;
+        CBlock bFuture = block;
+        bFuture.nTime = GetAdjustedTime() + 3 * 60 * 60;
+        nFail += Check(!bFuture.CheckBlock(&nDoS) && nDoS == 0,
+                       "a block from the future is refused and costs nothing: clocks differ") ? 0 : 1;
+
+        nDoS = -1;
+        CBlock bTwo = block;
+        bTwo.vtx.push_back(txCoinbase);
+        bTwo.hashMerkleRoot = bTwo.BuildMerkleTree();
+        nFail += Check(!bTwo.CheckBlock(&nDoS) && nDoS == 100,
+                       "two coinbases: 100, no honest node sends that") ? 0 : 1;
+
+        nDoS = -1;
+        CBlock bNoCoinbase = block;
+        bNoCoinbase.vtx[0].vin[0].prevout.hash = 1;
+        bNoCoinbase.hashMerkleRoot = bNoCoinbase.BuildMerkleTree();
+        nFail += Check(!bNoCoinbase.CheckBlock(&nDoS) && nDoS == 100,
+                       "first transaction not a coinbase: 100") ? 0 : 1;
+
+        nDoS = -1;
+        bool fPoW = block.CheckBlock(&nDoS);      // a random header does not meet even the floor
+        nFail += Check(!fPoW && nDoS == 50,
+                       "proof of work that does not match nBits: 50, two of those and it is out") ? 0 : 1;
+
+        // "already have" through ProcessBlock: useless, not malicious
+        nDoS = 0;
+        uint256 hash = block.GetHash();
+        CBlockIndex* pindexFake = new CBlockIndex();
+        mapBlockIndex[hash] = pindexFake;
+        CBlock* pblock = new CBlock(block);
+        bool fDup = ProcessBlock(NULL, pblock, &nDoS);
+        mapBlockIndex.erase(hash);
+        delete pindexFake;
+        delete pblock;
+        nFail += Check(!fDup && nDoS == 0, "a block we already have: refused, no points") ? 0 : 1;
+    }
+
+    // ---- initial block download: peers' heights decide, three blocks of slack
+    CBlockIndex* pindexBestSaved = pindexBest;
+    int nBestHeightSaved = nBestHeight;
+    {
+        CBlockIndex tip;
+        tip.nHeight = 100;
+        pindexBest = &tip;
+        nBestHeight = 100;
+        nFail += Check(!IsInitialBlockDownload(), "alone: not syncing, a lone node must still mine") ? 0 : 1;
+
+        CNode* peer = new CNode(INVALID_SOCKET, CAddress());
+        peer->nStartingHeight = 110;
+        CRITICAL_BLOCK(cs_vNodes)
+            vNodes.push_back(peer);
+        nFail += Check(IsInitialBlockDownload(), "a peer ten blocks ahead: syncing") ? 0 : 1;
+        peer->nStartingHeight = 102;
+        nFail += Check(!IsInitialBlockDownload(), "two blocks ahead is relay lag, not syncing") ? 0 : 1;
+        peer->nStartingHeight = 104;
+        nFail += Check(IsInitialBlockDownload(), "four blocks ahead is syncing") ? 0 : 1;
+        CRITICAL_BLOCK(cs_vNodes)
+            vNodes.erase(std::find(vNodes.begin(), vNodes.end(), peer));
+        delete peer;
+        pindexBest = NULL;
+        nFail += Check(IsInitialBlockDownload(), "no chain at all: syncing") ? 0 : 1;
+    }
+
+    // ---- coin selection: unconfirmed coins from others are not inputs
+    {
+        CKey key;
+        key.MakeNewKey();
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys[key.GetPubKey()] = key.GetPrivKey();
+            mapPubKeys[Hash160(key.GetPubKey())] = key.GetPubKey();
+        }
+        CScript scriptMine = CScript() << key.GetPubKey() << OP_CHECKSIG;
+
+        // a chain of three index entries: 90 -> 99 -> 100 (tip)
+        CBlockIndex idx90, idx99, idx100;
+        idx90.nHeight = 90;  idx99.nHeight = 99;  idx100.nHeight = 100;
+        idx90.pnext = &idx99; idx99.pnext = &idx100; idx99.pprev = &idx90; idx100.pprev = &idx99;
+        pindexBest = &idx100;
+        nBestHeight = 100;
+        uint256 h90(90), h99(99);
+        mapBlockIndex[h90] = &idx90;
+        mapBlockIndex[h99] = &idx99;
+
+        // T1: 5 from somebody else, 11 confirmations, already spent by T3
+        CWalletTx t1;
+        t1.vin.resize(1);
+        t1.vin[0].prevout.hash = 1000;
+        t1.vout.push_back(CTxOut(5 * COIN, scriptMine));
+        t1.hashBlock = h90; t1.nIndex = 0;
+        idx90.hashMerkleRoot = t1.GetHash();     // one-transaction block: root == txid
+        t1.fSpent = true;
+        // T2: 7 from somebody else, unconfirmed
+        CWalletTx t2;
+        t2.vin.resize(1);
+        t2.vin[0].prevout.hash = 2000;
+        t2.vout.push_back(CTxOut(7 * COIN, scriptMine));
+        // T3: our own change, 3, unconfirmed, spends T1
+        CWalletTx t3;
+        t3.vin.resize(1);
+        t3.vin[0].prevout = COutPoint(t1.GetHash(), 0);
+        t3.vout.push_back(CTxOut(3 * COIN, scriptMine));
+
+        CRITICAL_BLOCK(cs_mapWallet)
+        {
+            mapWallet.clear();
+            mapWallet[t1.GetHash()] = t1;
+            mapWallet[t2.GetHash()] = t2;
+            mapWallet[t3.GetHash()] = t3;
+        }
+        CWalletTx* pt2 = &mapWallet[t2.GetHash()];
+        CWalletTx* pt3 = &mapWallet[t3.GetHash()];
+        nFail += Check(pt3->GetDebit() > 0 && pt2->GetDebit() == 0 && pt2->GetDepthInMainChain() == 0,
+                       "the fixture reads as intended: T3 is ours, T2 is theirs and unconfirmed") ? 0 : 1;
+
+        std::set<CWalletTx*> setCoins;
+        bool fOk = SelectCoins(3 * COIN, setCoins);
+        nFail += Check(fOk && setCoins.size() == 1 && setCoins.count(pt3),
+                       "3 coins: our own unconfirmed change is used") ? 0 : 1;
+        fOk = SelectCoins(6 * COIN, setCoins);
+        nFail += Check(!fOk, "6 coins: refused rather than spend the unconfirmed 7 from somebody else") ? 0 : 1;
+
+        // T2 confirms twice
+        pt2->hashBlock = h99; pt2->nIndex = 0;
+        idx99.hashMerkleRoot = pt2->GetHash();
+        nFail += Check(pt2->GetDepthInMainChain() == 2, "T2 now has two confirmations") ? 0 : 1;
+        fOk = SelectCoins(6 * COIN, setCoins);
+        nFail += Check(fOk && setCoins.count(pt2), "6 coins: the confirmed 7 is now an input") ? 0 : 1;
+
+        mapBlockIndex.erase(h90);
+        mapBlockIndex.erase(h99);
+        CRITICAL_BLOCK(cs_mapWallet)
+            mapWallet.clear();
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(key.GetPubKey());
+            mapPubKeys.erase(Hash160(key.GetPubKey()));
+        }
+    }
+    pindexBest = pindexBestSaved;
+    nBestHeight = nBestHeightSaved;
+
+    printf("\n%s\n", nFail == 0 ? "ALL TESTS PASSED (0 failures)"
+                                 : strprintf("%d FAILURE(S)", nFail).c_str());
+    return nFail == 0 ? 0 : 1;
+}
+
+// Script shapes, the script address, bare multisig signed by one wallet and
+// by two halves combined, pay-to-script-hash signing against the redeem
+// script, and the relay policy around all of it -- everything 1.2.28 ships
+// ahead of the rules v3 switch that gives P2SH its meaning.
+static int RunMultisigSelfTest()
+{
+    printf("multisig self-test\n");
+    int nFail = 0;
+
+    // three keys, two in this wallet, one held elsewhere
+    CKey keyA, keyB, keyC;
+    keyA.MakeNewKey(); keyB.MakeNewKey(); keyC.MakeNewKey();
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        mapKeys[keyA.GetPubKey()] = keyA.GetPrivKey(); mapPubKeys[Hash160(keyA.GetPubKey())] = keyA.GetPubKey();
+        mapKeys[keyB.GetPubKey()] = keyB.GetPrivKey(); mapPubKeys[Hash160(keyB.GetPubKey())] = keyB.GetPubKey();
+    }
+    std::vector<std::vector<unsigned char> > keys;
+    keys.push_back(keyA.GetPubKey()); keys.push_back(keyB.GetPubKey()); keys.push_back(keyC.GetPubKey());
+
+    // ---- shapes
+    {
+        txnouttype t; std::vector<std::vector<unsigned char> > sol;
+        CScript p2pkh; p2pkh << OP_DUP << OP_HASH160 << Hash160(keyA.GetPubKey()) << OP_EQUALVERIFY << OP_CHECKSIG;
+        CScript p2pk; p2pk << keyA.GetPubKey() << OP_CHECKSIG;
+        CScript ms; ms.SetMultisig(2, keys);
+        CScript p2sh; p2sh.SetPayToScriptHash(ms);
+        nFail += Check(SolverTyped(p2pkh, t, sol) && t == TX_PUBKEYHASH && sol.size() == 1 && uint160(sol[0]) == Hash160(keyA.GetPubKey()),
+                       "pay-to-pubkey-hash is recognized with its hash") ? 0 : 1;
+        nFail += Check(SolverTyped(p2pk, t, sol) && t == TX_PUBKEY && sol[0] == keyA.GetPubKey(),
+                       "pay-to-pubkey is recognized with its key") ? 0 : 1;
+        nFail += Check(SolverTyped(ms, t, sol) && t == TX_MULTISIG && sol.size() == 5 && sol[0][0] == 2 && sol[4][0] == 3 && sol[2] == keyB.GetPubKey(),
+                       "2-of-3 multisig is recognized: m, the keys in order, n") ? 0 : 1;
+        nFail += Check(SolverTyped(p2sh, t, sol) && t == TX_SCRIPTHASH && uint160(sol[0]) == Hash160(ms) && p2sh.IsPayToScriptHash(),
+                       "pay-to-script-hash is recognized with the script hash") ? 0 : 1;
+        CScript bad; bad << OP_3 << keyA.GetPubKey() << keyB.GetPubKey() << OP_2 << OP_CHECKMULTISIG;
+        nFail += Check(!SolverTyped(bad, t, sol), "3-of-2 is not a multisig") ? 0 : 1;
+        CScript bad2; bad2 << OP_1 << std::vector<unsigned char>(20, 7) << OP_1 << OP_CHECKMULTISIG;
+        nFail += Check(!SolverTyped(bad2, t, sol), "a 20-byte push is not a key") ? 0 : 1;
+        CScript trailing = ms; trailing << OP_NOP;
+        nFail += Check(!SolverTyped(trailing, t, sol), "anything after OP_CHECKMULTISIG breaks the shape") ? 0 : 1;
+        nFail += Check(std::string(GetTxnOutputType(TX_MULTISIG)) == "multisig", "the type has a name") ? 0 : 1;
+
+        // ---- the script address
+        std::string strAddr = Hash160ToScriptAddress(Hash160(ms));
+        uint160 h; bool fScript = false;
+        nFail += Check(strAddr[0] == 'C' && DecodeAnyAddress(strAddr, h, fScript) && fScript && h == Hash160(ms),
+                       "a script address starts with C and decodes back to the script hash") ? 0 : 1;
+        nFail += Check(!AddressToHash160(strAddr, h), "the key-hash decoder refuses it") ? 0 : 1;
+        std::string strKeyAddr = PubKeyToAddress(keyA.GetPubKey());
+        nFail += Check(DecodeAnyAddress(strKeyAddr, h, fScript) && !fScript && h == Hash160(keyA.GetPubKey()),
+                       "a B address decodes as a key hash") ? 0 : 1;
+        nFail += Check(!RulesV3Active(GetAdjustedTime()) && RulesV3Time() == 0,
+                       "rules v3 are not scheduled: pay-to-script-hash is not live") ? 0 : 1;
+
+        // ---- IsMine and relay policy
+        nFail += Check(!IsMine(ms), "2-of-3 with one key elsewhere is not 'mine': the wallet cannot spend it alone... " ) ? 0 : 1;
+        std::vector<std::vector<unsigned char> > keysAB(keys.begin(), keys.begin() + 2);
+        CScript msAB; msAB.SetMultisig(2, keysAB);
+        nFail += Check(IsMine(msAB), "...but 2-of-2 with both keys here is") ? 0 : 1;
+        nFail += Check(!IsMine(p2sh), "the script hash of an unknown redeem script is not mine") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts[Hash160(msAB)] = msAB;
+        CScript p2shAB; p2shAB.SetPayToScriptHash(msAB);
+        nFail += Check(IsMine(p2shAB), "with the redeem script held and its keys ours, the script hash is mine") ? 0 : 1;
+
+        CTransaction txStd;
+        txStd.vin.resize(1);
+        txStd.vin[0].scriptSig = CScript() << std::vector<unsigned char>(72, 1);
+        txStd.vout.push_back(CTxOut(1 * COIN, ms));
+        nFail += Check(txStd.IsStandard(), "a bare 2-of-3 output is standard (relayed)") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > keys4 = keys; keys4.push_back(keyC.GetPubKey());
+        CScript ms4; ms4.SetMultisig(2, keys4);
+        txStd.vout[0].scriptPubKey = ms4;
+        nFail += Check(!txStd.IsStandard(), "four keys is not (relay policy, not validity)") ? 0 : 1;
+        txStd.vout[0].scriptPubKey = p2sh;
+        nFail += Check(!txStd.IsStandard(), "a pay-to-script-hash output is not relayed before rules v3") ? 0 : 1;
+        txStd.vout[0].scriptPubKey = p2pkh;
+        txStd.vin[0].scriptSig = CScript() << OP_0 << std::vector<unsigned char>(72, 1) << std::vector<unsigned char>(72, 2) << std::vector<unsigned char>(72, 3);
+        nFail += Check(txStd.IsStandard(), "a scriptSig with three signatures fits the relay limit") ? 0 : 1;
+
+        // ---- the burn: OP_RETURN
+        CScript burn; burn << OP_RETURN << std::vector<unsigned char>(32, 0xAB);
+        nFail += Check(SolverTyped(burn, t, sol) && t == TX_NULL_DATA && sol[0].size() == 32 && burn.IsNullData(),
+                       "OP_RETURN <32 bytes> is recognized as nulldata with its data") ? 0 : 1;
+        CScript burnBare; burnBare << OP_RETURN;
+        nFail += Check(burnBare.IsNullData() && SolverTyped(burnBare, t, sol) && t == TX_NULL_DATA && sol[0].empty(),
+                       "a bare OP_RETURN is nulldata too") ? 0 : 1;
+        CTransaction txSpend;
+        txSpend.vin.push_back(CTxIn(COutPoint(uint256(1), 0)));
+        txSpend.vin[0].scriptSig = CScript() << std::vector<unsigned char>(72, 1);
+        txSpend.vout.push_back(CTxOut(1, burn));
+        nFail += Check(!EvalScript(txSpend.vin[0].scriptSig + CScript(OP_CODESEPARATOR) + burn, txSpend, 0),
+                       "and no scriptSig can spend it: the coins are gone") ? 0 : 1;
+        txStd.vout.push_back(CTxOut(1 * COIN / 1000, burn));
+        nFail += Check(txStd.IsStandard(), "a transaction with one burn output is relayed") ? 0 : 1;
+        txStd.vout.push_back(CTxOut(0, burnBare));
+        nFail += Check(!txStd.IsStandard(), "two OP_RETURN outputs are not") ? 0 : 1;
+        txStd.vout.pop_back();
+        CScript burnBig; burnBig << OP_RETURN << std::vector<unsigned char>(81, 1);
+        txStd.vout.back().scriptPubKey = burnBig;
+        nFail += Check(!txStd.IsStandard(), "81 bytes of data is over the relay limit") ? 0 : 1;
+        CScript burn80; burn80 << OP_RETURN << std::vector<unsigned char>(80, 1);
+        txStd.vout.back().scriptPubKey = burn80;
+        nFail += Check(txStd.IsStandard(), "80 bytes is exactly the limit") ? 0 : 1;
+        CScript burnTwoPush; burnTwoPush << OP_RETURN << std::vector<unsigned char>(4, 1) << std::vector<unsigned char>(4, 2);
+        nFail += Check(!burnTwoPush.IsNullData(), "OP_RETURN with two pushes is not the shape") ? 0 : 1;
+        txStd.vout.pop_back();
+    }
+
+    // ---- spending a bare 2-of-3
+    CScript ms; ms.SetMultisig(2, keys);
+    CTransaction txFrom;
+    txFrom.vout.push_back(CTxOut(10 * COIN, ms));
+    CTransaction txTo;
+    txTo.vin.push_back(CTxIn(COutPoint(txFrom.GetHash(), 0)));
+    txTo.vout.push_back(CTxOut(9 * COIN, CScript() << keyA.GetPubKey() << OP_CHECKSIG));
+    {
+        CTransaction t1 = txTo;
+        nFail += Check(SignSignature(txFrom, t1, 0), "the wallet with two of the keys signs a 2-of-3 in one go") ? 0 : 1;
+        nFail += Check(VerifySignature(txFrom, t1, 0, 0, true), "and the spend verifies under the strict rules") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > pushes;
+        CScript::const_iterator pc = t1.vin[0].scriptSig.begin(); opcodetype op; std::vector<unsigned char> vch;
+        while (pc < t1.vin[0].scriptSig.end() && t1.vin[0].scriptSig.GetOp(pc, op, vch)) pushes.push_back(vch);
+        nFail += Check(pushes.size() == 3 && pushes[0].empty(), "scriptSig is OP_0 then exactly two signatures") ? 0 : 1;
+        nFail += Check(t1.IsStandard(), "the spend is standard") ? 0 : 1;
+
+        // two halves: A alone, then C (elsewhere) alone, combined
+        CTransaction tA = txTo, tC = txTo;
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyB.GetPubKey()); mapPubKeys.erase(Hash160(keyB.GetPubKey()));
+        }
+        uint256 hash = SignatureHash(ms, txTo, 0, SIGHASH_ALL);
+        CScript sigA;
+        bool fA = Solver(ms, hash, SIGHASH_ALL, sigA);
+        nFail += Check(!fA, "one key of two required: the solver reports incomplete") ? 0 : 1;
+        tA.vin[0].scriptSig = sigA;
+        nFail += Check(!VerifyScriptP2SH(tA.vin[0].scriptSig, ms, tA, 0), "and the half-signed input does not verify") ? 0 : 1;
+        // now only C
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyA.GetPubKey()); mapPubKeys.erase(Hash160(keyA.GetPubKey()));
+            mapKeys[keyC.GetPubKey()] = keyC.GetPrivKey(); mapPubKeys[Hash160(keyC.GetPubKey())] = keyC.GetPubKey();
+        }
+        CScript sigC;
+        Solver(ms, hash, SIGHASH_ALL, sigC);
+        CScript combined = CombineMultisig(ms, txTo, 0, sigA, sigC);
+        tC.vin[0].scriptSig = combined;
+        nFail += Check(VerifyScriptP2SH(tC.vin[0].scriptSig, ms, tC, 0) && VerifySignature(txFrom, tC, 0, 0, true),
+                       "A's half and C's half combined verify: co-signing across two wallets works") ? 0 : 1;
+        CScript again = CombineMultisig(ms, txTo, 0, combined, sigA);
+        nFail += Check(again == combined, "combining again with a half already in is a no-op") ? 0 : 1;
+        // signatures in wrong key order are put right
+        CScript reversed; reversed << OP_0;
+        {
+            std::vector<std::vector<unsigned char> > pv;
+            CScript::const_iterator pc2 = combined.begin();
+            while (pc2 < combined.end() && combined.GetOp(pc2, op, vch)) if (!vch.empty()) pv.push_back(vch);
+            for (size_t i = pv.size(); i-- > 0;) reversed << pv[i];
+        }
+        CTransaction tR = txTo; tR.vin[0].scriptSig = reversed;
+        nFail += Check(!VerifyScriptP2SH(tR.vin[0].scriptSig, ms, tR, 0), "signatures out of key order do not verify (CHECKMULTISIG is ordered)") ? 0 : 1;
+        tR.vin[0].scriptSig = CombineMultisig(ms, txTo, 0, reversed, CScript());
+        nFail += Check(VerifyScriptP2SH(tR.vin[0].scriptSig, ms, tR, 0), "CombineMultisig puts them in key order") ? 0 : 1;
+        // restore A and B for the P2SH part
+        CRITICAL_BLOCK(cs_mapKeys)
+        {
+            mapKeys.erase(keyC.GetPubKey()); mapPubKeys.erase(Hash160(keyC.GetPubKey()));
+            mapKeys[keyA.GetPubKey()] = keyA.GetPrivKey(); mapPubKeys[Hash160(keyA.GetPubKey())] = keyA.GetPubKey();
+            mapKeys[keyB.GetPubKey()] = keyB.GetPrivKey(); mapPubKeys[Hash160(keyB.GetPubKey())] = keyB.GetPubKey();
+        }
+    }
+
+    // ---- pay-to-script-hash: signing against the redeem script
+    {
+        CScript p2sh; p2sh.SetPayToScriptHash(ms);
+        CTransaction txFromS;
+        txFromS.vout.push_back(CTxOut(10 * COIN, p2sh));
+        CTransaction t = txTo;
+        t.vin[0].prevout = COutPoint(txFromS.GetHash(), 0);
+        nFail += Check(!SignSignature(txFromS, t, 0), "without the redeem script the wallet cannot sign for the hash") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts[Hash160(ms)] = ms;
+        nFail += Check(SignSignature(txFromS, t, 0), "with it, it signs") ? 0 : 1;
+        std::vector<std::vector<unsigned char> > pushes;
+        CScript::const_iterator pc = t.vin[0].scriptSig.begin(); opcodetype op; std::vector<unsigned char> vch;
+        while (pc < t.vin[0].scriptSig.end() && t.vin[0].scriptSig.GetOp(pc, op, vch)) pushes.push_back(vch);
+        nFail += Check(pushes.size() == 4 && pushes[0].empty() && CScript(pushes[3].begin(), pushes[3].end()) == ms,
+                       "scriptSig is OP_0, two signatures, then the redeem script as one push") ? 0 : 1;
+        nFail += Check(VerifyScriptP2SH(t.vin[0].scriptSig, p2sh, t, 0),
+                       "the rules v3 check runs the redeem script and accepts the spend") ? 0 : 1;
+        CTransaction tBad = t;
+        tBad.vin[0].scriptSig = CScript() << static_cast<std::vector<unsigned char> >(ms);
+        nFail += Check(VerifySignature(txFromS, tBad, 0, 0, true) && !VerifyScriptP2SH(tBad.vin[0].scriptSig, p2sh, tBad, 0),
+                       "today's rule accepts the script alone (anyone-can-spend); the rules v3 check refuses it") ? 0 : 1;
+        CScript other; other.SetMultisig(1, keys);
+        tBad.vin[0].scriptSig = CScript() << OP_0 << pushes[1] << static_cast<std::vector<unsigned char> >(other);
+        nFail += Check(!VerifyScriptP2SH(tBad.vin[0].scriptSig, p2sh, tBad, 0), "a different script than the hash names is refused") ? 0 : 1;
+        CRITICAL_BLOCK(cs_mapKeys)
+            mapScripts.clear();
+    }
+
+    CRITICAL_BLOCK(cs_mapKeys)
+    {
+        mapKeys.erase(keyA.GetPubKey()); mapPubKeys.erase(Hash160(keyA.GetPubKey()));
+        mapKeys.erase(keyB.GetPubKey()); mapPubKeys.erase(Hash160(keyB.GetPubKey()));
+    }
+
+    printf("\n%s\n", nFail == 0 ? "ALL TESTS PASSED (0 failures)"
+                                 : strprintf("%d FAILURE(S)", nFail).c_str());
+    return nFail == 0 ? 0 : 1;
+}
+
 static int RunManagedTorSelfTest()
 {
     printf("managed-tor self-test\n");
@@ -4083,6 +4574,96 @@ static int RunManagedTorSelfTest()
     nFail += Check(BtfManagedTorStatus() == "disabled",
                    "managed Tor starts disabled") ? 0 : 1;
 
+    // Bridge fallback policy: on by default, four minutes, and the transports
+    // are looked up beside the Tor we were pointed at as well as beside us.
+    nFail += Check(nTorBridgeFallbackSecs == 4 * 60,
+                   "bridge fallback defaults to four minutes") ? 0 : 1;
+    nFail += Check(!BtfTorBridgesConfigured(),
+                   "no bridges configured until asked") ? 0 : 1;
+    {
+        std::string tmp;
+        if (MakeTempDir(tmp))
+        {
+            std::string torDir = tmp + "/tordir";
+            std::string ptDir = torDir + "/pluggable_transports";
+            MakeDirLocal(torDir);
+            MakeDirLocal(ptDir);
+#ifdef _WIN32
+            std::string ptFile = ptDir + "/lyrebird.exe";
+#else
+            std::string ptFile = ptDir + "/lyrebird";
+#endif
+            WriteTextFile(ptFile, "#!/bin/sh\n");
+#ifndef _WIN32
+            chmod(ptFile.c_str(), 0755);
+#endif
+            std::string found;
+            BtfSetManagedTorPath(torDir + "/tor");
+            nFail += Check(BtfResolveSnowflakePath(found) && found == ptFile,
+                           "finds the transport next to the managed Tor binary") ? 0 : 1;
+            nFail += Check(BtfResolveObfs4Path(found) && found == ptFile,
+                           "lyrebird serves obfs4 too") ? 0 : 1;
+            nFail += Check(BtfResolveTransportPath("webtunnel", found) && found == ptFile &&
+                           BtfResolveTransportPath("meek_lite", found) && found == ptFile,
+                           "webtunnel and meek_lite resolve to lyrebird") ? 0 : 1;
+            nFail += Check(!BtfResolveTransportPath("conjure", found),
+                           "conjure needs its own client, absent here") ? 0 : 1;
+
+            // The ladder without pt_config.json: the built-in Snowflake set.
+            std::vector<BtfBridgeRung> rungs = BtfBundledBridgeRungs();
+            nFail += Check(rungs.size() == 1 && rungs[0].name == "snowflake" && rungs[0].lines.size() == 2,
+                           "without pt_config.json the ladder is the built-in Snowflake rung") ? 0 : 1;
+
+            // With Tor Browser's pt_config.json beside the transports: rungs
+            // in survival order, conjure left out, meek's transport meek_lite.
+            WriteTextFile(ptDir + "/pt_config.json",
+                "{\"bridges\":{\"meek\":[\"meek_lite 192.0.2.20:80 url=https://x front=y\"],"
+                "\"obfs4\":[\"obfs4 10.0.0.1:443 AAAA cert=BBBB iat-mode=0\",\"obfs4 10.0.0.2:443 CCCC cert=DDDD iat-mode=0\"],"
+                "\"snowflake\":[\"snowflake 192.0.2.3:80 EEEE url=https://b/\"],"
+                "\"conjure\":[\"conjure 192.0.2.5:80 FFFF\"],"
+                "\"webtunnel\":[\"webtunnel [2001:db8::1]:443 GGGG url=https://w/ ver=0.0.1\"]}}");
+            rungs = BtfBundledBridgeRungs();
+            nFail += Check(rungs.size() == 4 && rungs[0].name == "snowflake" && rungs[1].name == "obfs4" &&
+                           rungs[2].name == "webtunnel" && rungs[3].name == "meek",
+                           "pt_config.json rungs come in survival order, conjure left out") ? 0 : 1;
+            nFail += Check(rungs.size() == 4 && rungs[1].lines.size() == 2 &&
+                           rungs[0].lines[0] == "snowflake 192.0.2.3:80 EEEE url=https://b/",
+                           "rung lines are the file's lines") ? 0 : 1;
+            nFail += Check(BtfDefaultBridges().size() == 2,
+                           "-torbridges keeps the built-in Snowflake set") ? 0 : 1;
+            remove((ptDir + "/pt_config.json").c_str());
+
+            // Bridge lines as people paste them.
+            std::vector<std::string> lines = BtfParseBridgeLines(
+                "# from the bot\r\n  Bridge obfs4 1.2.3.4:1 AAAA cert=x iat-mode=0  \n\nsnowflake 192.0.2.3:80 BBBB\nbridge webtunnel [::1]:443 CC\n");
+            nFail += Check(lines.size() == 3 && lines[0] == "obfs4 1.2.3.4:1 AAAA cert=x iat-mode=0" &&
+                           lines[1] == "snowflake 192.0.2.3:80 BBBB" && lines[2] == "webtunnel [::1]:443 CC",
+                           "parses pasted bridge lines: comments, blanks, CRLF, Bridge prefix") ? 0 : 1;
+
+            // Configuring: a transport without a binary is refused whole.
+            std::string cfgErr;
+            nFail += Check(!BtfConfigureBridges(std::vector<std::string>(1, "conjure 192.0.2.5:80 FFFF"), "user", cfgErr) &&
+                           cfgErr.find("conjure") != std::string::npos,
+                           "refuses a bridge whose transport binary is missing") ? 0 : 1;
+            nFail += Check(!BtfTorBridgesConfigured() && BtfTorTransportMode() == "direct",
+                           "a refused configuration leaves the mode direct") ? 0 : 1;
+            nFail += Check(BtfConfigureBridges(lines, "user", cfgErr) && BtfTorBridgesConfigured() &&
+                           BtfTorTransportMode() == "user",
+                           "configures the pasted lines under mode user") ? 0 : 1;
+            BtfSetTorBridges(std::vector<std::string>(), std::map<std::string, std::string>());
+            nFail += Check(BtfTorTransportMode() == "direct",
+                           "no bridges means direct") ? 0 : 1;
+
+            BtfSetManagedTorPath("");
+            remove(ptFile.c_str());
+            rmdir(ptDir.c_str());
+            rmdir(torDir.c_str());
+            rmdir(tmp.c_str());
+        }
+        else
+            nFail += Check(false, "temp dir for the transport lookup") ? 0 : 1;
+    }
+
     printf("%s (%d failure%s)\n", nFail == 0 ? "ALL TESTS PASSED" : "TESTS FAILED",
            nFail, nFail == 1 ? "" : "s");
     fflush(stdout);
@@ -4139,12 +4720,16 @@ int RunSelfTest(const std::string& name)
         return RunScriptEvalSelfTest();
     if (name == "rules-v2")
         return RunRulesV2SelfTest();
+    if (name == "net-hardening")
+        return RunNetHardeningSelfTest();
+    if (name == "multisig")
+        return RunMultisigSelfTest();
     if (name == "socks5-proxy")
         return RunSocks5ProxySelfTest();
     if (name == "managed-tor")
         return RunManagedTorSelfTest();
 
     printf("Unknown self-test '%s'\n", name.c_str());
-    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, socks5-proxy, managed-tor\n");
+    printf("Known self-tests: wallet-keypool, wallet-hd, wallet-format, wallet-storage-sanity, db-env-reopen, wallet-sqlite, wallet-sqlite-migration, wallet-crypto, wallet-encrypt, wallet-sqlite-encrypt, wallet-backend-default, wallet-convert, wallet-portability, net-message, network-params, consensus-limits, pool-stratum, parse-money, debug-log-buffer, pow-v2, sigpipe, script-eval, rules-v2, net-hardening, multisig, socks5-proxy, managed-tor\n");
     return 1;
 }

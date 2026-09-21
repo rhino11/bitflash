@@ -606,6 +606,64 @@ public:
     }
 
 
+    // OP_HASH160 <20 bytes> OP_EQUAL: pay-to-script-hash (BIP16). Recognized
+    // here from 1.2.28 so the wallet can hold and sign for such outputs; the
+    // spending rule itself (the serialized script is run, not just hashed)
+    // arrives with the rules v3 switch. Until then an output of this shape is
+    // anyone-can-spend on this network, and the wallet refuses to pay to one.
+    // OP_RETURN alone, or OP_RETURN followed by exactly one push
+    bool IsNullData() const
+    {
+        if (empty() || (*this)[0] != OP_RETURN)
+            return false;
+        if (size() == 1)
+            return true;
+        const_iterator pc = begin() + 1;
+        opcodetype opcode;
+        vector<unsigned char> vch;
+        if (!GetOp(pc, opcode, vch) || opcode > OP_PUSHDATA4)
+            return false;
+        return pc == end();
+    }
+
+    bool IsPayToScriptHash() const
+    {
+        return size() == 23 && (*this)[0] == OP_HASH160 && (*this)[1] == 0x14 && (*this)[22] == OP_EQUAL;
+    }
+
+    // m <key1> ... <keyn> n OP_CHECKMULTISIG
+    void SetMultisig(int nRequired, const std::vector<std::vector<unsigned char> >& keys)
+    {
+        clear();
+        *this << EncodeOP_N(nRequired);
+        for (size_t i = 0; i < keys.size(); i++)
+            *this << keys[i];
+        *this << EncodeOP_N((int)keys.size()) << OP_CHECKMULTISIG;
+    }
+
+    void SetPayToScriptHash(const CScript& subscript)
+    {
+        uint160 hash = Hash160(subscript);
+        clear();
+        *this << OP_HASH160 << hash << OP_EQUAL;
+    }
+
+    static opcodetype EncodeOP_N(int n)
+    {
+        assert(n >= 0 && n <= 16);
+        if (n == 0)
+            return OP_0;
+        return (opcodetype)(OP_1 + n - 1);
+    }
+
+    static int DecodeOP_N(opcodetype opcode)
+    {
+        if (opcode == OP_0)
+            return 0;
+        assert(opcode >= OP_1 && opcode <= OP_16);
+        return (int)opcode - (int)(OP_1 - 1);
+    }
+
     void PrintHex() const
     {
         printf("CScript(%s)\n", HexStr(begin(), end()).c_str());
@@ -649,6 +707,42 @@ bool EvalScript(const CScript& script, const CTransaction& txTo, unsigned int nI
 bool IsStrictDERSignature(const vector<unsigned char>& vchSig);
 bool IsLowSSignature(const vector<unsigned char>& vchSig);
 uint256 SignatureHash(CScript scriptCode, const CTransaction& txTo, unsigned int nIn, int nHashType);
+bool CheckSig(vector<unsigned char> vchSig, vector<unsigned char> vchPubKey, CScript scriptCode,
+              const CTransaction& txTo, unsigned int nIn, int nHashType, bool fStrictSigs);
+// What VerifySignature() will require from rules v3 on, usable today for "is
+// this transaction complete": the scriptSig is push-only and satisfies the
+// scriptPubKey; if the scriptPubKey is pay-to-script-hash, the last push is
+// the redeem script, hashes to it, and the pushes before it satisfy it.
+bool VerifyScriptP2SH(const CScript& scriptSig, const CScript& scriptPubKey, const CTransaction& txTo, unsigned int nIn);
+// Merge two partial multisig scriptSigs (bare, or the inner part of a P2SH
+// spend) for the same input: every signature from either that verifies
+// against one of the keys is kept, in key order, up to nRequired.
+CScript CombineMultisig(const CScript& scriptCode, const CTransaction& txTo, unsigned int nIn,
+                        const CScript& sigA, const CScript& sigB);
+// The output shapes this code understands. TX_PUBKEY and TX_PUBKEYHASH are
+// what the network has used since genesis; TX_MULTISIG (bare m-of-n) has been
+// valid since genesis too and is relayed from 1.2.28 on; TX_SCRIPTHASH is
+// recognized so the wallet can prepare for it, and enforced from rules v3.
+enum txnouttype
+{
+    TX_NONSTANDARD,
+    TX_PUBKEY,
+    TX_PUBKEYHASH,
+    TX_SCRIPTHASH,
+    TX_MULTISIG,
+    // OP_RETURN <data>: provably unspendable, the coins are gone. The
+    // burn stamp of btfchat (docs/btfchat.md); up to 80 bytes of data.
+    TX_NULL_DATA,
+};
+static const unsigned int MAX_OP_RETURN_RELAY = 80;
+const char* GetTxnOutputType(txnouttype t);
+// vSolutionsRet: TX_PUBKEY [pubkey]; TX_PUBKEYHASH [hash160]; TX_SCRIPTHASH
+// [hash160]; TX_MULTISIG [m, key1..keyn, n] with m and n as one-byte vectors.
+bool SolverTyped(const CScript& scriptPubKey, txnouttype& typeRet, vector<vector<unsigned char> >& vSolutionsRet);
+// The redeem script the wallet holds for a script hash, if any (main.cpp).
+bool GetWalletCScript(const uint160& hash, CScript& scriptRet);
+// scriptSig for a scriptPubKey we can sign for (hash 0: only ask whether we could)
+bool Solver(const CScript& scriptPubKey, uint256 hash, int nHashType, CScript& scriptSigRet);
 bool IsMine(const CScript& scriptPubKey);
 bool ExtractPubKey(const CScript& scriptPubKey, bool fMineOnly, vector<unsigned char>& vchPubKeyRet);
 bool ExtractHash160(const CScript& scriptPubKey, uint160& hash160Ret);

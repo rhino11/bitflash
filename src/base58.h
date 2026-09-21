@@ -154,6 +154,10 @@ inline bool DecodeBase58Check(const string& str, vector<unsigned char>& vchRet)
 
 // Version 25 (0x19): Bitflash addresses start with "B"
 static const unsigned char ADDRESSVERSION = 25;
+// Version 28 (0x1C): pay-to-script-hash addresses start with "C". Same byte on
+// testnet, like the key-hash one. Decoded from 1.2.28 on; paid to only once
+// the rules v3 switch has happened on the network in question.
+static const unsigned char SCRIPT_ADDRESSVERSION = 28;
 
 inline string Hash160ToAddress(uint160 hash160)
 {
@@ -182,6 +186,28 @@ inline bool AddressToHash160(const char* psz, uint160& hash160Ret)
 inline bool AddressToHash160(const string& str, uint160& hash160Ret)
 {
     return AddressToHash160(str.c_str(), hash160Ret);
+}
+
+inline string Hash160ToScriptAddress(uint160 hash160)
+{
+    vector<unsigned char> vch(1, SCRIPT_ADDRESSVERSION);
+    vch.insert(vch.end(), UBEGIN(hash160), UEND(hash160));
+    return EncodeBase58Check(vch);
+}
+
+// Either kind of address. fScriptRet says which.
+inline bool DecodeAnyAddress(const string& str, uint160& hash160Ret, bool& fScriptRet)
+{
+    vector<unsigned char> vch;
+    if (!DecodeBase58Check(str.c_str(), vch))
+        return false;
+    if (vch.size() != sizeof(hash160Ret) + 1)
+        return false;
+    if (vch[0] != ADDRESSVERSION && vch[0] != SCRIPT_ADDRESSVERSION)
+        return false;
+    fScriptRet = (vch[0] == SCRIPT_ADDRESSVERSION);
+    memcpy(&hash160Ret, &vch[1], sizeof(hash160Ret));
+    return true;
 }
 
 inline bool IsValidBitcoinAddress(const char* psz)
