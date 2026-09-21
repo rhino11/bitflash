@@ -5,6 +5,7 @@
 #include "proxy.h"
 #include "selftest.h"
 #include "tor.h"
+#include "treasury.h"
 #include "walletcmd.h"
 #include "jsonrpc.h"
 #include <thread>          // hardware_concurrency, to sanity-check /genproclimit
@@ -134,10 +135,13 @@ static void PrintUsage()
     printf("  /nolargepages              (do not ask for 2 MB pages for the RandomX\n");
     printf("                              cache, dataset and scratchpads)\n");
     printf("  /checkblocks=N             (blocks re-verified at startup, default 288, 0 = all)\n");
+    printf("  /treasuryshare=PCT         (solo: this percent of every block mined here goes to the\n");
+    printf("                              Bitflash treasury in the coinbase; 0-50, default 0)\n");
     printf("\n");
     printf("Pool operator announcement:\n");
     printf("  /poolname=NAME\n");
     printf("  /poolfee=PCT\n");
+    printf("  /poolfeeto=treasury        (pay the pool fee to the Bitflash treasury instead of keeping it)\n");
     printf("  /pooldashboard=URL  (alias: /pooldash=URL)\n");
     printf("  /poolstatusfile=PATH       (write pool status JSON for dashboards)\n");
     printf("  /poolroundsfile=PATH       (write public pool round proofs JSON)\n");
@@ -333,6 +337,29 @@ static void ParseStartupArguments(int argc, char* argv[])
     string poolFee = argval2(argc, argv, "/poolfee", "-poolfee");
     if (!poolFee.empty())
         dPoolFeePercent = atof(poolFee.c_str());
+
+    string poolFeeTo = argval2(argc, argv, "/poolfeeto", "-poolfeeto");
+    if (!poolFeeTo.empty())
+    {
+        if (poolFeeTo != "treasury" && poolFeeTo != "operator")
+        {
+            printf("-poolfeeto: 'treasury' or 'operator', not '%s'\n", poolFeeTo.c_str());
+            return 1;
+        }
+        fPoolFeeToTreasury = poolFeeTo == "treasury";
+    }
+
+    string treasuryShare = argval2(argc, argv, "/treasuryshare", "-treasuryshare");
+    if (!treasuryShare.empty())
+    {
+        int n = atoi(treasuryShare.c_str());
+        if (n < 0 || n > treasury::SHARE_MAX_PERCENT)
+        {
+            printf("-treasuryshare: 0 to %d percent, not '%s'\n", treasury::SHARE_MAX_PERCENT, treasuryShare.c_str());
+            return 1;
+        }
+        nTreasurySharePercent = n;
+    }
 
     string poolStatusFile = argval2(argc, argv, "/poolstatusfile", "-poolstatusfile");
     if (!poolStatusFile.empty())

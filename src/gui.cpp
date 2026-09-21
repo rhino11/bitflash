@@ -23,6 +23,7 @@
 #include "bip32.h"
 #include "walletcmd.h"
 #include "tor.h"
+#include "treasury.h"
 #include "font_roboto.h"
 
 // ---------------------------------------------------------------------------
@@ -77,6 +78,8 @@ static bool        g_walletSafetyLoaded   = false;
 static char        g_participantPool[256] = {};
 static char        g_poolName[128]        = {};
 static char        g_poolFee[32]          = {};
+static int         g_treasuryShare        = 0;
+static bool        g_poolFeeToTreasury    = false;
 static char        g_poolDash[256]        = {};
 static int         g_mineRadio            = 0;
 static bool        g_torAutoBridges       = true;
@@ -752,6 +755,14 @@ static void DrawSendDialog()
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
     {
         ImGui::Text("Recipient address:");
+        if (treasury::Configured()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Donate to the Bitflash treasury"))
+                snprintf(g_sendAddr, sizeof(g_sendAddr), "treasury");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Fills in the treasury: a 2-of-3 multisig that pays for the exchange listing.\n"
+                                  "Its balance and every movement are public at %s", treasury::PAGE);
+        }
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##sa", g_sendAddr, sizeof(g_sendAddr));
 
@@ -768,14 +779,18 @@ static void DrawSendDialog()
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         if (ImGui::Button("Send", ImVec2(90.0f, 0.0f))) {
             uint160 h; int64 nv = 0;
-            if (!AddressToHash160(g_sendAddr, h))
+            CScript sc;
+            bool fTreasury = std::string(g_sendAddr) == "treasury";
+            if (fTreasury ? !treasury::Script(sc) : !AddressToHash160(g_sendAddr, h))
                 g_sendStatus = "Invalid address.";
             else if (!ParseMoney(g_sendAmount, nv) || nv <= 0)
                 g_sendStatus = "Invalid amount.";
             else {
-                CScript sc;
-                sc << OP_DUP << OP_HASH160 << h << OP_EQUALVERIFY << OP_CHECKSIG;
+                if (!fTreasury)
+                    sc << OP_DUP << OP_HASH160 << h << OP_EQUALVERIFY << OP_CHECKSIG;
                 CWalletTx wtx;
+                if (fTreasury)
+                    wtx.mapValue["comment"] = "Donation to the Bitflash treasury";
                 if (SendMoney(sc, nv, wtx)) {
                     g_showSend = false;
                     g_sendStatus = "";
@@ -810,6 +825,8 @@ static void DrawOptionsDialog()
         strncpy(g_poolName, strPoolName.c_str(), sizeof(g_poolName)-1);
         snprintf(g_poolFee, sizeof(g_poolFee), "%.2f", dPoolFeePercent);
         strncpy(g_poolDash, strPoolDashboardUrl.c_str(), sizeof(g_poolDash)-1);
+        g_treasuryShare = nTreasurySharePercent;
+        g_poolFeeToTreasury = fPoolFeeToTreasury;
         g_torAutoBridges = nTorBridgeFallbackSecs > 0;
         {
             std::vector<std::string> lines = BtfLoadUserBridges();
@@ -852,6 +869,17 @@ static void DrawOptionsDialog()
             if (ImGui::SmallButton("Backup now")) g_showWalletSafety = true;
         }
 
+        if (g_mineRadio == MINE_SOLO && treasury::Configured()) {
+            ImGui::Spacing();
+            ImGui::Text("Share of each block to the Bitflash treasury:");
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SliderInt("##treasuryshare", &g_treasuryShare, 0, treasury::SHARE_MAX_PERCENT, "%d %%");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Paid in the coinbase of every block you find, so the block is worth\n"
+                                  "exactly what it was and the share is on the chain for everyone to see.\n"
+                                  "The treasury is a 2-of-3 multisig; no one key spends it.\n%s", treasury::PAGE);
+        }
+
         if (g_mineRadio == MINE_OPERATOR) {
             ImGui::Spacing();
             ImGui::SeparatorText("Pool Announcement");
@@ -861,6 +889,13 @@ static void DrawOptionsDialog()
             ImGui::Text("Fee %%:");
             ImGui::SetNextItemWidth(120.0f);
             ImGui::InputText("##poolfee", g_poolFee, sizeof(g_poolFee));
+            if (treasury::Configured()) {
+                ImGui::SameLine();
+                ImGui::Checkbox("goes to the Bitflash treasury", &g_poolFeeToTreasury);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The fee is paid to the treasury's 2-of-3 multisig with every payout\n"
+                                      "round instead of staying in this wallet. Shown on %s", treasury::PAGE);
+            }
             ImGui::Text("Dashboard URL:");
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##pooldash", g_poolDash, sizeof(g_poolDash));
@@ -963,6 +998,8 @@ static void DrawOptionsDialog()
             strPoolName          = g_poolName[0] ? g_poolName : "Bitflash Pool";
             strPoolDashboardUrl  = g_poolDash;
             dPoolFeePercent      = atof(g_poolFee);
+            nTreasurySharePercent = g_treasuryShare;
+            fPoolFeeToTreasury    = g_poolFeeToTreasury;
 
             if (nMineMode == MINE_OPERATOR && poolChanged) gAnnounceNow = true;
 

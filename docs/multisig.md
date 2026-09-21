@@ -48,6 +48,10 @@ Proven on testnet 2026-09-17: 1 BTF into a 2-of-3 (one key in the bench
 wallet, two outside), spent with the wallet's half plus one outside key,
 0.99 back, both transactions mined (heights 4343 and 4346).
 
+The treasury is one of these: a 2-of-3 whose keys are compiled into the node,
+paid by the word `treasury` wherever an address is taken, and spent exactly as
+above by two of its holders. `docs/treasury.md`.
+
 ## What waits: pay-to-script-hash
 
 `createmultisig` and `addmultisigaddress` also give a `C...` address: the

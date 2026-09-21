@@ -10,6 +10,7 @@
 #undef snprintf
 #endif
 #include "headers.h"
+#include "treasury.h"
 #include "sha.h"
 #include "proxy.h"      // BtfConnectSocket: dial the pool over its Tor onion
 #include "sockcount.h"  // SOCK_ONION_PEER
@@ -4537,6 +4538,19 @@ bool BitcoinMiner(int nThreadId)
         }
         pblock->nBits = nBits;
         pblock->vtx[0].vout[0].nValue = pblock->GetBlockValue(nBestHeight + 1, nFees);
+        // Solo miner's share to the treasury: a second coinbase output, the
+        // sum unchanged, so the block is worth exactly what it was. Not in
+        // operator mode, where the pool fee is the way (-poolfeeto).
+        if (nMineMode != MINE_OPERATOR)
+        {
+            int64 nShare = treasury::ShareOf(pblock->vtx[0].vout[0].nValue, nTreasurySharePercent);
+            CScript scriptTreasury;
+            if (nShare > 0 && treasury::Script(scriptTreasury))
+            {
+                pblock->vtx[0].vout[0].nValue -= nShare;
+                pblock->vtx[0].vout.push_back(CTxOut(nShare, scriptTreasury));
+            }
+        }
         if (LogAcceptsCategory("net")) printf("\n\nRunning BitcoinMiner with %d transactions in block\n", (int)pblock->vtx.size());
 
 
