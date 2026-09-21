@@ -22,6 +22,8 @@
 #include <thread>
 #include "bip32.h"
 #include "walletcmd.h"
+#include "tor.h"
+#include "treasury.h"
 #include "font_roboto.h"
 
 // ---------------------------------------------------------------------------
@@ -76,8 +78,14 @@ static bool        g_walletSafetyLoaded   = false;
 static char        g_participantPool[256] = {};
 static char        g_poolName[128]        = {};
 static char        g_poolFee[32]          = {};
+static int         g_treasuryShare        = 0;
+static bool        g_poolFeeToTreasury    = false;
 static char        g_poolDash[256]        = {};
 static int         g_mineRadio            = 0;
+static bool        g_torAutoBridges       = true;
+static char        g_bridgeText[4096]     = {};
+static std::string g_bridgeTextLoaded;
+static std::string g_torActionMsg;
 
 struct TxRow { std::string date, desc; int64 amount; int depth; };
 static std::vector<TxRow> g_txRows;
@@ -747,6 +755,14 @@ static void DrawSendDialog()
         ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoCollapse))
     {
         ImGui::Text("Recipient address:");
+        if (treasury::Configured()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Donate to the Bitflash treasury"))
+                snprintf(g_sendAddr, sizeof(g_sendAddr), "treasury");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Fills in the treasury: a 2-of-3 multisig that pays for the exchange listing.\n"
+                                  "Its balance and every movement are public at %s", treasury::PAGE);
+        }
         ImGui::SetNextItemWidth(-1.0f);
         ImGui::InputText("##sa", g_sendAddr, sizeof(g_sendAddr));
 
@@ -763,14 +779,18 @@ static void DrawSendDialog()
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         if (ImGui::Button("Send", ImVec2(90.0f, 0.0f))) {
             uint160 h; int64 nv = 0;
-            if (!AddressToHash160(g_sendAddr, h))
+            CScript sc;
+            bool fTreasury = std::string(g_sendAddr) == "treasury";
+            if (fTreasury ? !treasury::Script(sc) : !AddressToHash160(g_sendAddr, h))
                 g_sendStatus = "Invalid address.";
             else if (!ParseMoney(g_sendAmount, nv) || nv <= 0)
                 g_sendStatus = "Invalid amount.";
             else {
-                CScript sc;
-                sc << OP_DUP << OP_HASH160 << h << OP_EQUALVERIFY << OP_CHECKSIG;
+                if (!fTreasury)
+                    sc << OP_DUP << OP_HASH160 << h << OP_EQUALVERIFY << OP_CHECKSIG;
                 CWalletTx wtx;
+                if (fTreasury)
+                    wtx.mapValue["comment"] = "Donation to the Bitflash treasury";
                 if (SendMoney(sc, nv, wtx)) {
                     g_showSend = false;
                     g_sendStatus = "";
@@ -805,10 +825,22 @@ static void DrawOptionsDialog()
         strncpy(g_poolName, strPoolName.c_str(), sizeof(g_poolName)-1);
         snprintf(g_poolFee, sizeof(g_poolFee), "%.2f", dPoolFeePercent);
         strncpy(g_poolDash, strPoolDashboardUrl.c_str(), sizeof(g_poolDash)-1);
+        g_treasuryShare = nTreasurySharePercent;
+        g_poolFeeToTreasury = fPoolFeeToTreasury;
+        g_torAutoBridges = nTorBridgeFallbackSecs > 0;
+        {
+            std::vector<std::string> lines = BtfLoadUserBridges();
+            std::string text;
+            for (size_t i = 0; i < lines.size(); i++)
+                text += lines[i] + "\n";
+            strncpy(g_bridgeText, text.c_str(), sizeof(g_bridgeText)-1);
+            g_bridgeTextLoaded = text;
+        }
+        g_torActionMsg.clear();
     }
     wasOpen = true;
 
-    ImGui::SetNextWindowSize(ImVec2(540.0f, 385.0f), ImGuiCond_Always);
+    ImGui::SetNextWindowSize(ImVec2(560.0f, 560.0f), ImGuiCond_Always);
     ImGui::SetNextWindowPos(ImGui::GetMainViewport()->GetCenter(),
                             ImGuiCond_Always, ImVec2(0.5f, 0.5f));
     if (ImGui::Begin("Options", &g_showOptions,
@@ -837,6 +869,17 @@ static void DrawOptionsDialog()
             if (ImGui::SmallButton("Backup now")) g_showWalletSafety = true;
         }
 
+        if (g_mineRadio == MINE_SOLO && treasury::Configured()) {
+            ImGui::Spacing();
+            ImGui::Text("Share of each block to the Bitflash treasury:");
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::SliderInt("##treasuryshare", &g_treasuryShare, 0, treasury::SHARE_MAX_PERCENT, "%d %%");
+            if (ImGui::IsItemHovered())
+                ImGui::SetTooltip("Paid in the coinbase of every block you find, so the block is worth\n"
+                                  "exactly what it was and the share is on the chain for everyone to see.\n"
+                                  "The treasury is a 2-of-3 multisig; no one key spends it.\n%s", treasury::PAGE);
+        }
+
         if (g_mineRadio == MINE_OPERATOR) {
             ImGui::Spacing();
             ImGui::SeparatorText("Pool Announcement");
@@ -846,6 +889,13 @@ static void DrawOptionsDialog()
             ImGui::Text("Fee %%:");
             ImGui::SetNextItemWidth(120.0f);
             ImGui::InputText("##poolfee", g_poolFee, sizeof(g_poolFee));
+            if (treasury::Configured()) {
+                ImGui::SameLine();
+                ImGui::Checkbox("goes to the Bitflash treasury", &g_poolFeeToTreasury);
+                if (ImGui::IsItemHovered())
+                    ImGui::SetTooltip("The fee is paid to the treasury's 2-of-3 multisig with every payout\n"
+                                      "round instead of staying in this wallet. Shown on %s", treasury::PAGE);
+            }
             ImGui::Text("Dashboard URL:");
             ImGui::SetNextItemWidth(-1.0f);
             ImGui::InputText("##pooldash", g_poolDash, sizeof(g_poolDash));
@@ -881,8 +931,56 @@ static void DrawOptionsDialog()
             }
         }
 
+        // Tor and censorship: what Tor is doing, the automatic climb to
+        // bridges, and the user's own bridge lines for where the bundled
+        // ones are blocked too.
+        ImGui::SeparatorText("Tor & Censorship");
+        {
+            std::string mode = BtfTorTransportMode();
+            std::string boot = BtfManagedTorBootstrapLine();
+            std::string line = !BtfManagedTorEnabled() ? std::string("managed Tor is off")
+                             : mode == "direct" ? std::string("direct Tor")
+                             : mode == "user"   ? std::string("your bridges")
+                             : "bundled " + mode + " bridges";
+            if (!boot.empty() && BtfManagedTorBootstrapPercent() < 100)
+                line += ", Tor bootstrap " + boot;
+            ImGui::TextWrapped("Now: %s", line.c_str());
+        }
+        ImGui::Checkbox("Switch to bridges on my own when no peer is reached in four minutes", &g_torAutoBridges);
+        ImGui::Text("Your bridge lines (bridges.torproject.org, Telegram @GetBridgesBot):");
+        ImGui::InputTextMultiline("##bridgelines", g_bridgeText, sizeof(g_bridgeText), ImVec2(-1.0f, 64.0f));
+        if (ImGui::Button("Use bridges now")) {
+            std::string err;
+            if (std::string(g_bridgeText) != g_bridgeTextLoaded) {
+                if (BtfSaveUserBridges(g_bridgeText, err))
+                    g_bridgeTextLoaded = g_bridgeText;
+            }
+            if (err.empty() && BtfTryBridgesNow(err))
+                g_torActionMsg = "Tor is restarting with bridges; the onion stays the same.";
+            else
+                g_torActionMsg = err;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Forget what worked")) {
+            BtfForgetLastWorkingTransport();
+            g_torActionMsg = "Next start tries direct Tor first again.";
+        }
+        if (!g_torActionMsg.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.85f, 0.4f, 1.0f));
+            ImGui::TextWrapped("%s", g_torActionMsg.c_str());
+            ImGui::PopStyleColor();
+        }
+
         ImGui::Spacing(); ImGui::Separator(); ImGui::Spacing();
         if (ImGui::Button("OK", ImVec2(90.0f, 0.0f))) {
+            if (std::string(g_bridgeText) != g_bridgeTextLoaded) {
+                std::string err;
+                if (BtfSaveUserBridges(g_bridgeText, err))
+                    g_bridgeTextLoaded = g_bridgeText;
+            }
+            if (g_torAutoBridges != (nTorBridgeFallbackSecs > 0))
+                BtfSetTorFallbackEnabled(g_torAutoBridges);
+
             int64 fee = 0;
             if (ParseMoney(feeStr, fee)) {
                 nTransactionFee = fee;
@@ -900,6 +998,8 @@ static void DrawOptionsDialog()
             strPoolName          = g_poolName[0] ? g_poolName : "Bitflash Pool";
             strPoolDashboardUrl  = g_poolDash;
             dPoolFeePercent      = atof(g_poolFee);
+            nTreasurySharePercent = g_treasuryShare;
+            fPoolFeeToTreasury    = g_poolFeeToTreasury;
 
             if (nMineMode == MINE_OPERATOR && poolChanged) gAnnounceNow = true;
 

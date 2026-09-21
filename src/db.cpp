@@ -895,6 +895,14 @@ public:
             fWalletEncrypted = true;
             fWalletLocked = true;
         }
+        else if (strType == "cscript")
+        {
+            uint160 hash;
+            ssKey >> hash;
+            CScript script;
+            ssValue >> script;
+            mapScripts[hash] = script;
+        }
         else if (strType == "ckey")
         {
             vector<unsigned char> vchPubKey;
@@ -1216,6 +1224,14 @@ bool CWalletDB::LoadWallet(vector<unsigned char>& vchDefaultKeyRet)
                 nWalletMasterKeyMaxID = max(nWalletMasterKeyMaxID, nID);
                 fWalletEncrypted = true;
                 fWalletLocked = true;
+            }
+            else if (strType == "cscript")
+            {
+                uint160 hash;
+                ssKey >> hash;
+                CScript script;
+                ssValue >> script;
+                mapScripts[hash] = script;
             }
             else if (strType == "ckey")
             {

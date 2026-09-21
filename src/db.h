@@ -507,6 +507,14 @@ public:
         return WriteWalletRecord(make_pair(string("key"), vchPubKey), vchPrivKey, false);
     }
 
+    // A redeem script, by its Hash160. Not secret: it is what gets published
+    // when the output is spent. Kept with the wallet because without it a
+    // pay-to-script-hash output of ours is unrecognizable and unspendable.
+    bool WriteCScript(const uint160& hash, const CScript& redeemScript)
+    {
+        return WriteWalletRecord(make_pair(string("cscript"), hash), redeemScript);
+    }
+
     bool ReadDefaultKey(vector<unsigned char>& vchPubKey)
     {
         vchPubKey.clear();

@@ -47,6 +47,17 @@ unsigned int RulesV2Time()
     return IsTestNet() ? RULES_V2_TIME_TESTNET : RULES_V2_TIME_MAINNET;
 }
 
+unsigned int RulesV3Time()
+{
+    return IsTestNet() ? RULES_V3_TIME_TESTNET : RULES_V3_TIME_MAINNET;
+}
+
+bool RulesV3Active(unsigned int nBlockTime)
+{
+    unsigned int t = RulesV3Time();
+    return t != 0 && nBlockTime >= t;
+}
+
 bool RulesV2Active(unsigned int nBlockTime)
 {
     return nBlockTime >= RulesV2Time();

@@ -292,7 +292,17 @@ void GetPoolOperatorStats(int& authorizedMiners, int& blocksFound, uint64& round
 void GetPoolWorkerStats(std::vector<PoolWorkerStatView>& out);
 void GetPendingPayouts(std::vector<PendingPayoutView>& out);
 bool ProcessMessages(CNode* pfrom);
-bool ProcessBlock(CNode* pfrom, CBlock* pblock);
+// pnDoS, when given, receives the misbehavior score a failure is worth: 0 for
+// a block that is merely useless (old, orphan, early), up to 100 for one that
+// no honest node could have sent (bad proof of work, bad merkle root).
+bool ProcessBlock(CNode* pfrom, CBlock* pblock, int* pnDoS=NULL);
+bool SelectCoins(int64 nTargetValue, std::set<CWalletTx*>& setCoinsRet);
+bool AddToWalletIfMine(const CTransaction& tx, const CBlock* pblock);
+// True while this node is catching up: peers say the chain is well past us.
+// A node in that state neither mines (its template would build on a stale
+// tip -- the Debian node mined a 323-block fork that way) nor announces the
+// blocks it is replaying to everyone else.
+bool IsInitialBlockDownload();
 unsigned int GetNextWorkRequired(const CBlockIndex* pindexLast);
 extern CCriticalSection cs_mapTransactions;
 bool ProcessMessage(CNode* pfrom, string strCommand, CDataStream& vRecv);
@@ -737,9 +747,12 @@ public:
             return false;
         foreach(const CTxIn& txin, vin)
         {
-            if (txin.scriptSig.size() > 200 || !txin.scriptSig.IsPushOnly())
+            // 500: three 73-byte signatures with the multisig dummy and the
+            // pushes fit; a 200-byte cap fit one signature and one key.
+            if (txin.scriptSig.size() > 500 || !txin.scriptSig.IsPushOnly())
                 return false;
         }
+        int nNullData = 0;
         foreach(const CTxOut& txout, vout)
         {
             const CScript& s = txout.scriptPubKey;
@@ -747,8 +760,27 @@ public:
                        && s[23] == OP_EQUALVERIFY && s[24] == OP_CHECKSIG;
             bool fP2PK  = (s.size() == 35 || s.size() == 67) && s[0] == s.size() - 2
                        && s[s.size() - 1] == OP_CHECKSIG;
-            if (!fP2PKH && !fP2PK)
-                return false;
+            if (fP2PKH || fP2PK)
+                continue;
+            // One OP_RETURN output per transaction, up to 80 bytes of data:
+            // the burn. Unspendable since 0.1.0 (OP_RETURN fails the
+            // script), relayed from 1.2.28. One, so a transaction cannot be
+            // used as a bulletin board; 80 bytes holds a hash and a tag.
+            if (s.IsNullData())
+            {
+                if (++nNullData > 1 || s.size() > MAX_OP_RETURN_RELAY + 3)
+                    return false;
+                continue;
+            }
+            // Bare m-of-n multisig, n <= 3: valid since genesis, relayed from
+            // 1.2.28. Pay-to-script-hash is deliberately NOT here until the
+            // rules v3 switch makes it something other than anyone-can-spend.
+            txnouttype whichType;
+            vector<vector<unsigned char> > vSolutions;
+            if (SolverTyped(s, whichType, vSolutions) && whichType == TX_MULTISIG &&
+                vSolutions.size() - 2 <= 3)
+                continue;
+            return false;
         }
         return true;
     }
@@ -1299,6 +1331,23 @@ public:
             return error("CBlock::WriteToDisk() : ftell failed");
         fileout << *this;
 
+        // The index entry written next (a database with its own sync) will
+        // point at these bytes. Left in the stdio buffer and the page cache,
+        // they are what a hard reset loses first, and the node then fails to
+        // start with "Cannot read the block index: end of file" -- three
+        // nodes on the 202 did, 2026-09-17. Flush always; sync to the
+        // platter unless replaying history, where every 500th block will do
+        // (Bitcoin 0.3.x did the same).
+        fflush(fileout);
+        if (!IsInitialBlockDownload() || (nBestHeight + 1) % 500 == 0)
+        {
+#ifdef _WIN32
+            FlushFileBuffers((HANDLE)_get_osfhandle(_fileno(fileout)));
+#else
+            fsync(fileno(fileout));
+#endif
+        }
+
         return true;
     }
 
@@ -1355,8 +1404,8 @@ public:
     bool ConnectBlock(CTxDB& txdb, CBlockIndex* pindex);
     bool ReadFromDisk(const CBlockIndex* blockindex, bool fReadTransactions);
     bool AddToBlockIndex(unsigned int nFile, unsigned int nBlockPos);
-    bool CheckBlock() const;
-    bool AcceptBlock();
+    bool CheckBlock(int* pnDoS=NULL) const;
+    bool AcceptBlock(int* pnDoS=NULL);
 };
 
 
@@ -1682,4 +1731,9 @@ extern CCriticalSection cs_mapWallet;
 extern map<vector<unsigned char>, CPrivKey> mapKeys;
 extern map<uint160, vector<unsigned char> > mapPubKeys;
 extern CCriticalSection cs_mapKeys;
+// Redeem scripts this wallet knows, by Hash160: what a pay-to-script-hash
+// output of ours needs presented to be spent. Stored as "cscript" records.
+extern map<uint160, CScript> mapScripts;
+bool AddCScript(const CScript& redeemScript);
+bool HaveCScript(const uint160& hash);
 extern CKey keyUser;

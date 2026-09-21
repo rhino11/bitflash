@@ -255,6 +255,29 @@ inline int roundint(double d)
     return (int)(d > 0 ? d + 0.5 : d - 0.5);
 }
 
+inline bool IsHex(const string& str)
+{
+    if (str.empty() || (str.size() % 2) != 0)
+        return false;
+    for (size_t i = 0; i < str.size(); i++)
+        if (!isxdigit((unsigned char)str[i]))
+            return false;
+    return true;
+}
+
+// Bytes of a hex string; empty on anything that is not one (check IsHex first
+// when the difference matters).
+inline vector<unsigned char> ParseHex(const string& str)
+{
+    vector<unsigned char> vch;
+    if (!IsHex(str))
+        return vch;
+    vch.reserve(str.size() / 2);
+    for (size_t i = 0; i < str.size(); i += 2)
+        vch.push_back((unsigned char)strtoul(str.substr(i, 2).c_str(), NULL, 16));
+    return vch;
+}
+
 template<typename T>
 string HexStr(const T itbegin, const T itend, bool fSpaces=true)
 {

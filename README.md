@@ -439,7 +439,14 @@ Bridges are for networks that block Tor itself: `-torbridges` uses the built-in
 Snowflake set, `-torbridge=LINE` adds an obfs4 or snowflake bridge of your own.
 If you ask for bridges and the pluggable-transport binary is missing, the node
 refuses to start rather than quietly reaching Tor directly — that fallback would
-be the exact thing you were avoiding.
+be the exact thing you were avoiding. With no bridges asked for, a managed Tor
+that reaches no peer in four minutes climbs a ladder on its own -- Snowflake,
+obfs4, webtunnel, meek, from Tor Browser's bundled list -- and remembers what
+worked (`-notorfallback` turns that off; `bridges.txt` in the data directory,
+or *Options* in the app, takes bridges of your own). Where the download sites
+are blocked too, the releases are served over Tor at
+`http://rqzruhh4sm2s3fl6b4mpselkqsaaxebnyptpqhdpt236g57lof7j7sid.onion/`; see
+[docs/censored-networks.md](docs/censored-networks.md).
 
 The desktop app starts a managed Tor automatically when no other Tor option is
 set, so onion transport works out of the box; `-nomanagedtor` turns that off.
@@ -601,6 +608,7 @@ windows-tor` to require the extra signature check.
 | P2P port | 8433 (testnet 18433) |
 | Addressing | `.btf` over Tor onion services — see the caveats above |
 | Premine | None |
+| Treasury | A 2-of-3 multisig on the chain that pays for the first exchange listing; opt-in only (`donate`, `-treasuryshare`, `-poolfeeto=treasury`); balance and every movement at [bitflash.network/treasury](https://bitflash.network/treasury) — see [docs/treasury.md](docs/treasury.md) |
 | Pool server | Built-in — second port on the node's own onion |
 | Wallet recovery | Twelve-word phrase (BIP39 + BIP32 + BIP44, coin type 4346950), plus file backup |
 | Wallet storage | SQLite `wallet.sqlite` by default, or Berkeley DB `wallet.dat` |

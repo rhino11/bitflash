@@ -19,7 +19,13 @@ class CScript;
 class CDataStream;
 class CAutoFile;
 
-static const int VERSION = 101;
+// Protocol version. 101 from the first release to 1.2.27; 102 adds the
+// 4-byte payload checksum to the message header, the way Bitcoin 0.2.10 did.
+// A node speaks 101 to a peer until that peer's version message says it can
+// do better, so the two coexist on one network.
+static const int VERSION = 102;
+static const int PROTO_CHECKSUM_VERSION = 102;
+static const int PROTO_NO_CHECKSUM_VERSION = 101;
 static const unsigned int MAX_SIZE = 0x02000000;
 
 
